@@ -1,0 +1,14 @@
+# gitignore 
+
+
+
+
+# test_dataset
+test_dataset/
+
+
+# Post-processing
+utils/post_processing/
+
+# vertual env
+venv/
