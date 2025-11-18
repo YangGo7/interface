@@ -35,7 +35,7 @@ class Config:
     SUPPORTED_MODELS = {
         "yolo11_mask.pt": {
             "path": "yolo11_mask.pt",
-            "description": "YOLOv8 Nano Segmentation (가장 빠름)",
+            "description": "YOLOv8 Nano Segmentation (데이터 불균형)",
             "size": "small"
         },
         "yolo11l-seg": {
@@ -43,8 +43,8 @@ class Config:
             "description": "yolo11l-seg.pt",
             "size": "small"
         },
-        "yolov8m-seg": {
-            "path": "yolov8m-seg.pt",
+        "yolov8l-seg": {
+            "path": "yolov8l-seg.pt",
             "description": "YOLOv8 Medium Segmentation (중간)",
             "size": "medium"
         },
@@ -65,9 +65,22 @@ class Config:
     ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp', 'webp'}
 
     # 추론 설정
-    CONFIDENCE_THRESHOLD = 0.25  # 최소 신뢰도 (이보다 낮으면 무시)
-    IOU_THRESHOLD = 0.45  # Non-Maximum Suppression 임계값
+    CONFIDENCE_THRESHOLD = 0.5  # 최소 신뢰도 (이보다 낮으면 무시)
+    IOU_THRESHOLD = 0.8  # Non-Maximum Suppression 임계값
     MAX_DETECTIONS = 100  # 최대 탐지 객체 수
+
+    # FDI (Fédération Dentaire Internationale) 치아 번호 매핑
+    # YOLO class_id (0-31) -> FDI 번호 (11-48)
+    CLASS_ID_TO_FDI = {
+        # 우측 상악 (11-18)
+        0: 11, 1: 12, 2: 13, 3: 14, 4: 15, 5: 16, 6: 17, 7: 18,
+        # 좌측 상악 (21-28)
+        8: 21, 9: 22, 10: 23, 11: 24, 12: 25, 13: 26, 14: 27, 15: 28,
+        # 좌측 하악 (31-38)
+        16: 31, 17: 32, 18: 33, 19: 34, 20: 35, 21: 36, 22: 37, 23: 38,
+        # 우측 하악 (41-48)
+        24: 41, 25: 42, 26: 43, 27: 44, 28: 45, 29: 46, 30: 47, 31: 48
+    }
 
 
 class DevelopmentConfig(Config):

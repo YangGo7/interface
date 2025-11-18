@@ -41,6 +41,10 @@ class Detection(BaseModel):
     bounding_box: BoundingBox = Field(..., description="바운딩 박스 좌표")
     segmentation_mask: Optional[SegmentationMask] = Field(None, description="세그멘테이션 마스크 (있을 경우)")
     color: str = Field(..., description="시각화용 색상 (hex 코드, 예: '#FF5733')")
+    original_color: Optional[str] = Field(None, description="모델이 할당한 원본 색상 (GT 비교 전)")
+    gt_color: Optional[str] = Field(None, description="GT 비교 결과 색상 (GT 있을 때만)")
+    gt_iou: Optional[float] = Field(None, description="GT와의 IoU 값")
+    gt_label_match: Optional[bool] = Field(None, description="GT 라벨 일치 여부")
 
 
 class ModelMetrics(BaseModel):
