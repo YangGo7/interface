@@ -51,7 +51,7 @@ class YOLODetector(BaseDetector):
             print(f"❌ Failed to load model: {e}")
             raise
 
-    def predict(self, image_path: str, iou_threshold: float = 0.45, **kwargs) -> DetectionResponse:
+    def predict(self, image_path: str, iou_threshold: float = 0.45, classes: Optional[List[int]]= None, imgsz = 1280 , retina_masks : bool = True,**kwargs) -> DetectionResponse:
         """
         이미지에서 객체 탐지 수행
 
@@ -85,6 +85,8 @@ class YOLODetector(BaseDetector):
             image_path,
             conf=self.confidence_threshold,
             iou=iou_threshold,
+            imgsz = imgsz,
+            retina_masks = retina_masks , 
             verbose=False  # 로그 출력 억제
         )
         inference_time = (time.time() - inference_start) * 1000
@@ -93,8 +95,8 @@ class YOLODetector(BaseDetector):
         postprocess_start = time.time()
         detections = self._parse_results(results[0], img_width, img_height)
         postprocess_time = (time.time() - postprocess_start) * 1000
-
         total_time = (time.time() - total_start) * 1000
+
 
         # ==================== 응답 생성 ====================
         response = DetectionResponse(
