@@ -48,12 +48,12 @@ class Config:
             "description": "YOLOv8 Medium Segmentation (중간)",
             "size": "medium"
         },
-        "yolo11n-seg": {
+        "수정중": {
             "path": "yolo11n-seg.pt",
             "description": "YOLO11 Nano Segmentation (최신)",
             "size": "small"
         },
-        "yolo11s-seg": {
+        "fix": {
             "path": "yolo11s-seg.pt",
             "description": "YOLO11 Small Segmentation (최신)",
             "size": "small"
