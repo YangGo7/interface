@@ -18,7 +18,7 @@ YOLOv11 기반의 치아 탐지 및 분석 시스템입니다. Flask API를 통�
 * **Frontend:** HTML, CSS, JavaScript (Vanilla) 추후  react 이동
 
 디렉토리 구조
-
+``` bash
 interface/                  # 프로젝트 루트 (Root)
 ├── backend/                # 백엔드 (Flask 서버)
 │   ├── app.py              # [메인] Flask 실행 파일 (전체 통합 코드)
@@ -41,7 +41,7 @@ interface/                  # 프로젝트 루트 (Root)
     ├── index.html          # 메인 HTML 페이지
     ├── style.css           # 스타일 시트
     └── script.js           # 프론트엔드 로직
-
+```
 
 # 실행 방법 
 
