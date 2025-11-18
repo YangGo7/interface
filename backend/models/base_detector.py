@@ -24,7 +24,7 @@ class BaseDetector(ABC):
             model_path: 모델 가중치 파일 경로
             confidence_threshold: 최소 신뢰도 (이보다 낮으면 무시)
         """
-        self.model_path = model_path
+        self.model_path = "weights/yolo11_mask.pt"
         self.confidence_threshold = confidence_threshold
         self.model = None
 

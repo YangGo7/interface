@@ -30,14 +30,14 @@ class Config:
 
     # 지원하는 모델 목록
     SUPPORTED_MODELS = {
-        "yolov8n-seg": {
-            "path": "yolov8n-seg.pt",
+        "yolo11_mask.pt": {
+            "path": "yolo11_mask.pt",
             "description": "YOLOv8 Nano Segmentation (가장 빠름)",
             "size": "small"
         },
-        "yolov8s-seg": {
-            "path": "yolov8s-seg.pt",
-            "description": "YOLOv8 Small Segmentation (빠름)",
+        "yolo11l-seg": {
+            "path": "yolo11l-seg.pt",
+            "description": "yolo11l-seg.pt",
             "size": "small"
         },
         "yolov8m-seg": {

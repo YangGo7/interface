@@ -8,7 +8,9 @@ test_dataset/
 
 
 # Post-processing
-utils/post_processing/
+backend/utils/post_processing/
 
 # vertual env
 venv/
+
+.claude/

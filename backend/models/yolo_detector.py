@@ -1,6 +1,6 @@
 """
 YOLO Detector Implementation
-YOLOv8/YOLO11 기반 객체 탐지 구현
+YOLOv8/YOLO11 기반 객체 탐지 구현 (Polygon Mask 지원 추가)
 """
 
 import time
@@ -182,7 +182,8 @@ class YOLODetector(BaseDetector):
 
     def _extract_mask(self, mask_tensor, img_width: int, img_height: int) -> Optional[SegmentationMask]:
         """
-        YOLO mask tensor를 RLE 형식으로 변환
+        YOLO mask tensor를 Polygon(좌표 리스트) 형식으로 변환
+        (프론트엔드에서 쉽게 그리기 위함)
 
         Args:
             mask_tensor: YOLO mask (torch.Tensor)
@@ -190,33 +191,39 @@ class YOLODetector(BaseDetector):
             img_height: 이미지 높이
 
         Returns:
-            SegmentationMask: RLE 인코딩된 마스크
+            SegmentationMask: Polygon 형식의 마스크
         """
         try:
             # Tensor -> NumPy 변환
             mask_np = mask_tensor.cpu().numpy()
 
-            # 이미지 크기로 리사이즈 (YOLO는 작은 크기로 출력)
+            # 1. 원본 이미지 크기로 리사이즈
             mask_resized = cv2.resize(mask_np, (img_width, img_height), interpolation=cv2.INTER_NEAREST)
 
-            # Binary mask (0 또는 1)
+            # 2. 이진화 (0.5 기준으로 0과 1로 나눔)
             mask_binary = (mask_resized > 0.5).astype(np.uint8)
 
-            # RLE 인코딩 (pycocotools 사용)
-            # 주의: pycocotools는 Fortran 순서 필요
-            from pycocotools import mask as mask_utils
-            mask_fortran = np.asfortranarray(mask_binary)
-            rle = mask_utils.encode(mask_fortran)
+            # 3. 외곽선(Contour) 추출 -> 다각형 좌표 구하기
+            contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            # RLE의 'counts'는 bytes 타입 -> str로 변환 (JSON 직렬화 위해)
-            if isinstance(rle['counts'], bytes):
-                rle['counts'] = rle['counts'].decode('utf-8')
+            if contours:
+                # 가장 큰 외곽선 선택 (작은 노이즈 제거)
+                c = max(contours, key=cv2.contourArea)
 
-            return SegmentationMask(
-                format="rle",
-                size=[img_height, img_width],
-                counts=rle['counts']
-            )
+                # 면적이 너무 작으면 무시
+                if cv2.contourArea(c) < 1.0:
+                    return None
+
+                # [[x,y], [x,y]...] 형태의 리스트로 변환 (정수 좌표)
+                polygon = c.reshape(-1, 2).astype(int).tolist()
+
+                return SegmentationMask(
+                    format="polygon",  # 형식을 'polygon'으로 변경
+                    size=[img_height, img_width],
+                    counts=polygon     # RLE 문자열 대신 좌표 리스트 저장
+                )
+
+            return None
 
         except Exception as e:
             print(f"⚠️ Failed to encode mask: {e}")
@@ -235,9 +242,9 @@ class YOLODetector(BaseDetector):
         if class_id not in self.color_map:
             # 시드 고정으로 같은 클래스는 항상 같은 색상
             random.seed(class_id)
-            r = random.randint(0, 255)
-            g = random.randint(0, 255)
-            b = random.randint(0, 255)
+            r = random.randint(50, 255)  # 너무 어두운 색 제외
+            g = random.randint(50, 255)
+            b = random.randint(50, 255)
             self.color_map[class_id] = f"#{r:02x}{g:02x}{b:02x}"
 
         return self.color_map[class_id]
