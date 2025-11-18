@@ -18,3 +18,5 @@ venv/
 
 #temp etc save
 temp/
+
+**/__pycache__/
