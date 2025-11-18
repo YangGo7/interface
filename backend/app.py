@@ -6,8 +6,6 @@ YOLO 기반 오브젝트 디텍션 API 서버 (통합 후처리 및 리포트 �
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
-import shutil
-import tempfile
 from config import config
 
 from models.yolo_detector import YOLODetector
@@ -110,13 +108,29 @@ def detect_objects():
         if not model_info:
             return jsonify({"success": False, "message": f"지원하지 않는 모델입니다: {model_name}", "error_type": "InvalidModel"}), 400
 
-        # C. 임시 파일 저장
-        temp_dir = os.path.join(str(app.config['BASE_DIR']), 'temp')
-        os.makedirs(temp_dir, exist_ok=True)
+        # C. 케이스별 폴더 생성 및 임시 파일 저장
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        case_folder_name = f"case_{timestamp}"
 
-        with tempfile.NamedTemporaryFile(dir=temp_dir, delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp_file:
-            file.save(tmp_file.name)
-            temp_path = tmp_file.name
+        base_temp_dir = os.path.join(str(app.config['BASE_DIR']), 'temp')
+        case_dir = os.path.join(base_temp_dir, case_folder_name)
+        os.makedirs(case_dir, exist_ok=True)
+
+        # 이미지 파일 저장
+        original_ext = os.path.splitext(file.filename)[1]
+        temp_path = os.path.join(case_dir, f"original{original_ext}")
+        file.save(temp_path)
+
+        # GT 파일 처리 (있으면)
+        gt_file = request.files.get('gt_file')
+        gt_data = None
+        if gt_file and gt_file.filename != '':
+            gt_path = os.path.join(case_dir, 'gt.txt')
+            gt_file.save(gt_path)
+            from utils.gt_comparison import parse_gt_file
+            gt_data = parse_gt_file(gt_path)
+            print(f"📋 GT file loaded: {len(gt_data)} objects")
 
         # D. 추론 실행 (Inference)
         from pathlib import Path
@@ -141,8 +155,63 @@ def detect_objects():
             retina_masks=True
         )
 
+        # GT 비교 수행 (GT 데이터가 있을 경우)
+        if gt_data and len(gt_data) > 0:
+            from utils.gt_comparison import find_best_gt_match, get_color_by_match_quality
+
+            # 이미지 크기 가져오기
+            img_width = result.image_info.width
+            img_height = result.image_info.height
+
+            print(f"🔍 Performing GT comparison for {len(result.detections)} detections...")
+
+            for detection in result.detections:
+                # 원본 색상 저장
+                detection.original_color = detection.color
+
+                # GT와 매칭
+                match_result = find_best_gt_match(detection, gt_data, img_width, img_height)
+
+                if match_result:
+                    # GT 정보 저장
+                    detection.gt_iou = match_result['iou']
+                    detection.gt_label_match = match_result['label_match']
+
+                    # GT 비교 색상 결정
+                    detection.gt_color = get_color_by_match_quality(match_result)
+
+                    # 기본 색상을 GT 색상으로 변경
+                    detection.color = detection.gt_color
+
+                    print(f"  ✓ Detection {detection.id} (pred: {detection.label}, gt: {match_result['gt_label']}): IoU={match_result['iou']:.2f}, Match={match_result['label_match']} → {detection.gt_color}")
+                else:
+                    # GT 매칭 없음
+                    detection.gt_color = detection.color
+                    print(f"  - Detection {detection.id} ({detection.label}): No GT match")
+
+            # GT 비교 메트릭 요약 출력
+            print("\n📊 GT Comparison Metrics Summary:")
+            tp = sum(1 for det in result.detections if hasattr(det, 'gt_label_match') and det.gt_label_match and hasattr(det, 'gt_iou') and det.gt_iou >= 0.5)
+            fp = len(result.detections) - tp
+            fn = len(gt_data) - tp
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+            mean_iou = sum(det.gt_iou for det in result.detections if hasattr(det, 'gt_iou')) / len(result.detections) if result.detections else 0.0
+
+            print(f"  - Precision: {precision*100:.2f}% (TP={tp}, FP={fp})")
+            print(f"  - Recall: {recall*100:.2f}% (FN={fn})")
+            print(f"  - F1-Score: {f1:.3f}")
+            print(f"  - Mean IoU: {mean_iou:.3f}")
+            print(f"  - mAP@0.5: {precision*100:.2f}%\n")
+
         # 기본 응답 데이터 구성
         response_data = result.model_dump()
+        response_data['has_gt'] = gt_data is not None and len(gt_data) > 0
+
+        # GT 데이터를 프론트엔드로 전송 (시각화용)
+        if gt_data:
+            response_data['gt_data'] = gt_data
 
         # ------------------------------------------------------
         # E. 후처리 파이프라인 (Post-Processing Pipeline)
@@ -156,29 +225,33 @@ def detect_objects():
             response_data['analysis'] = analysis_result
 
         # 2. [이미지 크롭] Object Cropping
-        # 크롭 이미지를 저장할 하위 폴더 생성
-        crop_dir = os.path.join(temp_dir, 'crops')
-        if os.path.exists(crop_dir):
-            shutil.rmtree(crop_dir) # 이전 결과 삭제 (선택사항)
+        # 크롭 이미지를 케이스 폴더 내 crops 하위 폴더에 저장
+        crop_dir = os.path.join(case_dir, 'crops')
+        os.makedirs(crop_dir, exist_ok=True)
 
         if len(result.detections) > 0:
             cropper = ObjectCropper(temp_path, result.detections)
             # 치근 확인을 위해 'box' 모드 권장 (배경 포함)
             crop_mode = request.form.get('crop_mode', 'box')
             cropped_files = cropper.run(crop_dir, mode=crop_mode)
+
+            # 크롭 파일 경로를 케이스 폴더 경로로 업데이트
+            for crop in cropped_files:
+                crop['path'] = f"/temp/{case_folder_name}/crops/{crop['filename']}"
+
             response_data['crops'] = cropped_files
 
         # 3. [HTML 리포트 생성] Report Generation
-        # 리포트 파일명 생성
-        report_filename = f"report_{os.path.splitext(os.path.basename(temp_path))[0]}.html"
-        report_dir = os.path.join(temp_dir, 'reports')
-        report_save_path = os.path.join(report_dir, report_filename)
+        # 리포트를 케이스 폴더에 직접 저장
+        report_filename = "report.html"
+        report_save_path = os.path.join(case_dir, report_filename)
 
-        # Reporter 인스턴스 생성 (이미지 경로 전달 필수)
+        # Reporter 인스턴스 생성 (이미지 경로 및 GT 데이터 전달)
         reporter = ReportGenerator(
             detections=result.detections,
             model_name=model_name,
-            image_path=temp_path
+            image_path=temp_path,
+            gt_data=gt_data  # GT 파일이 있으면 자동으로 메트릭 계산
         )
 
         # HTML 저장
@@ -191,7 +264,7 @@ def detect_objects():
         )
 
         # 응답에 리포트 URL 추가
-        response_data['report_url'] = f"/temp/reports/{report_filename}"
+        response_data['report_url'] = f"/temp/{case_folder_name}/{report_filename}"
 
         return jsonify(response_data), 200
 
@@ -206,15 +279,10 @@ def detect_objects():
         }), 500
 
     finally:
-        # F. 원본 임시 파일 삭제 여부 결정
-        # 주의: HTML 리포트 내 이미지는 Base64로 임베딩되므로 삭제해도 리포트는 보임.
-        # 하지만 크롭 기능 등에서 원본을 참조하는 경우가 끝났으므로 삭제 가능.
-        # 디버깅을 위해 주석 처리할 수 있습니다.
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
+        # F. 케이스 폴더 유지 (리포트, 크롭 이미지 접근을 위해)
+        # 케이스 폴더는 삭제하지 않음 - 사용자가 리포트와 크롭 이미지를 확인할 수 있도록
+        # 필요시 별도의 정리 스크립트로 오래된 케이스 폴더를 삭제할 수 있음
+        pass
 
 # ---------------------------------------------------------
 # 4. 유틸리티 및 에러 핸들러

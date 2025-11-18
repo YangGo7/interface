@@ -13,4 +13,8 @@ backend/utils/post_processing/
 # vertual env
 venv/
 
+# ai
 .claude/
+
+#temp etc save
+temp/

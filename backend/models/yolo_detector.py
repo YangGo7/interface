@@ -10,6 +10,7 @@ from pathlib import Path
 from ultralytics import YOLO
 from typing import List, Optional
 import random
+from config import Config
 
 from .base_detector import BaseDetector
 from .schemas import (
@@ -122,6 +123,7 @@ class YOLODetector(BaseDetector):
     def _parse_results(self, result, img_width: int, img_height: int) -> List[Detection]:
         """
         YOLO 결과를 Detection 객체 리스트로 변환
+        class_id (0-31)를 FDI 치아 번호 (11-48)로 자동 변환합니다.
 
         Args:
             result: YOLO results[0]
@@ -129,7 +131,7 @@ class YOLODetector(BaseDetector):
             img_height: 이미지 높이
 
         Returns:
-            List[Detection]: 탐지 결과 리스트
+            List[Detection]: 탐지 결과 리스트 (label은 FDI 형식)
         """
         detections = []
 
@@ -156,8 +158,9 @@ class YOLODetector(BaseDetector):
                 height=float(y2 - y1)
             )
 
-            # 클래스 이름 가져오기
-            label = result.names[cls_id]
+            # FDI 치아 번호로 변환 (class_id 0-31 -> FDI 11-48)
+            fdi_number = Config.CLASS_ID_TO_FDI.get(cls_id, cls_id)
+            label = str(fdi_number)
 
             # 색상 할당 (클래스별로 고정 색상)
             color = self._get_color_for_class(cls_id)

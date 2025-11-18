@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import base64
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from collections import Counter
 import datetime
 
@@ -13,21 +13,95 @@ class ReportGenerator:
     - 전체 및 클래스별 성능 지표 테이블 포함
     """
     
-    def __init__(self, detections: List[Any], model_name: str, image_path: str):
+    def __init__(self, detections: List[Any], model_name: str, image_path: str, gt_data: Optional[List[Dict[str, Any]]] = None):
         self.detections = detections
         self.model_name = model_name
         self.image_path = image_path
+        self.gt_data = gt_data
         self.timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # 이미지 로드 (시각화용)
         self.image = cv2.imread(image_path)
         if self.image is None:
             raise ValueError(f"Could not load image: {image_path}")
 
+        self.img_height, self.img_width = self.image.shape[:2]
+
     def _encode_image_to_base64(self, img) -> str:
         """OpenCV 이미지를 Base64 문자열로 변환 (HTML 임베딩용)"""
         _, buffer = cv2.imencode('.jpg', img)
         return base64.b64encode(buffer).decode('utf-8')
+
+    def calculate_metrics_with_gt(self) -> Dict[str, Any]:
+        """
+        GT 데이터가 있을 때 mAP, IoU, Precision, Recall 등을 계산합니다.
+
+        Returns:
+            Dict with metrics: mAP, mean_iou, precision, recall, f1_score, tp, fp, fn
+        """
+        if not self.gt_data or len(self.gt_data) == 0:
+            return None
+
+        from utils.gt_comparison import find_best_gt_match
+
+        # 매칭된 GT 추적 (중복 매칭 방지)
+        matched_gt_indices = set()
+
+        tp = 0  # True Positives
+        fp = 0  # False Positives
+        iou_list = []
+
+        # IoU 임계값 (일반적으로 0.5 사용)
+        iou_threshold = 0.5
+
+        # 각 detection에 대해 GT 매칭
+        for detection in self.detections:
+            match_result = find_best_gt_match(detection, self.gt_data, self.img_width, self.img_height)
+
+            if match_result and match_result['iou'] >= iou_threshold:
+                # IoU가 임계값 이상이면서 라벨이 일치하는 경우만 TP
+                if match_result['label_match']:
+                    tp += 1
+                    iou_list.append(match_result['iou'])
+
+                    # 매칭된 GT 인덱스 추적 (중복 방지)
+                    # GT 리스트에서 해당 GT의 인덱스 찾기
+                    for idx, gt in enumerate(self.gt_data):
+                        if gt['label'] == match_result['gt_label']:
+                            matched_gt_indices.add(idx)
+                            break
+                else:
+                    # IoU는 높지만 라벨이 틀림 -> FP
+                    fp += 1
+            else:
+                # IoU가 낮거나 매칭 없음 -> FP
+                fp += 1
+
+        # False Negatives: GT에는 있지만 detection 안됨
+        fn = len(self.gt_data) - len(matched_gt_indices)
+
+        # 메트릭 계산
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        mean_iou = sum(iou_list) / len(iou_list) if iou_list else 0.0
+
+        # mAP 계산 (simplified version - AP@0.5)
+        # 실제 mAP는 여러 IoU threshold에서 계산하지만, 여기서는 0.5에서만 계산
+        mAP = precision  # AP@0.5 = Precision at IoU threshold 0.5
+
+        return {
+            'mAP': mAP,
+            'mean_iou': mean_iou,
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1_score,
+            'tp': tp,
+            'fp': fp,
+            'fn': fn,
+            'total_detections': len(self.detections),
+            'total_gt': len(self.gt_data)
+        }
 
     def _draw_predictions(self) -> np.ndarray:
         """원본 이미지 위에 마스크와 박스를 그립니다."""
@@ -81,13 +155,34 @@ class ReportGenerator:
         # 평균 신뢰도 계산
         avg_conf = sum([d.confidence for d in self.detections]) / total_obj if total_obj > 0 else 0.0
 
-        # 외부 지표가 없으면 기본값 설정 (추론 단계에서는 정답이 없으므로 계산 불가함 명시)
-        if metrics is None:
+        # GT 데이터가 있으면 자동으로 메트릭 계산
+        if metrics is None and self.gt_data:
+            calculated_metrics = self.calculate_metrics_with_gt()
+            if calculated_metrics:
+                metrics = {
+                    "mAP": f"{calculated_metrics['mAP']*100:.2f}%",
+                    "IoU": f"{calculated_metrics['mean_iou']:.3f}",
+                    "Precision": f"{calculated_metrics['precision']*100:.2f}%",
+                    "Recall": f"{calculated_metrics['recall']*100:.2f}%",
+                    "F1-Score": f"{calculated_metrics['f1_score']:.3f}",
+                    "TP": calculated_metrics['tp'],
+                    "FP": calculated_metrics['fp'],
+                    "FN": calculated_metrics['fn']
+                }
+            else:
+                metrics = {
+                    "mAP": "N/A (No GT)",
+                    "IoU": "N/A (No GT)",
+                    "Precision": "N/A",
+                    "Recall": "N/A"
+                }
+        elif metrics is None:
+            # GT 없으면 기본값
             metrics = {
                 "mAP": "N/A (No GT)",
                 "IoU": "N/A (No GT)",
                 "Precision": "N/A",
-                "Accuracy": "N/A"
+                "Recall": "N/A"
             }
 
         # 3. HTML 생성
@@ -160,14 +255,44 @@ class ReportGenerator:
                             <td>Mean prediction probability</td>
                         </tr>
                         <tr>
-                            <td>mAP (Mean Average Precision)</td>
+                            <td>mAP@0.5 (Mean Average Precision)</td>
                             <td>{metrics.get('mAP')}</td>
-                            <td>Overall detection accuracy</td>
+                            <td>Overall detection accuracy at IoU=0.5</td>
                         </tr>
                         <tr>
                             <td>Mean IoU</td>
                             <td>{metrics.get('IoU')}</td>
-                            <td>Intersection over Union</td>
+                            <td>Average Intersection over Union</td>
+                        </tr>
+                        <tr>
+                            <td>Precision</td>
+                            <td>{metrics.get('Precision')}</td>
+                            <td>TP / (TP + FP)</td>
+                        </tr>
+                        <tr>
+                            <td>Recall</td>
+                            <td>{metrics.get('Recall')}</td>
+                            <td>TP / (TP + FN)</td>
+                        </tr>
+                        <tr>
+                            <td>F1-Score</td>
+                            <td>{metrics.get('F1-Score', 'N/A')}</td>
+                            <td>2 * (Precision * Recall) / (Precision + Recall)</td>
+                        </tr>
+                        <tr>
+                            <td>True Positives (TP)</td>
+                            <td>{metrics.get('TP', 'N/A')}</td>
+                            <td>Correct detections</td>
+                        </tr>
+                        <tr>
+                            <td>False Positives (FP)</td>
+                            <td>{metrics.get('FP', 'N/A')}</td>
+                            <td>Incorrect detections</td>
+                        </tr>
+                        <tr>
+                            <td>False Negatives (FN)</td>
+                            <td>{metrics.get('FN', 'N/A')}</td>
+                            <td>Missed GT objects</td>
                         </tr>
                     </table>
                 </div>
