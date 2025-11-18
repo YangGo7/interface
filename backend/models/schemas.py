@@ -21,12 +21,13 @@ class BoundingBox(BaseModel):
 
 class SegmentationMask(BaseModel):
     """
-    세그멘테이션 마스크 - RLE 형식
-    RLE = Run-Length Encoding (COCO format)
+    세그멘테이션 마스크 - RLE/Polygon 형식
+    - RLE: Run-Length Encoding (COCO format)
+    - Polygon: [[x,y], [x,y], ...] 좌표 리스트
     """
     format: str = Field(default="rle", description="마스크 형식: rle, polygon, base64")
     size: List[int] = Field(..., description="[height, width] 이미지 크기")
-    counts: Any = Field(..., description="RLE 인코딩된 데이터 (bytes or list)")
+    counts: Any = Field(..., description="RLE 문자열 or Polygon 좌표 리스트 [[x,y], ...]")
 
 
 class Detection(BaseModel):
