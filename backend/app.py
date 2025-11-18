@@ -1,22 +1,31 @@
 """
 Flask Application - Object Detection API
-YOLO 기반 오브젝트 디텍션 API 서버
+YOLO 기반 오브젝트 디텍션 API 서버 (통합 후처리 및 리포트 생성)
 """
 
-from flask import Flask, request, jsonify , send_from_directory
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
+import shutil
+import tempfile
 from config import config
 
-# Flask 앱 생성
-base_dir  = os.path.abspath(os.path.dirname(__file__))
-front_dir = os.path.join(base_dir , '../frontend')
-app = Flask(__name__ , static_folder=front_dir , static_url_path='')
-# 환경 설정 로드 (기본: development)
+from models.yolo_detector import YOLODetector
+from utils.post_processing import ObjectCropper, MissingToothFinder
+from utils.report import ReportGenerator
+
+# ---------------------------------------------------------
+# 1. 앱 초기화 및 설정
+# ---------------------------------------------------------
+app = Flask(__name__,
+            static_folder=os.path.join(os.path.abspath(os.path.dirname(__file__)), '../frontend'),
+            static_url_path='')
+
+# 환경 설정 로드
 env = os.environ.get('FLASK_ENV', 'development')
 app.config.from_object(config[env])
 
-# CORS 설정 (프론트엔드와 통신 가능하게)
+# CORS 설정
 CORS(app, resources={
     r"/api/*": {
         "origins": app.config['CORS_ORIGINS'],
@@ -25,42 +34,29 @@ CORS(app, resources={
     }
 })
 
-
-# ==================== 기본 라우트 ====================
+# ---------------------------------------------------------
+# 2. 기본 라우트
+# ---------------------------------------------------------
 
 @app.route("/")
 def index():
-    "front end return(index.html)"
-    return send_from_directory(app.static_folder , 'index.html')
+    """프론트엔드 메인 페이지 반환"""
+    return send_from_directory(app.static_folder, 'index.html')
 
-@app.route('/api/check_server', methods=['GET'])
-def check_server():
-    """
-    서버 상태 확인 (Health Check)
-    """
-    return jsonify({
-        "message": "Object Detection API is running",
-        "version": "1.0.0",
-        "status": "healthy"
-    })
-
+# 임시 파일 서빙 (크롭 이미지, 리포트 등)
+@app.route('/temp/<path:filename>')
+def serve_temp_files(filename):
+    temp_dir = os.path.join(str(app.config['BASE_DIR']), 'temp')
+    return send_from_directory(temp_dir, filename)
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    """
-    API 상태 확인
-    """
-    return jsonify({
-        "status": "ok",
-        "message": "API is working"
-    })
-
+    """API 상태 확인"""
+    return jsonify({"status": "ok", "message": "API is working"})
 
 @app.route('/api/models', methods=['GET'])
 def get_models():
-    """
-    사용 가능한 모델 목록 반환
-    """
+    """사용 가능한 모델 목록 반환"""
     models = []
     for model_name, model_info in app.config['SUPPORTED_MODELS'].items():
         models.append({
@@ -76,132 +72,171 @@ def get_models():
         "default_model": app.config['DEFAULT_MODEL']
     })
 
+# ---------------------------------------------------------
+# 3. 객체 탐지 API (핵심 로직)
+# ---------------------------------------------------------
 
 @app.route('/api/detect', methods=['POST'])
 def detect_objects():
     """
-    객체 탐지 API
-    이미지를 받아서 YOLO 모델로 객체를 탐지합니다.
+    이미지를 받아 객체를 탐지하고,
+    결손치 분석, 크롭, HTML 리포트를 생성하여 반환합니다.
     """
+    temp_path = None
+
     try:
-        # 1. 이미지 파일 확인
+        # A. 요청 검증
         if 'image' not in request.files:
-            return jsonify({
-                "success": False,
-                "message": "이미지 파일이 없습니다.",
-                "error_type": "NoImageFile"
-            }), 400
+            return jsonify({"success": False, "message": "이미지 파일이 없습니다.", "error_type": "NoImageFile"}), 400
 
         file = request.files['image']
         if file.filename == '':
-            return jsonify({
-                "success": False,
-                "message": "파일이 선택되지 않았습니다.",
-                "error_type": "EmptyFilename"
-            }), 400
+            return jsonify({"success": False, "message": "파일이 선택되지 않았습니다.", "error_type": "EmptyFilename"}), 400
 
-        # 2. 파일 확장자 확인
         if not allowed_file(file.filename):
-            return jsonify({
-                "success": False,
-                "message": f"지원하지 않는 파일 형식입니다. 허용 형식: {app.config['ALLOWED_EXTENSIONS']}",
-                "error_type": "InvalidFileFormat"
-            }), 400
+            return jsonify({"success": False, "message": f"지원하지 않는 파일 형식입니다.", "error_type": "InvalidFileFormat"}), 400
 
-        # 3. 모델 선택
+        # B. 모델 선택
         model_name = request.form.get('model', app.config['DEFAULT_MODEL'])
-
-        # 모델 경로 가져오기
-        model_info = None
-        for key, info in app.config['SUPPORTED_MODELS'].items():
-            if info['path'] == model_name or key == model_name:
-                model_info = info
-                break
+        model_info = app.config['SUPPORTED_MODELS'].get(model_name)
 
         if not model_info:
-            return jsonify({
-                "success": False,
-                "message": f"지원하지 않는 모델입니다: {model_name}",
-                "error_type": "InvalidModel"
-            }), 400
+            # 키로 못 찾으면 path로 한 번 더 검색
+            for key, info in app.config['SUPPORTED_MODELS'].items():
+                if info['path'] == model_name:
+                    model_info = info
+                    break
 
-        # 4. 임시 파일 저장
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp_file:
+        if not model_info:
+            return jsonify({"success": False, "message": f"지원하지 않는 모델입니다: {model_name}", "error_type": "InvalidModel"}), 400
+
+        # C. 임시 파일 저장
+        temp_dir = os.path.join(str(app.config['BASE_DIR']), 'temp')
+        os.makedirs(temp_dir, exist_ok=True)
+
+        with tempfile.NamedTemporaryFile(dir=temp_dir, delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp_file:
             file.save(tmp_file.name)
             temp_path = tmp_file.name
 
-        try:
-            # 5. YOLODetector로 추론
-            from models.yolo_detector import YOLODetector
+        # D. 추론 실행 (Inference)
+        from pathlib import Path
+        model_dir = Path(app.config['BASE_DIR']) / 'weights'
+        model_path = model_dir / model_info['path']
 
-            model_path = app.config['MODEL_DIR'] / model_info['path']
-            detector = YOLODetector(
-                model_path=str(model_path),
-                confidence_threshold=app.config['CONFIDENCE_THRESHOLD'],
-                device='cpu'  # GPU 사용 시 'cuda'로 변경
-            )
+        print(f"📂 Model directory: {model_dir}")
+        print(f"📄 Model path: {model_path}")
 
-            # 6. 탐지 실행
-            result = detector.predict(
-                image_path=temp_path,
-                iou_threshold=app.config['IOU_THRESHOLD']
-            )
+        # Detector 인스턴스 생성
+        detector = YOLODetector(
+            model_path=str(model_path),
+            confidence_threshold=float(request.form.get('conf', app.config['CONFIDENCE_THRESHOLD'])),
+            device='cpu' # 필요시 'cuda'로 변경
+        )
 
-            # 7. 결과 반환 (Pydantic 모델을 dict로 변환)
-            return jsonify(result.model_dump()), 200
+        # 예측 수행 (파라미터: NMS, 리사이즈, 마스크 품질 등)
+        result = detector.predict(
+            image_path=temp_path,
+            iou_threshold=float(request.form.get('iou', app.config['IOU_THRESHOLD'])),
+            imgsz=int(request.form.get('imgsz', 1280)),
+            retina_masks=True
+        )
 
-        finally:
-            # 8. 임시 파일 삭제
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        # 기본 응답 데이터 구성
+        response_data = result.model_dump()
+
+        # ------------------------------------------------------
+        # E. 후처리 파이프라인 (Post-Processing Pipeline)
+        # ------------------------------------------------------
+
+        # 1. [결손치 분석] Missing Tooth Analysis
+        analysis_result = None
+        if len(result.detections) > 0:
+            # MissingToothFinder는 함수이므로 직접 호출하여 결과를 받음
+            analysis_result = MissingToothFinder(result.detections)
+            response_data['analysis'] = analysis_result
+
+        # 2. [이미지 크롭] Object Cropping
+        # 크롭 이미지를 저장할 하위 폴더 생성
+        crop_dir = os.path.join(temp_dir, 'crops')
+        if os.path.exists(crop_dir):
+            shutil.rmtree(crop_dir) # 이전 결과 삭제 (선택사항)
+
+        if len(result.detections) > 0:
+            cropper = ObjectCropper(temp_path, result.detections)
+            # 치근 확인을 위해 'box' 모드 권장 (배경 포함)
+            crop_mode = request.form.get('crop_mode', 'box')
+            cropped_files = cropper.run(crop_dir, mode=crop_mode)
+            response_data['crops'] = cropped_files
+
+        # 3. [HTML 리포트 생성] Report Generation
+        # 리포트 파일명 생성
+        report_filename = f"report_{os.path.splitext(os.path.basename(temp_path))[0]}.html"
+        report_dir = os.path.join(temp_dir, 'reports')
+        report_save_path = os.path.join(report_dir, report_filename)
+
+        # Reporter 인스턴스 생성 (이미지 경로 전달 필수)
+        reporter = ReportGenerator(
+            detections=result.detections,
+            model_name=model_name,
+            image_path=temp_path
+        )
+
+        # HTML 저장
+        reporter.save_html_report(
+            save_path=report_save_path,
+            analysis_result=analysis_result,
+            # 추론 단계에서는 정답 라벨이 없으므로 Metrics는 N/A로 표시됩니다.
+            # 만약 외부에서 계산된 값이 있다면 여기에 딕셔너리로 전달하세요.
+            metrics=None
+        )
+
+        # 응답에 리포트 URL 추가
+        response_data['report_url'] = f"/temp/reports/{report_filename}"
+
+        return jsonify(response_data), 200
 
     except Exception as e:
         print(f"❌ Error in detect_objects: {e}")
         import traceback
         traceback.print_exc()
-
         return jsonify({
             "success": False,
-            "message": f"서버 에러: {str(e)}",
+            "message": f"서버 처리 중 오류가 발생했습니다: {str(e)}",
             "error_type": "InternalError"
         }), 500
 
+    finally:
+        # F. 원본 임시 파일 삭제 여부 결정
+        # 주의: HTML 리포트 내 이미지는 Base64로 임베딩되므로 삭제해도 리포트는 보임.
+        # 하지만 크롭 기능 등에서 원본을 참조하는 경우가 끝났으므로 삭제 가능.
+        # 디버깅을 위해 주석 처리할 수 있습니다.
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+# ---------------------------------------------------------
+# 4. 유틸리티 및 에러 핸들러
+# ---------------------------------------------------------
 
 def allowed_file(filename):
-    """
-    파일 확장자가 허용된 형식인지 확인
-    """
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
-
-# ==================== 에러 핸들러 ====================
-
 @app.errorhandler(404)
 def not_found(error):
-    """404 에러 처리"""
-    return jsonify({
-        "success": False,
-        "message": "Endpoint not found",
-        "error_type": "NotFound"
-    }), 404
-
+    return jsonify({"success": False, "message": "Endpoint not found", "error_type": "NotFound"}), 404
 
 @app.errorhandler(500)
 def internal_error(error):
-    """500 에러 처리"""
-    return jsonify({
-        "success": False,
-        "message": "Internal server error",
-        "error_type": "InternalServerError"
-    }), 500
+    return jsonify({"success": False, "message": "Internal server error", "error_type": "InternalServerError"}), 500
 
-
-# ==================== 메인 실행 ====================
+# ---------------------------------------------------------
+# 5. 서버 실행
+# ---------------------------------------------------------
 
 if __name__ == '__main__':
-    # 개발 서버 실행
     print("=" * 50)
     print("🚀 Starting Object Detection API Server")
     print("=" * 50)
@@ -212,7 +247,7 @@ if __name__ == '__main__':
     print("=" * 50)
 
     app.run(
-        host='0.0.0.0',  # 모든 네트워크 인터페이스에서 접근 가능
+        host='0.0.0.0',
         port=5000,
         debug=app.config['DEBUG']
     )

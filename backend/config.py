@@ -12,6 +12,9 @@ BASE_DIR = Path(__file__).resolve().parent
 class Config:
     """기본 설정"""
 
+    # 경로 설정
+    BASE_DIR = BASE_DIR  # 프로젝트 루트 디렉토리
+
     # Flask 설정
     SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
     DEBUG = True
@@ -26,7 +29,7 @@ class Config:
 
     # 모델 설정
     MODEL_DIR = BASE_DIR / "weights"  # 모델 가중치 저장 디렉토리
-    DEFAULT_MODEL = "yolov8n-seg.pt"  # 기본 모델 (nano - 가장 빠름)
+    DEFAULT_MODEL = "yolo11_mask.pt"  # 기본 모델 (nano - 가장 빠름)
 
     # 지원하는 모델 목록
     SUPPORTED_MODELS = {
