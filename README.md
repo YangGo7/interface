@@ -50,3 +50,15 @@ pip install -r backend/requirements.txt
 
 # 2. 서버 실행 (모듈 경로 인식을 위해 -m 옵션 사용 권장, 혹은 직접 실행)
 python backend/app.py
+
+
+
+#########################################################################
+
+#2025-11-19 
+unet , dino add by Ai 
+ -> dentex chellange model 
+ to compare yolo 11 
+ i think yolo11 better than challenge model
+ 
+
