@@ -1,0 +1,48 @@
+<!DOCTYPE html> 
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name = "viewport" content = "width  =device-width , initial-scale=1.0" >
+    <title>Tooth detection</title> 
+    <link rel = "stylesheet" href="css/index_style.css">
+</head> 
+<body>
+    <div class = "container">
+        <h1>AI dental finder demo</h1>
+
+        <div class = "controls">
+             <select id = "modelSelect"><option> MODEL loading ... </option></select>
+             <input type = 'file' id = 'imageInput' accept= "image/*">
+             <input type = 'file' id = 'gtInput' accept= ".txt" style="display:none;">
+             <label for="gtInput" style="cursor:pointer; padding:5px 10px; background:#6c757d; color:white; border-radius:4px; font-size:14px;">GT File (Optional)</label>
+             <button id = "detectionBtn" onclick="detectObjects()"> start detection</button>
+        </div>
+
+        <div class = "result-area" , id = "result-area">
+            <div class = "loader" id = "loader"></div>
+            <p id ="placeholder"> choice image and push start detection</p>
+            <canvas id = "outputCanvas"></canvas>
+        </div>
+
+        <div class ="info-panel" id = "info-panel"></div>
+
+        <div class="analysis-panel" id="analysisPanel" style="display:none; margin-top:20px; padding:15px; background:#f8f9fa; border-radius:8px;">
+            <h3>Missing Tooth Analysis</h3>
+            <div id="missingToothInfo"></div>
+        </div>
+
+        <div class="control-panel" id="controlPanel" style="display:none; margin-top:20px;">
+            <button onclick="toggleAllMasks()" id="maskToggleBtn">Hide All Masks</button>
+            <button onclick="toggleGTComparison()" id="gtToggleBtn" style="display:none;">Disable GT Comparison</button>
+            <button onclick="toggleGTVisualization()" id="gtVisualizeBtn" style="display:none;">Show GT Masks</button>
+            <button onclick="toggleGTLabels()" id="gtLabelBtn" style="display:none;">Hide GT Labels</button>
+            <button onclick="openReport()" id="reportBtn" style="display:none;">Open Report</button>
+            <div id="individualToggles" style="margin-top:10px; max-height:200px; overflow-y:auto;"></div>
+        </div>
+
+    </div>
+
+    <script src = "scripts/index_scripts.js"></script>
+</body>
+
+</html>
