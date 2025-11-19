@@ -1,0 +1,28 @@
+# Flask API Server Requirements
+# DINO+UNet 치아 탐지 API 서버를 위한 의존성
+
+# PyTorch CUDA Index
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# Flask 관련
+flask==3.0.0
+flask-cors==4.0.0
+werkzeug==3.0.1
+
+# 딥러닝 프레임워크
+torch>=2.0.0
+torchvision>=0.15.0
+
+# 이미지 처리
+opencv-python>=4.8.0
+pillow>=10.0.0
+numpy>=1.24.0
+
+# Ultralytics (YOLO - 선택사항)
+ultralytics>=8.0.0
+
+# 기타 유틸리티
+matplotlib>=3.7.0
+
+# 기존 프로젝트 의존성 (DINO, UNet 등)
+# 프로젝트 루트에서 이미 설치되어 있어야 함

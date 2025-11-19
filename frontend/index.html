@@ -1,48 +1,152 @@
-<!DOCTYPE html> 
+<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <meta name = "viewport" content = "width  =device-width , initial-scale=1.0" >
-    <title>Tooth detection</title> 
-    <link rel = "stylesheet" href="css/index_style.css">
-</head> 
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Dental Detection System</title>
+    <link rel="stylesheet" href="css/index_style.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
 <body>
-    <div class = "container">
-        <h1>AI dental finder demo</h1>
+    <div class="background-gradient"></div>
 
-        <div class = "controls">
-             <select id = "modelSelect"><option> MODEL loading ... </option></select>
-             <input type = 'file' id = 'imageInput' accept= "image/*">
-             <input type = 'file' id = 'gtInput' accept= ".txt" style="display:none;">
-             <label for="gtInput" style="cursor:pointer; padding:5px 10px; background:#6c757d; color:white; border-radius:4px; font-size:14px;">GT File (Optional)</label>
-             <button id = "detectionBtn" onclick="detectObjects()"> start detection</button>
+    <div class="container">
+        <!-- Header Section -->
+        <header class="header">
+            <div class="logo">
+                <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="20" cy="20" r="15" fill="#2563eb" opacity="0.1"/>
+                    <path d="M20 5C11.716 5 5 11.716 5 20C5 28.284 11.716 35 20 35C28.284 35 35 28.284 35 20C35 11.716 28.284 5 20 5ZM20 30C14.477 30 10 25.523 10 20C10 14.477 14.477 10 20 10C25.523 10 30 14.477 30 20C30 25.523 25.523 30 20 30Z" fill="#2563eb"/>
+                    <path d="M20 12C15.582 12 12 15.582 12 20C12 24.418 15.582 28 20 28C24.418 28 28 24.418 28 20C28 15.582 24.418 12 20 12Z" fill="#3b82f6" opacity="0.5"/>
+                </svg>
+                <h1>AI Dental Detection</h1>
+            </div>
+            <p class="subtitle">Advanced tooth detection and analysis system</p>
+        </header>
+
+        <!-- Control Panel -->
+        <div class="control-card">
+            <h2 class="section-title">
+                <span class="icon">⚙️</span>
+                Configuration
+            </h2>
+            <div class="controls">
+                <div class="input-group">
+                    <label for="modelSelect">AI Model</label>
+                    <select id="modelSelect" class="styled-select">
+                        <option>Loading models...</option>
+                    </select>
+                </div>
+
+                <div class="input-group">
+                    <label for="imageInput">X-Ray Image</label>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="imageInput" accept="image/*" class="file-input">
+                        <button class="file-input-button" onclick="document.getElementById('imageInput').click()">
+                            <span class="icon">📁</span>
+                            Choose Image
+                        </button>
+                        <span class="file-name" id="imageFileName">No file chosen</span>
+                    </div>
+                </div>
+
+                <div class="input-group">
+                    <label for="gtInput">Ground Truth (Optional)</label>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="gtInput" accept=".txt" class="file-input">
+                        <button class="file-input-button secondary" onclick="document.getElementById('gtInput').click()">
+                            <span class="icon">📄</span>
+                            Choose GT File
+                        </button>
+                        <span class="file-name" id="gtFileName">No file chosen</span>
+                    </div>
+                </div>
+
+                <button id="detectionBtn" class="primary-button" onclick="detectObjects()">
+                    <span class="icon">🚀</span>
+                    Start Detection
+                </button>
+            </div>
         </div>
 
-        <div class = "result-area" , id = "result-area">
-            <div class = "loader" id = "loader"></div>
-            <p id ="placeholder"> choice image and push start detection</p>
-            <canvas id = "outputCanvas"></canvas>
+        <!-- Result Area -->
+        <div class="result-card">
+            <h2 class="section-title">
+                <span class="icon">🖼️</span>
+                Detection Result
+            </h2>
+            <div class="result-area" id="result-area">
+                <div class="loader" id="loader"></div>
+                <div class="placeholder" id="placeholder">
+                    <svg width="80" height="80" viewBox="0 0 80 80" fill="none">
+                        <path d="M40 10L50 30H30L40 10Z" fill="#e0e7ff"/>
+                        <rect x="20" y="30" width="40" height="40" rx="5" fill="#e0e7ff"/>
+                        <circle cx="30" cy="45" r="5" fill="#6366f1"/>
+                        <path d="M50 55L45 45L55 45L50 55Z" fill="#6366f1"/>
+                    </svg>
+                    <p>Upload an X-ray image to begin analysis</p>
+                </div>
+                <canvas id="outputCanvas"></canvas>
+            </div>
         </div>
 
-        <div class ="info-panel" id = "info-panel"></div>
+        <!-- Info Panel -->
+        <div class="info-panel" id="info-panel"></div>
 
-        <div class="analysis-panel" id="analysisPanel" style="display:none; margin-top:20px; padding:15px; background:#f8f9fa; border-radius:8px;">
-            <h3>Missing Tooth Analysis</h3>
+        <!-- Analysis Panel -->
+        <div class="analysis-panel" id="analysisPanel">
+            <h3>
+                <span class="icon">🔍</span>
+                Missing Tooth Analysis
+            </h3>
             <div id="missingToothInfo"></div>
         </div>
 
-        <div class="control-panel" id="controlPanel" style="display:none; margin-top:20px;">
-            <button onclick="toggleAllMasks()" id="maskToggleBtn">Hide All Masks</button>
-            <button onclick="toggleGTComparison()" id="gtToggleBtn" style="display:none;">Disable GT Comparison</button>
-            <button onclick="toggleGTVisualization()" id="gtVisualizeBtn" style="display:none;">Show GT Masks</button>
-            <button onclick="toggleGTLabels()" id="gtLabelBtn" style="display:none;">Hide GT Labels</button>
-            <button onclick="openReport()" id="reportBtn" style="display:none;">Open Report</button>
-            <div id="individualToggles" style="margin-top:10px; max-height:200px; overflow-y:auto;"></div>
+        <!-- Control Panel (Post-Detection) -->
+        <div class="control-panel" id="controlPanel">
+            <h3>
+                <span class="icon">🎛️</span>
+                Visualization Controls
+            </h3>
+            <div class="button-grid">
+                <button onclick="toggleAllMasks()" id="maskToggleBtn" class="control-button">
+                    <span class="icon">👁️</span>
+                    Hide All Masks
+                </button>
+                <button onclick="toggleGTComparison()" id="gtToggleBtn" class="control-button">
+                    <span class="icon">🔄</span>
+                    Disable GT Comparison
+                </button>
+                <button onclick="toggleGTVisualization()" id="gtVisualizeBtn" class="control-button">
+                    <span class="icon">📊</span>
+                    Show GT Masks
+                </button>
+                <button onclick="toggleGTLabels()" id="gtLabelBtn" class="control-button">
+                    <span class="icon">🏷️</span>
+                    Hide GT Labels
+                </button>
+                <button onclick="openReport()" id="reportBtn" class="control-button primary">
+                    <span class="icon">📈</span>
+                    Open Report
+                </button>
+            </div>
+            <div id="individualToggles" class="individual-toggles"></div>
         </div>
-
     </div>
 
-    <script src = "scripts/index_scripts.js"></script>
-</body>
+    <script src="scripts/index_scripts.js"></script>
+    <script>
+        // File name display
+        document.getElementById('imageInput').addEventListener('change', function(e) {
+            const fileName = e.target.files[0]?.name || 'No file chosen';
+            document.getElementById('imageFileName').textContent = fileName;
+        });
 
+        document.getElementById('gtInput').addEventListener('change', function(e) {
+            const fileName = e.target.files[0]?.name || 'No file chosen';
+            document.getElementById('gtFileName').textContent = fileName;
+        });
+    </script>
+</body>
 </html>
