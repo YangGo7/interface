@@ -6,6 +6,15 @@ from typing import List, Dict, Any, Optional
 from collections import Counter
 import datetime
 
+# Advanced Dental Metrics 모듈 import
+from utils.advanced_metric import (
+    calculate_sequence_accuracy,
+    calculate_inter_tooth_distance,
+    calculate_anatomical_consistency,
+    calculate_confidence_weighted_accuracy,
+    calculate_class_balance_score
+)
+
 class ReportGenerator:
     """
     HTML 리포트 생성 클래스
@@ -90,7 +99,29 @@ class ReportGenerator:
         # 실제 mAP는 여러 IoU threshold에서 계산하지만, 여기서는 0.5에서만 계산
         mAP = precision  # AP@0.5 = Precision at IoU threshold 0.5
 
+        # ===== 고급 치식 탐지 지표 계산 =====
+        # 기본 메트릭 외에 치아 순서, 간격, 해부학적 일관성 등을 추가로 계산
+
+        # 1. 순서 정확도: 사분면 내 치아가 올바른 순서로 배열되었는지
+        sequence_metrics = calculate_sequence_accuracy(self.detections)
+
+        # 2. 치아 간격 검증: 인접 치아 간 거리가 정상 범위인지
+        distance_metrics = calculate_inter_tooth_distance(self.detections, self.img_width)
+
+        # 3. 해부학적 일관성: 상하악 위치, 좌우 대칭성, 겹침 검사
+        anatomy_metrics = calculate_anatomical_consistency(self.detections)
+
+        # 4. 신뢰도 가중 정확도: confidence로 가중 평균한 정확도
+        confidence_metrics = calculate_confidence_weighted_accuracy(
+            self.detections, self.gt_data, self.img_width, self.img_height
+        )
+
+        # 5. 클래스 균형도: 모든 치아를 골고루 잘 탐지하는지
+        balance_metrics = calculate_class_balance_score(self.detections, self.gt_data)
+
+        # 모든 메트릭을 하나의 딕셔너리로 통합하여 반환
         return {
+            # 기본 Detection 메트릭
             'mAP': mAP,
             'mean_iou': mean_iou,
             'precision': precision,
@@ -100,7 +131,30 @@ class ReportGenerator:
             'fp': fp,
             'fn': fn,
             'total_detections': len(self.detections),
-            'total_gt': len(self.gt_data)
+            'total_gt': len(self.gt_data),
+
+            # 고급 치식 탐지 메트릭
+            'sequence_accuracy': sequence_metrics['sequence_accuracy'],
+            'sequence_correct_pairs': sequence_metrics['correct_pairs'],
+            'sequence_total_pairs': sequence_metrics['total_pairs'],
+            'sequence_quadrant_details': sequence_metrics['quadrant_details'],
+
+            'inter_tooth_mean_distance': distance_metrics['mean_distance_ratio'],
+            'inter_tooth_abnormal_count': distance_metrics['abnormal_count'],
+            'inter_tooth_validation_rate': distance_metrics['validation_rate'],
+            'inter_tooth_abnormal_pairs': distance_metrics['abnormal_pairs'],
+
+            'anatomical_consistency': anatomy_metrics['anatomical_consistency_score'],
+            'anatomical_checks': anatomy_metrics['checks'],
+            'anatomical_symmetry_ratio': anatomy_metrics['symmetry_ratio'],
+            'anatomical_overlap_count': anatomy_metrics['overlap_count'],
+
+            'confidence_weighted_accuracy': confidence_metrics['confidence_weighted_accuracy'],
+            'total_confidence': confidence_metrics['total_confidence'],
+
+            'class_balance_score': balance_metrics['class_balance_score'],
+            'class_recall_std': balance_metrics['class_recall_std'],
+            'mean_class_recall': balance_metrics['mean_class_recall']
         }
 
     def _draw_predictions(self) -> np.ndarray:
@@ -159,6 +213,7 @@ class ReportGenerator:
         if metrics is None and self.gt_data:
             calculated_metrics = self.calculate_metrics_with_gt()
             if calculated_metrics:
+                # 기본 Detection 메트릭 포맷팅
                 metrics = {
                     "mAP": f"{calculated_metrics['mAP']*100:.2f}%",
                     "IoU": f"{calculated_metrics['mean_iou']:.3f}",
@@ -167,14 +222,39 @@ class ReportGenerator:
                     "F1-Score": f"{calculated_metrics['f1_score']:.3f}",
                     "TP": calculated_metrics['tp'],
                     "FP": calculated_metrics['fp'],
-                    "FN": calculated_metrics['fn']
+                    "FN": calculated_metrics['fn'],
+
+                    # 고급 치식 탐지 메트릭 추가
+                    "Sequence Accuracy": f"{calculated_metrics['sequence_accuracy']*100:.1f}%",
+                    "Sequence Pairs": f"{calculated_metrics['sequence_correct_pairs']}/{calculated_metrics['sequence_total_pairs']}",
+
+                    "Inter-Tooth Distance": f"{calculated_metrics['inter_tooth_mean_distance']*100:.1f}% of img width",
+                    "Distance Validation": f"{calculated_metrics['inter_tooth_validation_rate']*100:.1f}%",
+                    "Abnormal Gaps": calculated_metrics['inter_tooth_abnormal_count'],
+
+                    "Anatomical Consistency": f"{calculated_metrics['anatomical_consistency']*100:.1f}%",
+                    "Symmetry Ratio": f"{calculated_metrics['anatomical_symmetry_ratio']:.2f}",
+                    "Bbox Overlaps": calculated_metrics['anatomical_overlap_count'],
+
+                    "Confidence-Weighted Acc": f"{calculated_metrics['confidence_weighted_accuracy']*100:.1f}%",
+
+                    "Class Balance Score": f"{calculated_metrics['class_balance_score']:.3f}",
+                    "Class Recall Std": f"{calculated_metrics['class_recall_std']:.3f}",
+
+                    # 원본 메트릭 데이터도 보존 (상세 분석용)
+                    "_raw": calculated_metrics
                 }
             else:
                 metrics = {
                     "mAP": "N/A (No GT)",
                     "IoU": "N/A (No GT)",
                     "Precision": "N/A",
-                    "Recall": "N/A"
+                    "Recall": "N/A",
+                    "Sequence Accuracy": "N/A",
+                    "Inter-Tooth Distance": "N/A",
+                    "Anatomical Consistency": "N/A",
+                    "Confidence-Weighted Acc": "N/A",
+                    "Class Balance Score": "N/A"
                 }
         elif metrics is None:
             # GT 없으면 기본값
@@ -182,7 +262,12 @@ class ReportGenerator:
                 "mAP": "N/A (No GT)",
                 "IoU": "N/A (No GT)",
                 "Precision": "N/A",
-                "Recall": "N/A"
+                "Recall": "N/A",
+                "Sequence Accuracy": "N/A",
+                "Inter-Tooth Distance": "N/A",
+                "Anatomical Consistency": "N/A",
+                "Confidence-Weighted Acc": "N/A",
+                "Class Balance Score": "N/A"
             }
 
         # 3. HTML 생성
@@ -235,7 +320,74 @@ class ReportGenerator:
                     </div>
                 </div>
 
-                <h2>2. Overall Metrics</h2>
+                <h2>2. Advanced Dental Metrics</h2>
+                <div class="metric-box">
+                    <p><strong>Note:</strong> 치식 탐지의 정확성을 평가하기 위한 고급 지표입니다. 순서, 간격, 해부학적 일관성을 검증합니다.</p>
+                    <table>
+                        <tr>
+                            <th>Metric</th>
+                            <th>Value</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Sequence Accuracy (순서 정확도)</td>
+                            <td>{metrics.get('Sequence Accuracy', 'N/A')}</td>
+                            <td>사분면 내 치아가 올바른 X좌표 순서로 배열된 비율</td>
+                        </tr>
+                        <tr>
+                            <td>Sequence Pairs (순서 검증 쌍)</td>
+                            <td>{metrics.get('Sequence Pairs', 'N/A')}</td>
+                            <td>올바른 순서 쌍 / 전체 인접 쌍</td>
+                        </tr>
+                        <tr>
+                            <td>Inter-Tooth Distance (평균 치아 간격)</td>
+                            <td>{metrics.get('Inter-Tooth Distance', 'N/A')}</td>
+                            <td>인접 치아 간 평균 거리 (이미지 너비 대비)</td>
+                        </tr>
+                        <tr>
+                            <td>Distance Validation (간격 검증율)</td>
+                            <td>{metrics.get('Distance Validation', 'N/A')}</td>
+                            <td>정상 범위(2-10%) 내 치아 쌍 비율</td>
+                        </tr>
+                        <tr>
+                            <td>Abnormal Gaps (이상 간격 쌍)</td>
+                            <td>{metrics.get('Abnormal Gaps', 'N/A')}</td>
+                            <td>너무 가깝거나 먼 인접 치아 쌍 개수</td>
+                        </tr>
+                        <tr>
+                            <td>Anatomical Consistency (해부학적 일관성)</td>
+                            <td>{metrics.get('Anatomical Consistency', 'N/A')}</td>
+                            <td>상하악 위치, 좌우 대칭성, 겹침 검사 종합 점수</td>
+                        </tr>
+                        <tr>
+                            <td>Symmetry Ratio (좌우 대칭 비율)</td>
+                            <td>{metrics.get('Symmetry Ratio', 'N/A')}</td>
+                            <td>좌측 치아 수 / 우측 치아 수 (1.0이 완전 대칭)</td>
+                        </tr>
+                        <tr>
+                            <td>Bbox Overlaps (박스 겹침 개수)</td>
+                            <td>{metrics.get('Bbox Overlaps', 'N/A')}</td>
+                            <td>IoU > 0.3인 치아 쌍 개수 (0이 정상)</td>
+                        </tr>
+                        <tr>
+                            <td>Confidence-Weighted Accuracy (신뢰도 가중 정확도)</td>
+                            <td>{metrics.get('Confidence-Weighted Acc', 'N/A')}</td>
+                            <td>높은 confidence 예측을 더 중요하게 평가</td>
+                        </tr>
+                        <tr>
+                            <td>Class Balance Score (클래스 균형도)</td>
+                            <td>{metrics.get('Class Balance Score', 'N/A')}</td>
+                            <td>모든 치아를 골고루 탐지하는 정도 (1.0이 완전 균형)</td>
+                        </tr>
+                        <tr>
+                            <td>Class Recall Std (클래스별 Recall 표준편차)</td>
+                            <td>{metrics.get('Class Recall Std', 'N/A')}</td>
+                            <td>클래스별 성능 편차 (0에 가까울수록 균형적)</td>
+                        </tr>
+                    </table>
+                </div>
+
+                <h2>3. Overall Detection Metrics</h2>
                 <div class="metric-box">
                     <p><strong>Note:</strong> Real-time metrics (IoU, mAP) require Ground Truth labels. Currently showing inference results.</p>
                     <table>
@@ -256,22 +408,22 @@ class ReportGenerator:
                         </tr>
                         <tr>
                             <td>mAP@0.5 (Mean Average Precision)</td>
-                            <td>{metrics.get('mAP')}</td>
+                            <td>{metrics.get('mAP', 'N/A')}</td>
                             <td>Overall detection accuracy at IoU=0.5</td>
                         </tr>
                         <tr>
                             <td>Mean IoU</td>
-                            <td>{metrics.get('IoU')}</td>
+                            <td>{metrics.get('IoU', 'N/A')}</td>
                             <td>Average Intersection over Union</td>
                         </tr>
                         <tr>
                             <td>Precision</td>
-                            <td>{metrics.get('Precision')}</td>
+                            <td>{metrics.get('Precision', 'N/A')}</td>
                             <td>TP / (TP + FP)</td>
                         </tr>
                         <tr>
                             <td>Recall</td>
-                            <td>{metrics.get('Recall')}</td>
+                            <td>{metrics.get('Recall', 'N/A')}</td>
                             <td>TP / (TP + FN)</td>
                         </tr>
                         <tr>
@@ -297,7 +449,7 @@ class ReportGenerator:
                     </table>
                 </div>
 
-                <h2>3. Class-wise Analysis</h2>
+                <h2>4. Class-wise Analysis</h2>
                 <table>
                     <tr>
                         <th>Class Label</th>
