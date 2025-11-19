@@ -135,25 +135,123 @@ def detect_objects():
         # D. 추론 실행 (Inference)
         from pathlib import Path
         model_dir = Path(app.config['BASE_DIR']) / 'weights'
-        model_path = model_dir / model_info['path']
 
-        print(f"📂 Model directory: {model_dir}")
-        print(f"📄 Model path: {model_path}")
+        # 모델 타입 확인
+        model_type = model_info.get('type', 'yolo')
 
-        # Detector 인스턴스 생성
-        detector = YOLODetector(
-            model_path=str(model_path),
-            confidence_threshold=float(request.form.get('conf', app.config['CONFIDENCE_THRESHOLD'])),
-            device='cpu' # 필요시 'cuda'로 변경
-        )
+        # DINO-UNet 모델 처리
+        if model_type == 'dino-unet':
+            print(f"🔧 DINO-UNet model selected")
+            import time
+            import cv2
+            import random
+            from predict_api import TeethDetectionModel
+            from models.schemas import Detection, BoundingBox, DetectionResponse, ModelMetrics, ModelInfo, ImageInfo
 
-        # 예측 수행 (파라미터: NMS, 리사이즈, 마스크 품질 등)
-        result = detector.predict(
-            image_path=temp_path,
-            iou_threshold=float(request.form.get('iou', app.config['IOU_THRESHOLD'])),
-            imgsz=int(request.form.get('imgsz', 1280)),
-            retina_masks=True
-        )
+            # 시간 측정 시작
+            total_start = time.time()
+
+            # DINO-UNet 모델 로드 및 예측
+            preprocess_start = time.time()
+            detector = TeethDetectionModel(
+                dino_config=model_info['dino_config'],
+                dino_checkpoint=str(model_dir / model_info['dino_checkpoint'].replace('weights/', '')),
+                unet_checkpoint=str(model_dir / model_info['unet_checkpoint'].replace('weights/', '')),
+                unet_num_classes=model_info['unet_num_classes']
+            )
+            preprocess_time = (time.time() - preprocess_start) * 1000
+
+            # 추론 수행
+            inference_start = time.time()
+            dino_result = detector.predict(temp_path)
+            inference_time = (time.time() - inference_start) * 1000
+
+            # 후처리: DINO-UNet 결과를 YOLO Detection 형식으로 변환
+            postprocess_start = time.time()
+
+            # 이미지 정보
+            image = cv2.imread(temp_path)
+            img_height, img_width = image.shape[:2]
+            image_format = Path(temp_path).suffix[1:]
+
+            # Detection 객체 리스트 생성
+            detections = []
+            for idx, tooth in enumerate(dino_result['teeth']):
+                # Bounding Box 변환: [x1, y1, x2, y2] -> BoundingBox(x, y, width, height)
+                x1, y1, x2, y2 = tooth['bbox']
+                bbox = BoundingBox(
+                    x=float(x1),
+                    y=float(y1),
+                    width=float(x2 - x1),
+                    height=float(y2 - y1)
+                )
+
+                # 색상 생성 (FDI 번호 기반)
+                fdi = tooth['fdi']
+                random.seed(int(fdi))  # FDI 번호로 시드 고정 (일관된 색상)
+                color = "#{:06x}".format(random.randint(0, 0xFFFFFF))
+
+                # Detection 객체 생성
+                detection = Detection(
+                    id=idx,
+                    label=fdi,  # FDI 번호를 라벨로 사용
+                    class_id=tooth['universal'] - 1,  # universal을 class_id로 (0-indexed)
+                    confidence=tooth['confidence'],
+                    bounding_box=bbox,
+                    segmentation_mask=None,  # DINO-UNet은 bbox만 제공
+                    color=color
+                )
+                detections.append(detection)
+
+            postprocess_time = (time.time() - postprocess_start) * 1000
+            total_time = (time.time() - total_start) * 1000
+
+            # DetectionResponse 생성
+            result = DetectionResponse(
+                success=True,
+                message="Detection completed successfully",
+                detections=detections,
+                metrics=ModelMetrics(
+                    preprocessing_time_ms=preprocess_time,
+                    inference_time_ms=inference_time,
+                    postprocessing_time_ms=postprocess_time,
+                    total_time_ms=total_time
+                ),
+                model_info=ModelInfo(
+                    name=model_name,
+                    version="DINO+UNet",
+                    task="segment"
+                ),
+                image_info=ImageInfo(
+                    width=img_width,
+                    height=img_height,
+                    format=image_format
+                )
+            )
+
+            print(f"✅ DINO-UNet detection completed: {len(detections)} teeth detected")
+
+        # YOLO 모델 처리 (기본)
+        else:
+            model_path = model_dir / model_info['path']
+
+            print(f"📂 Model directory: {model_dir}")
+            print(f"📄 Model path: {model_path}")
+
+            # Detector 인스턴스 생성
+            detector = YOLODetector(
+                model_path=str(model_path),
+                confidence_threshold=float(request.form.get('conf', app.config['CONFIDENCE_THRESHOLD'])),
+                device='cpu' # 필요시 'cuda'로 변경
+            )
+
+            # 예측 수행 (파라미터: NMS, 리사이즈, 마스크 품질 등)
+            result = detector.predict(
+                image_path=temp_path,
+                iou_threshold=float(request.form.get('iou', app.config['IOU_THRESHOLD'])),
+                imgsz=int(request.form.get('imgsz', 1280)),
+                retina_masks=True
+            )
 
         # GT 비교 수행 (GT 데이터가 있을 경우)
         if gt_data and len(gt_data) > 0:

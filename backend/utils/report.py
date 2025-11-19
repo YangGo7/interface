@@ -453,38 +453,107 @@ class ReportGenerator:
                 <table>
                     <tr>
                         <th>Class Label</th>
-                        <th>Count</th>
+                        <th>Predictions</th>
+                        <th>GT</th>
+                        <th>Match</th>
                         <th>Avg Confidence</th>
-                        <th>Status</th>
                     </tr>
         """
-        
+
+        # GT 데이터 클래스별 카운트
+        gt_counts = {}
+        if self.gt_data:
+            for gt in self.gt_data:
+                gt_label = gt['label']
+                gt_counts[gt_label] = gt_counts.get(gt_label, 0) + 1
+
+        # 클래스별 매칭 정보 계산
+        class_match_info = {}
+        if self.gt_data:
+            from utils.gt_comparison import find_best_gt_match
+            iou_threshold = 0.5
+
+            # 각 detection에 대해 매칭 확인
+            for detection in self.detections:
+                label = detection.label
+                if label not in class_match_info:
+                    class_match_info[label] = {'tp': 0, 'fp': 0}
+
+                match_result = find_best_gt_match(detection, self.gt_data, self.img_width, self.img_height)
+
+                if match_result and match_result['iou'] >= iou_threshold and match_result['label_match']:
+                    class_match_info[label]['tp'] += 1
+                else:
+                    class_match_info[label]['fp'] += 1
+
+            # FN 계산: GT에는 있지만 detection 안된 것
+            for gt_label, gt_count in gt_counts.items():
+                if gt_label not in class_match_info:
+                    class_match_info[gt_label] = {'tp': 0, 'fp': 0, 'fn': gt_count}
+                else:
+                    tp_count = class_match_info[gt_label]['tp']
+                    fn_count = gt_count - tp_count
+                    class_match_info[gt_label]['fn'] = fn_count
+
+        # 모든 클래스 수집 (예측 + GT)
+        all_labels = set(counts.keys())
+        if self.gt_data:
+            all_labels.update(gt_counts.keys())
+
         # 클래스별 통계 행 추가
-        for label, count in counts.items():
+        for label in sorted(all_labels):
+            pred_count = counts.get(label, 0)
+            gt_count = gt_counts.get(label, 0) if self.gt_data else 'N/A'
+
             # 해당 클래스의 평균 conf 계산
             class_confs = [d.confidence for d in self.detections if d.label == label]
             class_avg = sum(class_confs) / len(class_confs) if class_confs else 0
-            
+            avg_conf_str = f"{class_avg*100:.1f}%" if pred_count > 0 else "-"
+
+            # 매칭 상태 결정
+            if self.gt_data and label in class_match_info:
+                tp = class_match_info[label]['tp']
+                fp = class_match_info[label]['fp']
+                fn = class_match_info[label].get('fn', 0)
+
+                if tp > 0 and fp == 0 and fn == 0:
+                    match_status = f'<span class="badge bg-green">Perfect Match (TP:{tp})</span>'
+                elif tp > 0:
+                    match_status = f'<span class="badge" style="background:#f39c12;">Partial (TP:{tp}, FP:{fp}, FN:{fn})</span>'
+                elif fp > 0 and fn == 0:
+                    match_status = f'<span class="badge bg-red">False Positive (FP:{fp})</span>'
+                elif fn > 0 and fp == 0:
+                    match_status = f'<span class="badge bg-red">False Negative (FN:{fn})</span>'
+                else:
+                    match_status = f'<span class="badge" style="background:#95a5a6;">Mixed (FP:{fp}, FN:{fn})</span>'
+            elif pred_count > 0:
+                match_status = '<span class="badge bg-green">Detected</span>'
+            else:
+                match_status = '<span class="badge bg-red">Not Detected</span>'
+
             html_content += f"""
                     <tr>
                         <td>{label}</td>
-                        <td>{count}</td>
-                        <td>{class_avg*100:.1f}%</td>
-                        <td><span class="badge bg-green">Detected</span></td>
+                        <td>{pred_count}</td>
+                        <td>{gt_count}</td>
+                        <td>{match_status}</td>
+                        <td>{avg_conf_str}</td>
                     </tr>
             """
-            
+
         # 결손치 정보 추가 (Analysis Result가 있는 경우)
         if analysis_result and 'missing' in analysis_result:
             for missing_id in analysis_result['missing']:
-                html_content += f"""
+                if missing_id not in all_labels:  # 이미 위에서 처리 안된 경우만
+                    html_content += f"""
                     <tr>
                         <td>{missing_id}</td>
                         <td>0</td>
+                        <td>N/A</td>
+                        <td><span class="badge bg-red">Missing Tooth</span></td>
                         <td>-</td>
-                        <td><span class="badge bg-red">Missing</span></td>
                     </tr>
-                """
+                    """
 
         html_content += """
                 </table>

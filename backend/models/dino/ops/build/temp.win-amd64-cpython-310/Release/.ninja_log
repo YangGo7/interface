@@ -1,0 +1,4 @@
+# ninja log v7
+9	3627	7852378366392022	C:/interface/backend/models/dino/ops/build/temp.win-amd64-cpython-310/Release/interface/backend/models/dino/ops/src/cpu/ms_deform_attn_cpu.obj	51952de9f2c22f2e
+54	8250	7852378366838234	C:/interface/backend/models/dino/ops/build/temp.win-amd64-cpython-310/Release/interface/backend/models/dino/ops/src/vision.obj	b7828c8535a8e398
+50	12862	7852378366798251	C:/interface/backend/models/dino/ops/build/temp.win-amd64-cpython-310/Release/interface/backend/models/dino/ops/src/cuda/ms_deform_attn_cuda.obj	94eaf8d7d083972d

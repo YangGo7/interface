@@ -48,10 +48,15 @@ class Config:
             "description": "YOLOv8 Medium Segmentation (중간)",
             "size": "medium"
         },
-        "수정중": {
-            "path": "yolo11n-seg.pt",
-            "description": "YOLO11 Nano Segmentation (최신)",
-            "size": "small"
+        "dino-unet": {
+            "path": "dino-unet",
+            "description": "DINO+UNet Segmentation (Advanced)",
+            "size": "large",
+            "type": "dino-unet",
+            "dino_checkpoint": "weights/dino.pth",
+            "unet_checkpoint": "weights/unet.pth",
+            "dino_config": "configs/DINO_4scale_cls32.py",
+            "unet_num_classes": 33
         },
         "fix": {
             "path": "yolo11s-seg.pt",
