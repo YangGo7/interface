@@ -53,12 +53,10 @@ python backend/app.py
 
 
 
-#########################################################################
-
-#2025-11-19 
+# 2025-11-19 
 unet , dino add by Ai 
  -> dentex chellange model 
  to compare yolo 11 
  i think yolo11 better than challenge model
- 
+
 
