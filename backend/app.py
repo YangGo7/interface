@@ -190,20 +190,38 @@ def detect_objects():
                     print(f"  - Detection {detection.id} ({detection.label}): No GT match")
 
             # GT 비교 메트릭 요약 출력
-            print("\n📊 GT Comparison Metrics Summary:")
-            tp = sum(1 for det in result.detections if hasattr(det, 'gt_label_match') and det.gt_label_match and hasattr(det, 'gt_iou') and det.gt_iou >= 0.5)
-            fp = len(result.detections) - tp
-            fn = len(gt_data) - tp
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-            mean_iou = sum(det.gt_iou for det in result.detections if hasattr(det, 'gt_iou')) / len(result.detections) if result.detections else 0.0
+            # ReportGenerator를 임시로 생성하여 모든 메트릭 계산
+            temp_reporter = ReportGenerator(
+                detections=result.detections,
+                model_name=model_name,
+                image_path=temp_path,
+                gt_data=gt_data
+            )
+            all_metrics = temp_reporter.calculate_metrics_with_gt()
 
-            print(f"  - Precision: {precision*100:.2f}% (TP={tp}, FP={fp})")
-            print(f"  - Recall: {recall*100:.2f}% (FN={fn})")
-            print(f"  - F1-Score: {f1:.3f}")
-            print(f"  - Mean IoU: {mean_iou:.3f}")
-            print(f"  - mAP@0.5: {precision*100:.2f}%\n")
+            print("\n📊 GT Comparison Metrics Summary:")
+            print("=" * 60)
+
+            # 기본 Detection 메트릭
+            print("📌 Basic Detection Metrics:")
+            print(f"  - Precision: {all_metrics['precision']*100:.2f}% (TP={all_metrics['tp']}, FP={all_metrics['fp']})")
+            print(f"  - Recall: {all_metrics['recall']*100:.2f}% (FN={all_metrics['fn']})")
+            print(f"  - F1-Score: {all_metrics['f1_score']:.3f}")
+            print(f"  - Mean IoU: {all_metrics['mean_iou']:.3f}")
+            print(f"  - mAP@0.5: {all_metrics['mAP']*100:.2f}%")
+
+            # 고급 치식 탐지 메트릭
+            print("\n📌 Advanced Dental Metrics:")
+            print(f"  - Sequence Accuracy: {all_metrics['sequence_accuracy']*100:.1f}% ({all_metrics['sequence_correct_pairs']}/{all_metrics['sequence_total_pairs']} pairs)")
+            print(f"  - Inter-Tooth Distance: {all_metrics['inter_tooth_mean_distance']*100:.1f}% of img width")
+            print(f"  - Distance Validation: {all_metrics['inter_tooth_validation_rate']*100:.1f}% ({all_metrics['inter_tooth_abnormal_count']} abnormal gaps)")
+            print(f"  - Anatomical Consistency: {all_metrics['anatomical_consistency']*100:.1f}%")
+            print(f"    • Upper/Lower Position: {'✓' if all_metrics['anatomical_checks']['upper_above_lower'] else '✗'}")
+            print(f"    • Left/Right Symmetry: {'✓' if all_metrics['anatomical_checks']['left_right_symmetry'] else '✗'} (ratio={all_metrics['anatomical_symmetry_ratio']:.2f})")
+            print(f"    • No Overlaps: {'✓' if all_metrics['anatomical_checks']['no_overlap'] else '✗'} ({all_metrics['anatomical_overlap_count']} overlaps)")
+            print(f"  - Confidence-Weighted Accuracy: {all_metrics['confidence_weighted_accuracy']*100:.1f}%")
+            print(f"  - Class Balance Score: {all_metrics['class_balance_score']:.3f} (std={all_metrics['class_recall_std']:.3f})")
+            print("=" * 60 + "\n")
 
         # 기본 응답 데이터 구성
         response_data = result.model_dump()
