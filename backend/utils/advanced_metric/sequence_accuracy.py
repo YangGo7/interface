@@ -72,13 +72,13 @@ def calculate_sequence_accuracy(detections: List) -> Dict[str, Any]:
             # 파노라마 방향: 우측 사분면(1,4)과 좌측 사분면(2,3)의 증가 방향이 다름
 
             if quadrant in [1, 4]:  # 우측 사분면 (1x, 4x)
-                # 환자의 우측: position이 작을수록 중심선에 가까움
-                # 파노라마 좌측에 표시됨 (X좌표가 작음)
-                expected_order = tooth1['position'] <= tooth2['position']
-            else:  # 좌측 사분면 (2x, 3x)
-                # 환자의 좌측: position이 작을수록 중심선에 가까움
-                # 파노라마 우측에 표시됨 (X좌표가 큼)
+                # 환자의 우측: 파노라마 좌측에 표시
+                # X좌표 증가 시 position 감소 (18→17→...→11, 48→47→...→41)
                 expected_order = tooth1['position'] >= tooth2['position']
+            else:  # 좌측 사분면 (2x, 3x)
+                # 환자의 좌측: 파노라마 우측에 표시
+                # X좌표 증가 시 position 증가 (21→22→...→28, 31→32→...→38)
+                expected_order = tooth1['position'] <= tooth2['position']
 
             quadrant_total += 1
             total_pairs += 1

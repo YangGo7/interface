@@ -1,0 +1,6 @@
+
+{
+  "name": "Clinical Dental AI Dashboard",
+  "description": "A high-fidelity clinical diagnostic interface for dental X-ray analysis, featuring AI-assisted caries detection, anatomical odontogram tracking, and detailed periodontal bone loss metrics.",
+  "requestFramePermissions": []
+}

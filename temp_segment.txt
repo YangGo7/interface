@@ -1,0 +1,21 @@
+                        tooth_contour=show_tc,
+                        nerve_dist_line=item.get("nerve_dist_line"),
+                        nerve_dist_mm=item.get("nerve_dist_mm", 0)
+                     )
+                 
+                 # Treatment HTML
+                 treatment_html = f"<div style='margin-top:10px; padding:10px; background:#f0f8ff; border-radius:5px; font-size:0.95em; color:#2980b9;'>{'<br>'.join(treatments)}</div>" if treatments else ""
+                 
+                 # Check for Overlay Warning to add specific caution
+                 caution_msg = ""
+                 if item.get("nerve_overlap") or item.get("sinus_overlap"):
+                     target = "Nerve" if item.get("nerve_overlap") else "Sinus"
+                     caution_msg = f"""
+                     <div style='margin-top:10px; padding:10px; background:#fffbeb; border-left: 4px solid #d97706; border-radius:4px; font-size:0.95em; color:#d97706;'>
+                         <strong>?š¨ Extraction Caution:</strong><br>
+                         The tooth root overlaps with the {target}. 
+                         <strong>Risk of {target} Injury.</strong><br>
+                         {f'<strong>Est. Overlap Area:</strong> {item.get("overlap_area_mm2", 0):.1f} mmÂ²<br>' if item.get("overlap_area_mm2") else ''}
+                         Precise planning and CT scan are strongly recommended before extraction.
+                     </div>
+                     """
