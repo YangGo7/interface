@@ -5,6 +5,7 @@ interface ToothStatus {
   implant?: boolean;
   crown?: boolean;
   filling?: boolean;
+  triage?: 'triage-1' | 'triage-2' | 'triage-3' | 'missing' | 'implant';
 }
 
 interface BottomTeethChartProps {
@@ -35,13 +36,15 @@ export function BottomTeethChart({
     const isExtraction = extraction.map(String).includes(toothKey);
     const isImplantSite = implantSites.map(String).includes(toothKey);
     const ring = highlightRing.map(String).includes(toothKey) || isImplantSite;
-    let fill = '#D1FAE5';
-    let border = '#34D399';
-    if (st.missing) { fill = '#F1F5F9'; border = '#94A3B8'; }
-    else if (st.implant) { fill = '#DBEAFE'; border = '#3B82F6'; }
-    else if (st.caries || st.peri) { fill = '#FEE2E2'; border = '#EF4444'; }
+    const reportStatus = st.triage || (st.missing ? 'missing' : st.implant ? 'implant' : st.caries || st.peri ? 'triage-2' : 'triage-3');
+    let fill = 'rgba(34, 197, 94, 0.15)';
+    let border = '#22c55e';
+    if (reportStatus === 'triage-1') { fill = 'rgba(220, 38, 38, 0.2)'; border = '#dc2626'; }
+    else if (reportStatus === 'triage-2') { fill = 'rgba(234, 179, 8, 0.2)'; border = '#eab308'; }
+    else if (reportStatus === 'missing') { fill = '#F8FAFC'; border = '#9CA3AF'; }
+    else if (reportStatus === 'implant') { fill = 'rgba(37, 99, 235, 0.15)'; border = '#2563EB'; }
     if (isExtraction) { fill = '#FFEDD5'; border = '#F97316'; }
-    const dashed = !!st.missing;
+    const dashed = reportStatus === 'missing';
     return { fill, border, dashed, ring };
   };
 
