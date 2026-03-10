@@ -20,4 +20,5 @@ venv/
 temp/
 
 **/__pycache__/
+*.zip
 
