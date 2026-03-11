@@ -27,6 +27,14 @@ export function BottomTeethChart({
   implantSites = [],
   numberingSystem = 'fdi',
 }: BottomTeethChartProps) {
+  const tileWidth = 52;
+  const tileHeight = 117;
+  const imageWidth = 41;
+  const imageHeight = 88;
+  const tileGap = 5;
+  const rowGap = 32;
+  const chamfer = 14;
+
   const upperTeeth = [18, 17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27, 28];
   const lowerTeeth = [48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38];
 
@@ -73,10 +81,14 @@ export function BottomTeethChart({
     return quadrant === 2 || quadrant === 3;
   };
 
-  const renderRow = (teeth: number[], leftLabel: string, rightLabel: string) => (
-    <div className="grid grid-cols-[24px_minmax(0,1fr)_24px] items-center gap-3">
-      <span className="text-center text-sm font-bold tracking-[0.2em] text-[#94A3B8]">{leftLabel}</span>
-      <div className="flex justify-center gap-2 flex-wrap sm:flex-nowrap">
+  const renderRow = (teeth: number[]) => (
+    <div
+      className="grid items-center"
+      style={{
+        gridTemplateColumns: `minmax(0, max-content)`,
+      }}
+    >
+      <div className="flex justify-center flex-nowrap" style={{ gap: `${tileGap}px` }}>
       {teeth.map((tooth) => {
         const { fill, border, dashed, ring } = getTileStyle(tooth);
         const numColor = dashed ? '#94A3B8' : border;
@@ -87,21 +99,25 @@ export function BottomTeethChart({
 
             <button
               onClick={() => onToothClick(tooth)}
-              className={`flex h-[74px] w-11 items-center justify-center border-2 transition-all ${selectedTooth === tooth ? 'ring-2 ring-[#2563EB]/35 ring-offset-2 ring-offset-white' : ''
+              className={`flex items-center justify-center border-2 transition-all ${selectedTooth === tooth ? 'ring-2 ring-[#2563EB]/35 ring-offset-2 ring-offset-white' : ''
                 }`}
               style={{
+                width: `${tileWidth}px`,
+                height: `${tileHeight}px`,
                 background: fill,
                 borderColor: border,
                 borderStyle: dashed ? 'dashed' : 'solid',
                 boxShadow: ring ? '0 0 0 1.5px #DC2626 inset, 0 4px 10px rgba(15,23,42,0.06)' : '0 4px 10px rgba(15,23,42,0.05)',
-                clipPath: 'polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px)',
+                clipPath: `polygon(${chamfer}px 0, calc(100% - ${chamfer}px) 0, 100% ${chamfer}px, 100% calc(100% - ${chamfer}px), calc(100% - ${chamfer}px) 100%, ${chamfer}px 100%, 0 calc(100% - ${chamfer}px), 0 ${chamfer}px)`,
               }}
             >
               <img
                 src={getOdontoImg(tooth)}
                 alt={`Tooth ${tooth}`}
-                className="h-[58px] w-9 object-contain pointer-events-none"
+                className="object-contain pointer-events-none"
                 style={{
+                  width: `${imageWidth}px`,
+                  height: `${imageHeight}px`,
                   transform: shouldMirrorTooth(tooth) ? 'scaleX(-1)' : 'none',
                   filter: dashed
                     ? 'brightness(0) saturate(0)'
@@ -114,22 +130,33 @@ export function BottomTeethChart({
                 }}
               />
             </button>
-            <span className="text-[12px] font-semibold leading-none" style={{ color: numColor }}>
+            <span className="text-[25px] font-semibold leading-none" style={{ color: numColor }}>
               {displayNum}
             </span>
           </div>
         );
       })}
       </div>
-      <span className="text-center text-sm font-bold tracking-[0.2em] text-[#94A3B8]">{rightLabel}</span>
     </div>
   );
 
   return (
     <div className="px-2 py-2">
-      <div className="mx-auto flex max-w-5xl flex-col gap-5">
-        {renderRow(upperTeeth, 'R', 'L')}
-        {renderRow(lowerTeeth, '', '')}
+      <div className="mx-auto flex w-fit max-w-full items-stretch gap-3">
+        <div className="flex w-[44px] shrink-0 items-center justify-center rounded-2xl border border-[#1E293B] bg-[#0B1220] shadow-[inset_0_0_0_1px_rgba(148,163,184,0.08)]">
+          <span className="text-center text-[27px] font-bold tracking-[0.2em] text-[#94A3B8]">
+            R
+          </span>
+        </div>
+        <div className="flex flex-col" style={{ gap: `${rowGap}px` }}>
+          {renderRow(upperTeeth)}
+          {renderRow(lowerTeeth)}
+        </div>
+        <div className="flex w-[44px] shrink-0 items-center justify-center rounded-2xl border border-[#1E293B] bg-[#0B1220] shadow-[inset_0_0_0_1px_rgba(148,163,184,0.08)]">
+          <span className="text-center text-[27px] font-bold tracking-[0.2em] text-[#94A3B8]">
+            L
+          </span>
+        </div>
       </div>
     </div>
   );

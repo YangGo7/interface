@@ -1246,7 +1246,7 @@ export function ChartPage(props?: ChartPageProps) {
   };
 
   return (
-    <div className="h-screen w-full bg-[#0a0a0a] text-gray-100 flex flex-col overflow-hidden font-sans">
+    <div className="h-screen w-full text-gray-100 flex flex-col overflow-hidden font-sans" style={{ backgroundColor: '#06071A' }}>
       <TopHeader />
       {!hasData && !isProcessing && (
         <div className="flex-1 flex items-center justify-center">
@@ -1259,7 +1259,7 @@ export function ChartPage(props?: ChartPageProps) {
       {hasData && (
         <div className="flex flex-1 relative overflow-y-auto">
           {/* Left Toolbar remains vertical & functional */}
-          <aside className="w-32 min-w-32 flex-shrink-0 border-r border-gray-800 flex flex-col py-4 px-3 gap-4 z-50 bg-[#111111]">
+          <aside className="w-32 min-w-32 flex-shrink-0 border-r border-gray-800 flex flex-col py-4 px-3 gap-4 z-50" style={{ backgroundColor: '#0A0B22' }}>
             <div className="flex gap-2 [&>*]:flex-1">
               <ToolBtn active={activeTool === 'pointer'} onClick={resetView} icon={MousePointer} title="Reset / Pointer" />
               <ToolBtn active={activeTool === 'pan'} onClick={() => setActiveTool('pan')} icon={Hand} title="Pan" />
@@ -1308,7 +1308,7 @@ export function ChartPage(props?: ChartPageProps) {
           </aside>
 
           {/* Center: report-style stacked layout on dark background */}
-          <div className="flex-1 overflow-visible bg-[#f8fafc] text-[#0f172a]">
+          <div className="flex-1 overflow-visible text-gray-100" style={{ backgroundColor: '#06071A' }}>
             <div className="max-w-7xl mx-auto py-6 px-4 lg:px-8 space-y-6">
               {/* Hero card mimicking report_v2 */}
               <div className="bg-[#0f0f0f] border border-white/5 rounded-3xl shadow-2xl overflow-hidden">
@@ -1417,45 +1417,43 @@ export function ChartPage(props?: ChartPageProps) {
                 </div>
               </div>
 
-              <div className="mb-4 rounded-2xl border border-[#D7DCE3] bg-[#F3F4F6] shadow-sm">
+              <div className="mb-4 rounded-2xl border shadow-sm" style={{ backgroundColor: '#0B0D26', borderColor: 'rgba(255,255,255,0.10)' }}>
                 <div className="p-6">
                   <div className="space-y-6">
                     <div className="relative flex flex-col items-center gap-4 xl:pt-1">
                       <div className="min-w-0 flex justify-center">
                         <DentalChartLegend />
                       </div>
-                      <div className="flex justify-center xl:absolute xl:right-0 xl:top-0 xl:justify-end">
-                        <button
-                          onClick={() => setNumberingSystem(prev => prev === 'fdi' ? 'univ' : 'fdi')}
-                          className="inline-flex items-center gap-2 rounded-full border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-sm transition-all hover:bg-[#F8FAFC]"
-                        >
-                          <RotateCw size={12} className="text-[#2563EB]" />
-                          Notation: <span className="text-[#2563EB] whitespace-nowrap">{numberingSystem === 'fdi' ? 'FDI (11-48)' : 'Univ (1-32)'}</span>
-                        </button>
-                      </div>
                       <div className="flex justify-center">
-                        <a
-                          href={odontoUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-2 rounded-full border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-sm transition-all hover:bg-[#F8FAFC]"
-                        >
-                          Odontogram Reference
-                        </a>
+                        <span className="text-sm font-semibold tracking-[0.08em] text-[#CBD5E1]">
+                          Odontogram
+                        </span>
                       </div>
                     </div>
 
-                    <section className="rounded-2xl border border-[#D7DCE3] bg-white px-6 py-5 shadow-sm">
-                      <h3 className="mb-5 text-[28px] font-bold tracking-[-0.03em] text-[#334155]">Dental Chart</h3>
-                      <BottomTeethChart
-                        onToothClick={(id) => setSelectedTooth(id)}
-                        selectedTooth={selectedTooth}
-                        statuses={statuses}
-                        highlightRing={chartHighlights}
-                        extraction={extractionCandidates}
-                        implantSites={implantSiteCandidates}
-                        numberingSystem={numberingSystem}
-                      />
+                    <section className="rounded-2xl border px-6 py-5 shadow-sm" style={{ backgroundColor: '#090B20', borderColor: 'rgba(255,255,255,0.10)' }}>
+                      {/* <h3 className="mb-5 text-[28px] font-bold tracking-[-0.03em] text-[#334155]">Dental Chart</h3> */}
+                      <div className="flex flex-col items-center">
+                        <BottomTeethChart
+                          onToothClick={(id) => setSelectedTooth(id)}
+                          selectedTooth={selectedTooth}
+                          statuses={statuses}
+                          highlightRing={chartHighlights}
+                          extraction={extractionCandidates}
+                          implantSites={implantSiteCandidates}
+                          numberingSystem={numberingSystem}
+                        />
+                        <div className="mt-5 flex justify-center">
+                          <button
+                            onClick={() => setNumberingSystem(prev => prev === 'fdi' ? 'univ' : 'fdi')}
+                            className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm transition-all"
+                            style={{ backgroundColor: '#10132F', borderColor: '#2A3166', color: '#E5E7EB' }}
+                          >
+                            <RotateCw size={12} className="text-[#2563EB]" />
+                            Notation: <span className="text-[#2563EB] whitespace-nowrap">{numberingSystem === 'fdi' ? 'FDI (11-48)' : 'Univ (1-32)'}</span>
+                          </button>
+                        </div>
+                      </div>
                     </section>
                   </div>
                 </div>
