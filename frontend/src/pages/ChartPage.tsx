@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 import { BottomTeethChart } from '../components/BottomTeethChart';
 import {
   AlertTriangle, Activity, Zap, Layers, Image as ImageIcon,
-  MousePointer, Hand, ZoomIn, Move, RotateCw, FlipHorizontal,
+  MousePointer, Hand, ZoomIn, RotateCw, FlipHorizontal,
   Ruler, PenLine, Loader2, ZoomOut, RotateCcw, AlertCircle, Skull,
   ClipboardList, Quote, Sparkles, Grid
 } from 'lucide-react';
@@ -37,7 +37,6 @@ export function ChartPage(props?: ChartPageProps) {
 
   const [selectedTooth, setSelectedTooth] = useState<number | undefined>(undefined);
   const [viewMode, setViewMode] = useState<'overlay' | 'original'>('overlay');
-  const [activeTab, setActiveTab] = useState<'overview' | 'periodontitis' | 'implant'>('overview');
   const [containerHeight] = useState(560);
   const [numberingSystem, setNumberingSystem] = useState<'fdi' | 'univ'>('fdi'); // [NEW]
 
@@ -316,6 +315,10 @@ export function ChartPage(props?: ChartPageProps) {
   const extractionCandidates = result?.extraction_candidates || [];
   const implantSiteCandidates = result?.implant_site_candidates || result?.implant_candidates || [];
   const perioHighlights = result?.periodontitis_highlight_teeth || [];
+  const chartHighlights = [
+    ...perioHighlights,
+    ...implantSiteCandidates.map((c: any) => c?.site_fdi || c?.tooth || c),
+  ];
   const odontoUrl = '/imgs/Odonto/odontogram.png';
 
   // --- Image Source Logic ---
@@ -1234,7 +1237,7 @@ export function ChartPage(props?: ChartPageProps) {
         <g key={key} {...commonProps}>
           {renderInfoLabel(pts[0].x, pts[0].y, [shape.text || 'Annotation'], 'start', false)}
           <text x={pts[0].x} y={pts[0].y} fill={color} fontSize={txtSz} fontWeight="bold" style={{ textShadow: '0px 0px 4px black' }}>
-ㅋ            {shape.text}
+            {shape.text}
           </text>
         </g>
       );
@@ -1257,28 +1260,27 @@ export function ChartPage(props?: ChartPageProps) {
         <div className="flex flex-1 relative overflow-y-auto">
           {/* Left Toolbar remains vertical & functional */}
           <aside className="w-32 min-w-32 flex-shrink-0 border-r border-gray-800 flex flex-col py-4 px-3 gap-4 z-50 bg-[#111111]">
-            <div className="flex gap-2">
+            <div className="flex gap-2 [&>*]:flex-1">
               <ToolBtn active={activeTool === 'pointer'} onClick={resetView} icon={MousePointer} title="Reset / Pointer" />
               <ToolBtn active={activeTool === 'pan'} onClick={() => setActiveTool('pan')} icon={Hand} title="Pan" />
             </div>
-            <div className="flex gap-2">
-              <ToolBtn active={activeTool === 'zoom'} onClick={() => setActiveTool('zoom')} icon={ZoomIn} title="Zoom" />
-              <ToolBtn active={activeTool === 'wlww'} onClick={() => setActiveTool('wlww')} icon={Move} title="WL/WW" />
-            </div>
-            <div className="h-px w-full bg-dashed bg-gray-700 opacity-50" />
-            <div className="flex gap-2">
+            <div className="flex gap-2 [&>*]:flex-1">
+              <ToolBtn active={activeTool === 'wlww'} onClick={() => setActiveTool('wlww')} icon={WindowLevelIcon} title="Window / Level" />
               <ToolBtn active={false} onClick={() => setRotation(r => r + 90)} icon={RotateCw} title="Rotate 90" />
-              <ToolBtn active={false} onClick={() => setFlipped(f => !f)} icon={FlipHorizontal} title="Flip Horizontal" />
             </div>
             <div className="h-px w-full bg-dashed bg-gray-700 opacity-50" />
-            <div className="flex gap-2">
+            <div className="flex gap-2 [&>*]:flex-1">
+              <ToolBtn active={false} onClick={() => setFlipped(f => !f)} icon={FlipHorizontal} title="Flip Horizontal" />
               <ToolBtn active={activeTool === 'measure'} onClick={(e: any) => openMenu(e, 'measure')} icon={Ruler} title="Measure" />
+            </div>
+            <div className="flex gap-2 [&>*]:flex-1">
               <ToolBtn active={activeTool === 'annotate'} onClick={(e: any) => openMenu(e, 'annotate')} icon={PenLine} title="Annotate" />
+              <div className="min-h-[44px]" aria-hidden="true" />
             </div>
 
             {/* Zoom Controls at Bottom */}
             <div className="flex flex-col gap-2 mt-auto pb-2">
-              <div className="flex gap-2">
+              <div className="flex gap-2 [&>*]:flex-1">
                 <button onClick={() => handleZoom(0.1)} className="w-full p-2 bg-gray-800/50 rounded-xl hover:bg-gray-700 text-gray-400 transition-colors flex items-center justify-center">
                   <ZoomIn className="w-5 h-5" />
                 </button>
@@ -1286,9 +1288,12 @@ export function ChartPage(props?: ChartPageProps) {
                   <ZoomOut className="w-5 h-5" />
                 </button>
               </div>
-              <button onClick={() => { setZoom(1); fitImageToViewer(); }} className="w-full p-2 bg-gray-800/50 rounded-xl hover:bg-gray-700 text-gray-400 transition-colors group flex items-center justify-center">
-                <RotateCcw className="w-5 h-5 group-hover:-rotate-180 transition-transform duration-500" />
-              </button>
+              <div className="flex gap-2 [&>*]:flex-1">
+                <button onClick={() => { setZoom(1); fitImageToViewer(); }} className="w-full p-2 bg-gray-800/50 rounded-xl hover:bg-gray-700 text-gray-400 transition-colors group flex items-center justify-center">
+                  <RotateCcw className="w-5 h-5 group-hover:-rotate-180 transition-transform duration-500" />
+                </button>
+                <div className="min-h-[44px]" aria-hidden="true" />
+              </div>
               <button
                 onClick={() => setViewMode(viewMode === 'original' ? 'overlay' : 'original')}
                 className={`w-full p-2 rounded-xl transition-all duration-200 flex items-center justify-center ${viewMode === 'overlay'
@@ -1309,7 +1314,7 @@ export function ChartPage(props?: ChartPageProps) {
               <div className="bg-[#0f0f0f] border border-white/5 rounded-3xl shadow-2xl overflow-hidden">
                 <div className="flex flex-col lg:flex-row lg:items-start gap-6">
                   {/* Viewer column */}
-                  <div className="w-full lg:w-[68%] bg-black relative">
+                  <div className="w-full bg-black relative">
                     <div className="absolute top-4 left-4 z-10 flex items-center gap-3 bg-black/60 backdrop-blur-xl px-5 py-2.5 rounded-full border border-white/10 shadow-2xl pointer-events-none">
                       <div className={`w-2.5 h-2.5 rounded-full ${viewMode === 'overlay' ? 'bg-indigo-500 shadow-[0_0_10px_#6366f1] animate-pulse' : 'bg-gray-500'}`} />
                       <span className="text-xs font-bold uppercase tracking-wider text-gray-300">
@@ -1344,7 +1349,11 @@ export function ChartPage(props?: ChartPageProps) {
                               src={showSrc}
                               alt="Analysis Result"
                               className="block w-full h-full select-none pointer-events-none"
-                              style={{ position: 'relative', zIndex: 1 }}
+                              style={{
+                                position: 'relative',
+                                zIndex: 1,
+                                filter: `brightness(${brightness}%) contrast(${contrast}%)`,
+                              }}
                               draggable={false}
                               ref={imageRef}
                               onLoad={(e) => {
@@ -1405,188 +1414,57 @@ export function ChartPage(props?: ChartPageProps) {
                     </div>
                   </div>
 
-                  <aside className="w-full lg:w-[32%] px-4 pb-4 lg:pl-0 lg:pr-4 lg:py-4 space-y-4">
-                    <section className="rounded-2xl border border-white/10 bg-[#111827] p-4 shadow-xl">
-                      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
-                        <Activity className="h-4 w-4 text-cyan-400" />
-                        <span>Detection Counts</span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        {counts.map((item) => (
-                          <div key={item.label} className="rounded-xl border border-white/10 bg-[#0f172a] px-3 py-3">
-                            <div className="text-[11px] uppercase tracking-wide text-gray-400">{item.label}</div>
-                            <div className="mt-1 text-xl font-bold text-white">{item.value}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-
-                    <section className="rounded-2xl border border-white/10 bg-[#111827] p-4 shadow-xl">
-                      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
-                        <AlertTriangle className="h-4 w-4 text-rose-400" />
-                        <span>Findings</span>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {findings.length > 0 && findings[0].label !== 'No Data' ? findings.map((item, idx) => (
-                          <span key={`${item.label}-${idx}`} className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${item.color}`}>
-                            <span>{item.label}</span>
-                            <span className="font-mono">{item.value}</span>
-                          </span>
-                        )) : (
-                          <span className="text-sm text-gray-500">No findings</span>
-                        )}
-                      </div>
-                    </section>
-
-                    <section className="rounded-2xl border border-white/10 bg-[#111827] p-4 shadow-xl">
-                      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
-                        <Zap className="h-4 w-4 text-amber-400" />
-                        <span>PBL Summary</span>
-                      </div>
-                      <div className="flex max-h-[180px] flex-wrap gap-2 overflow-y-auto">
-                        {pblEntries.length > 0 ? pblEntries.slice(0, 24).map((entry, idx) => (
-                          <span key={`${entry}-${idx}`} className="rounded-full border border-white/10 bg-black/30 px-2.5 py-1 text-xs font-mono text-gray-200">
-                            {entry}
-                          </span>
-                        )) : (
-                          <span className="text-sm text-gray-500">No PBL data</span>
-                        )}
-                      </div>
-                    </section>
-                  </aside>
                 </div>
               </div>
 
-              {/* Tabs below viewer */}
-              <div className="bg-[#ffffff] border border-[#E2E8F0] rounded-2xl shadow-sm">
-                <div className="px-4 pt-3 pb-2 border-b border-[#E2E8F0] bg-[#F8FAFC] rounded-t-2xl">
-                  <div role="tablist" className="flex items-center gap-2 text-sm font-semibold text-[#475569]">
-                    {[
-                      { key: 'overview', label: 'Overview' },
-                      { key: 'periodontitis', label: 'Periodontitis' },
-                      { key: 'implant', label: 'Implant Option' },
-                    ].map(tab => (
-                      <button
-                        key={tab.key}
-                        role="tab"
-                        aria-selected={activeTab === tab.key}
-                        onClick={() => setActiveTab(tab.key as any)}
-                        className={`px-4 py-2 rounded-[10px] border transition-all ${activeTab === tab.key
-                          ? 'bg-white text-[#0f172a] border-[#E2E8F0] shadow-sm'
-                          : 'bg-transparent text-[#475569] border-transparent hover:bg-[#EEF2FF] hover:text-[#0f172a]'
-                          }`}
-                      >
-                        {tab.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="p-4">
-                  {/* Overview Panel */}
-                  {activeTab === 'overview' && (
-                    <div role="tabpanel" className="space-y-4">
-
-                      {/* Controls Row */}
-                      <div className="flex justify-center flex-wrap gap-4 items-center">
-                        <OverviewLegend />
+              <div className="mb-4 rounded-2xl border border-[#D7DCE3] bg-[#F3F4F6] shadow-sm">
+                <div className="p-6">
+                  <div className="space-y-6">
+                    <div className="relative flex flex-col items-center gap-4 xl:pt-1">
+                      <div className="min-w-0 flex justify-center">
+                        <DentalChartLegend />
+                      </div>
+                      <div className="flex justify-center xl:absolute xl:right-0 xl:top-0 xl:justify-end">
                         <button
                           onClick={() => setNumberingSystem(prev => prev === 'fdi' ? 'univ' : 'fdi')}
-                          className="px-3 py-1.5 rounded-full text-xs font-semibold bg-white border border-[#E2E8F0] shadow-sm hover:bg-gray-50 flex items-center gap-2 transition-all"
+                          className="inline-flex items-center gap-2 rounded-full border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-sm transition-all hover:bg-[#F8FAFC]"
                         >
-                          <RotateCw size={12} className="text-blue-500" />
-                          Notation: <span className="text-blue-600">{numberingSystem === 'fdi' ? 'FDI (11-48)' : 'Univ (1-32)'}</span>
+                          <RotateCw size={12} className="text-[#2563EB]" />
+                          Notation: <span className="text-[#2563EB] whitespace-nowrap">{numberingSystem === 'fdi' ? 'FDI (11-48)' : 'Univ (1-32)'}</span>
                         </button>
                       </div>
-
-                      <BottomTeethChart
-                        onToothClick={(id) => setSelectedTooth(id)}
-                        selectedTooth={selectedTooth}
-                        statuses={statuses}
-                        highlightRing={[]}
-                        extraction={[]}
-                        implantSites={[]}
-                        numberingSystem={numberingSystem} // [NEW] Prop
-                      />
-                      <MetricsAndAlerts />
-                    </div>
-                  )}
-
-                  {/* Periodontitis Panel */}
-                  {activeTab === 'periodontitis' && (
-                    <div role="tabpanel" className="space-y-4">
-                      <LegendRow extra={false} odontoUrl={odontoUrl} />
-                      <BottomTeethChart
-                        onToothClick={(id) => setSelectedTooth(id)}
-                        selectedTooth={selectedTooth}
-                        statuses={statuses}
-                        highlightRing={perioHighlights}
-                        extraction={[]}
-                        implantSites={[]}
-                        numberingSystem={numberingSystem}
-                      />
-                      <div className="bg-white border border-[#E2E8F0] rounded-xl p-4 text-sm text-[#0f172a] shadow-sm">
-                        <div className="flex items-center justify-between mb-2">
-                          <h3 className="text-base font-semibold">Periodontitis Staging</h3>
-                          <span className="text-xs text-[#475569]">Stage: {result?.perio_stage || 'Unknown'}</span>
-                        </div>
-                        <ul className="list-disc list-inside text-[#475569] space-y-1">
-                          {(result?.perio_reasons || ['추가 검사가 필요합니다.']).slice(0, 3).map((t: any, i: number) => (
-                            <li key={i}>{t}</li>
-                          ))}
-                        </ul>
-                        <p className="mt-2 text-xs text-[#ef4444]">※ 추정 결과이므로 임상 검증이 필요합니다.</p>
+                      <div className="flex justify-center">
+                        <a
+                          href={odontoUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-2 rounded-full border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-semibold text-[#334155] shadow-sm transition-all hover:bg-[#F8FAFC]"
+                        >
+                          Odontogram Reference
+                        </a>
                       </div>
                     </div>
-                  )}
 
-                  {/* Implant Option Panel */}
-                  {activeTab === 'implant' && (
-                    <div role="tabpanel" className="space-y-4">
-                      <LegendRow extra odontoUrl={odontoUrl} />
+                    <section className="rounded-2xl border border-[#D7DCE3] bg-white px-6 py-5 shadow-sm">
+                      <h3 className="mb-5 text-[28px] font-bold tracking-[-0.03em] text-[#334155]">Dental Chart</h3>
                       <BottomTeethChart
                         onToothClick={(id) => setSelectedTooth(id)}
                         selectedTooth={selectedTooth}
                         statuses={statuses}
-                        highlightRing={implantSiteCandidates.map((c: any) => c?.tooth || c?.site_fdi || c)}
+                        highlightRing={chartHighlights}
                         extraction={extractionCandidates}
                         implantSites={implantSiteCandidates}
                         numberingSystem={numberingSystem}
                       />
-                      <div className="grid lg:grid-cols-2 gap-4">
-                        <div className="bg-white border border-[#E2E8F0] rounded-xl p-4 text-sm text-[#0f172a] shadow-sm">
-                          <h3 className="text-base font-semibold mb-2">Extraction Candidates</h3>
-                          <ul className="space-y-1 text-[#475569]">
-                            {(extractionCandidates || []).map((c: any, idx: number) => (
-                              <li key={idx} className="flex items-center justify-between border-b border-[#E2E8F0] py-1">
-                                <span className="font-semibold text-[#0f172a]">FDI {c?.tooth || c?.fdi || '-'}</span>
-                                <span className="text-xs text-[#ef4444]">{c?.reason || c?.note || ''}</span>
-                              </li>
-                            ))}
-                            {(extractionCandidates || []).length === 0 && <li className="text-xs text-[#94A3B8]">데이터 없음</li>}
-                          </ul>
-                        </div>
-                        <div className="bg-white border border-[#E2E8F0] rounded-xl p-4 text-sm text-[#0f172a] shadow-sm">
-                          <h3 className="text-base font-semibold mb-2">Implant Site Candidates</h3>
-                          <ul className="space-y-1 text-[#475569]">
-                            {(implantSiteCandidates || []).map((c: any, idx: number) => (
-                              <li key={idx} className="flex items-center justify-between border-b border-[#E2E8F0] py-1">
-                                <span className="font-semibold text-[#0f172a]">FDI {c?.site_fdi || c?.tooth || '-'}</span>
-                                <span className="text-xs text-[#10B981]">{c?.safety_notes || c?.reason || ''}</span>
-                              </li>
-                            ))}
-                            {(implantSiteCandidates || []).length === 0 && <li className="text-xs text-[#94A3B8]">데이터 없음</li>}
-                          </ul>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                    </section>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
 
           {/* Right Panel (Drill-down details) */}
+
           {selectedTooth && (
             <div className="absolute top-0 right-0 h-full z-50 shadow-xl border-l border-gray-100">
               <RightPanel
@@ -1653,179 +1531,52 @@ function ToolBtn({ active, onClick, icon: Icon, title }: any) {
   );
 }
 
+function WindowLevelIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="1.5" y="1.5" width="21" height="21" rx="5" fill="currentColor" opacity="0.18" />
+      <circle cx="12" cy="12" r="6.5" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M12 5.5a6.5 6.5 0 0 1 0 13Z" fill="currentColor" opacity="0.95" />
+      <path d="M7 17 17 7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function CtxBtn({ onClick, label }: any) {
   return (
     <button onClick={onClick} className="block w-full text-left px-3 py-2 text-xs text-gray-700 bg-white hover:bg-indigo-50 hover:text-indigo-700 rounded transition-colors">{label}</button>
   );
 }
 
-// Legend chips
-function LegendRow({ extra, odontoUrl }: { extra: boolean; odontoUrl?: string }) {
-  const chips = [
-    { label: 'Healthy', fill: '#D1FAE5', border: '#34D399' },
-    { label: 'Findings', fill: '#FEE2E2', border: '#EF4444' },
-    { label: 'Implant', fill: '#DBEAFE', border: '#3B82F6' },
-    { label: 'Missing', fill: '#F1F5F9', border: '#94A3B8', dashed: true },
+function DentalChartLegend() {
+  const items = [
+    { label: 'Routine Checkup (Triage 3)', color: '#16A34A', dashed: false, gap: 18 },
+    { label: 'Treatment Required (Triage 2)', color: '#D4A106', dashed: false, gap: 24 },
+    { label: 'Urgent Priority (Triage 1)', color: '#DC2626', dashed: false, gap: 18 },
+    { label: 'Implant', color: '#2563EB', dashed: false, gap: 18 },
+    { label: 'Missing Tooth', color: '#94A3B8', dashed: true, gap: 0 },
   ];
-  if (extra) {
-    chips.push({ label: 'Extraction', fill: '#FFEDD5', border: '#F97316' });
-    chips.push({ label: 'Implant Site', fill: 'transparent', border: '#DC2626' });
-  }
+
   return (
-    <div className="flex flex-col items-center gap-2">
-      <div className="flex flex-wrap justify-center gap-2">
-        {chips.map((c, i) => (
+    <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-center text-[14px] font-semibold xl:max-w-none">
+      {items.map((item) => (
+        <div
+          key={item.label}
+          className="inline-flex items-center justify-center gap-3 whitespace-nowrap text-[#334155]"
+          style={{ marginRight: item.gap }}
+        >
           <span
-            key={i}
-            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs"
+            className="block w-7"
             style={{
-              background: c.fill,
-              border: `1px ${c.dashed ? 'dashed' : 'solid'} ${c.border}`,
-              color: '#0f172a'
+              borderTop: `3px ${item.dashed ? 'dashed' : 'solid'} ${item.color}`,
             }}
-          >
-            <span className="w-3 h-3 rounded-full" style={{ background: c.fill === 'transparent' ? c.border : c.border, opacity: 0.9 }} />
-            {c.label}
-          </span>
-        ))}
-      </div>
-      {odontoUrl && (
-        <a
-          href={odontoUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="text-xs px-3 py-1 rounded-full border border-[#E2E8F0] bg-white text-[#0f172a] shadow-sm hover:bg-[#EEF2FF]"
-        >
-          Odontogram (참조 이미지)
-        </a>
-      )}
-    </div>
-  );
-}
-
-function OverviewLegend() {
-  const chips = [
-    { label: 'Implant', fill: '#DBEAFE', border: '#3B82F6' },
-    { label: 'Missing', fill: '#F1F5F9', border: '#94A3B8', dashed: true },
-    { label: 'Findings', fill: '#FEE2E2', border: '#EF4444' },
-  ];
-  return (
-    <div className="flex flex-wrap justify-center gap-2">
-      {chips.map((c, i) => (
-        <span
-          key={i}
-          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs"
-          style={{
-            background: c.fill,
-            border: `1px ${c.dashed ? 'dashed' : 'solid'} ${c.border}`,
-            color: '#0f172a'
-          }}
-        >
-          {c.label}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-// Tile board for odontogram-style grid
-function TileBoard({
-  baseStatuses,
-  highlightRing,
-  extraction,
-  implantSites,
-  selected,
-  onSelect,
-}: {
-  baseStatuses: Record<string, string>;
-  highlightRing: any[];
-  extraction: any[];
-  implantSites: any[];
-  selected?: number;
-  onSelect: (t: number) => void;
-}) {
-  const rows = [
-    [18, 17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27, 28],
-    [48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38],
-  ];
-  const ringSet = new Set((highlightRing || []).map((t: any) => String(t)));
-  const exSet = new Set((extraction || []).map((t: any) => String(t?.tooth || t?.fdi || t)));
-  const impSet = new Set((implantSites || []).map((t: any) => String(t?.site_fdi || t?.tooth || t)));
-
-  const getStyle = (tooth: number) => {
-    const key = String(tooth);
-    const status = baseStatuses[key] || 'healthy';
-    let fill = '#D1FAE5'; let border = '#34D399';
-    if (status === 'requires') { fill = '#FEE2E2'; border = '#EF4444'; }
-    if (status === 'implant') { fill = '#DBEAFE'; border = '#3B82F6'; }
-    if (status === 'missing') { fill = '#F1F5F9'; border = '#94A3B8'; }
-    // overlays
-    if (exSet.has(key)) { fill = '#FFEDD5'; border = '#F97316'; }
-    const ring = ringSet.has(key) || impSet.has(key);
-    return { fill, border, ring };
-  };
-
-  return (
-    <div className="bg-white border border-[#E2E8F0] rounded-xl p-4 shadow-sm">
-      {rows.map((row, idx) => (
-        <div key={idx} className="flex gap-2 justify-center mb-2">
-          {row.map(tooth => {
-            const { fill, border, ring } = getStyle(tooth);
-            const isSelected = selected === tooth;
-            return (
-              <button
-                key={tooth}
-                onClick={() => onSelect(tooth)}
-                className="relative w-11 h-11 rounded-[10px] text-xs font-semibold transition-all"
-                style={{
-                  background: fill,
-                  border: `2px ${statusDashed(baseStatuses[String(tooth)]) ? 'dashed' : 'solid'} ${border}`,
-                  color: '#0f172a',
-                  boxShadow: isSelected ? '0 0 0 2px #6366F1' : undefined,
-                }}
-              >
-                {ring && <span className="absolute inset-[-4px] rounded-[12px] border-2 border-[#DC2626] pointer-events-none" />}
-                <span>{tooth}</span>
-              </button>
-            );
-          })}
+          />
+          <span className="whitespace-nowrap" style={{ color: item.color }}>{item.label}</span>
         </div>
       ))}
     </div>
   );
 }
 
-function statusDashed(status?: string) {
-  return status === 'missing';
-}
 
-function MetricsAndAlerts() {
-  return (
-    <div className="grid lg:grid-cols-3 gap-4">
-      <div className="lg:col-span-2 bg-white border border-[#E2E8F0] rounded-xl p-4 shadow-sm">
-        <h4 className="text-sm font-semibold text-[#0f172a] mb-2">Notes</h4>
-        <p className="text-sm text-[#475569]">상세 노트와 요약을 여기에 표시하세요.</p>
-      </div>
-      <div className="space-y-3">
-        <div className="bg-white border border-[#E2E8F0] rounded-xl p-3 shadow-sm">
-          <h4 className="text-sm font-bold text-[#0f172a] mb-2">Key Metrics</h4>
-          {/* placeholders; real values bound in caller if needed */}
-          <div className="grid grid-cols-2 gap-2 text-xs text-[#475569]">
-            <div><span className="font-semibold">Scale:</span> —</div>
-            <div><span className="font-semibold">Mode:</span> —</div>
-            <div><span className="font-semibold">Annotations:</span> —</div>
-            <div><span className="font-semibold">Zoom:</span> —</div>
-          </div>
-        </div>
-        <div className="bg-white border border-[#E2E8F0] rounded-xl p-3 shadow-sm">
-          <h4 className="text-sm font-bold text-[#0f172a] mb-2">Alerts</h4>
-          <div className="space-y-1 text-sm text-[#475569]">
-            <div className="flex items-center gap-2 text-[#d97706]"><AlertTriangle size={16} /> Caries flags</div>
-            <div className="flex items-center gap-2 text-[#ea580c]"><Zap size={16} /> Periapical flags</div>
-            <div className="flex items-center gap-2 text-[#0ea5e9]"><Activity size={16} /> Missing</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+

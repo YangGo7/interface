@@ -41,7 +41,7 @@ export function BottomTeethChart({
     let border = '#22c55e';
     if (reportStatus === 'triage-1') { fill = 'rgba(220, 38, 38, 0.2)'; border = '#dc2626'; }
     else if (reportStatus === 'triage-2') { fill = 'rgba(234, 179, 8, 0.2)'; border = '#eab308'; }
-    else if (reportStatus === 'missing') { fill = '#F8FAFC'; border = '#9CA3AF'; }
+    else if (reportStatus === 'missing') { fill = '#D1D5DB'; border = '#9CA3AF'; }
     else if (reportStatus === 'implant') { fill = 'rgba(37, 99, 235, 0.15)'; border = '#2563EB'; }
     if (isExtraction) { fill = '#FFEDD5'; border = '#F97316'; }
     const dashed = reportStatus === 'missing';
@@ -68,8 +68,15 @@ export function BottomTeethChart({
     return String(map[fdi] || fdi);
   };
 
-  const renderRow = (teeth: number[], isUpper: boolean) => (
-    <div className="flex justify-center gap-3 flex-wrap sm:flex-nowrap">
+  const shouldMirrorTooth = (tooth: number) => {
+    const quadrant = Math.floor(tooth / 10);
+    return quadrant === 2 || quadrant === 3;
+  };
+
+  const renderRow = (teeth: number[], leftLabel: string, rightLabel: string) => (
+    <div className="grid grid-cols-[24px_minmax(0,1fr)_24px] items-center gap-3">
+      <span className="text-center text-sm font-bold tracking-[0.2em] text-[#94A3B8]">{leftLabel}</span>
+      <div className="flex justify-center gap-2 flex-wrap sm:flex-nowrap">
       {teeth.map((tooth) => {
         const { fill, border, dashed, ring } = getTileStyle(tooth);
         const numColor = dashed ? '#94A3B8' : border;
@@ -80,20 +87,27 @@ export function BottomTeethChart({
 
             <button
               onClick={() => onToothClick(tooth)}
-              className={`w-14 h-[72px] rounded-full border-2 flex items-center justify-center transition-all ${selectedTooth === tooth ? 'ring-2 ring-indigo-500 ring-offset-2 ring-offset-black/40' : ''
+              className={`flex h-[74px] w-11 items-center justify-center border-2 transition-all ${selectedTooth === tooth ? 'ring-2 ring-[#2563EB]/35 ring-offset-2 ring-offset-white' : ''
                 }`}
               style={{
                 background: fill,
                 borderColor: border,
                 borderStyle: dashed ? 'dashed' : 'solid',
-                boxShadow: ring ? '0 0 0 2px #DC2626 inset, 0 1px 2px rgba(0,0,0,0.12)' : '0 1px 2px rgba(0,0,0,0.08)'
+                boxShadow: ring ? '0 0 0 1.5px #DC2626 inset, 0 4px 10px rgba(15,23,42,0.06)' : '0 4px 10px rgba(15,23,42,0.05)',
+                clipPath: 'polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px)',
               }}
             >
               <img
                 src={getOdontoImg(tooth)}
                 alt={`Tooth ${tooth}`}
-                className="w-12 h-14 object-contain mix-blend-multiply pointer-events-none"
-                style={{ filter: 'contrast(1.4) saturate(0.9)' }}
+                className="h-[58px] w-9 object-contain pointer-events-none"
+                style={{
+                  transform: shouldMirrorTooth(tooth) ? 'scaleX(-1)' : 'none',
+                  filter: dashed
+                    ? 'brightness(0) saturate(0)'
+                    : 'brightness(0) invert(1) drop-shadow(0 0 0.55px rgba(255,255,255,1)) drop-shadow(0 0 0.55px rgba(255,255,255,1))',
+                  opacity: dashed ? 0.9 : 0.98,
+                }}
                 onError={(e) => {
                   const svg = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="50"><rect width="40" height="50" rx="10" ry="10" fill="white" stroke="#94A3B8" stroke-width="2"/><line x1="10" y1="10" x2="30" y2="40" stroke="#94A3B8" stroke-width="2"/></svg>');
                   (e.currentTarget as HTMLImageElement).src = `data:image/svg+xml,${svg}`;
@@ -106,15 +120,16 @@ export function BottomTeethChart({
           </div>
         );
       })}
+      </div>
+      <span className="text-center text-sm font-bold tracking-[0.2em] text-[#94A3B8]">{rightLabel}</span>
     </div>
   );
 
   return (
-    <div className="bg-white border-t border-gray-200 px-4 py-6">
-      <div className="max-w-4xl mx-auto flex flex-col gap-4">
-        {renderRow(upperTeeth, true)}
-        <div className="h-px w-full bg-gray-200" />
-        {renderRow(lowerTeeth, false)}
+    <div className="px-2 py-2">
+      <div className="mx-auto flex max-w-5xl flex-col gap-5">
+        {renderRow(upperTeeth, 'R', 'L')}
+        {renderRow(lowerTeeth, '', '')}
       </div>
     </div>
   );
