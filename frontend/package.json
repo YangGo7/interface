@@ -9,8 +9,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@cornerstonejs/core": "^4.19.0",
+    "@cornerstonejs/dicom-image-loader": "^4.19.0",
+    "@cornerstonejs/tools": "^4.19.0",
     "@types/uuid": "^10.0.0",
+    "d3-color": "^3.1.0",
+    "dicom-parser": "^1.8.21",
+    "gl-matrix": "^3.4.3",
     "lucide-react": "^0.487.0",
+    "mathjs": "^15.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.1.1",

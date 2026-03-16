@@ -1,4 +1,4 @@
-import { useLocation } from 'react-router-dom';
+﻿import { useLocation } from 'react-router-dom';
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { BottomTeethChart } from '../components/BottomTeethChart';
@@ -943,8 +943,7 @@ export function ChartPage(props?: ChartPageProps) {
       return;
     }
 
-    const isDrawing = activeTool === 'measure' || activeTool === 'annotate' || activeSubTool;
-    if (isDrawing) {
+    if (activeTool === 'measure' || activeTool === 'annotate') {
       if (!activeSubTool) return;
       const pt = toImgCoords(e.clientX, e.clientY);
       if (!pt) {
@@ -997,8 +996,7 @@ export function ChartPage(props?: ChartPageProps) {
       return;
     }
 
-    const isDrawing = activeTool === 'measure' || activeTool === 'annotate' || activeSubTool;
-    if (activeSubTool && isDrawing) {
+    if (activeSubTool && (activeTool === 'measure' || activeTool === 'annotate')) {
       const pt = toImgCoords(e.clientX, e.clientY);
       setTempPoint(pt);
     }
@@ -1103,7 +1101,6 @@ export function ChartPage(props?: ChartPageProps) {
     setTempPoint(null);
     if (type === 'grid') setTempGridLayout(gridLayout);
 
-    // Position menu near the button that was clicked
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     // We are inside a float absolute div, coordinate space might be tricky if we use fixed.
     // But fixed is safest.
@@ -1698,105 +1695,110 @@ export function ChartPage(props?: ChartPageProps) {
 
           {/* Right Panel (Drill-down details) */}
 
-          {selectedTooth && (
-            <div className="absolute top-0 right-0 h-full z-50 shadow-xl border-l border-gray-100">
-              <RightPanel
-                selectedTooth={selectedTooth}
-                result={result}
-                statuses={statuses}
-                onClose={() => setSelectedTooth(undefined)}
-                numberingSystem={numberingSystem}
-              />
-            </div>
-          )}
+          {
+            selectedTooth && (
+              <div className="absolute top-0 right-0 h-full z-50 shadow-xl border-l border-gray-100">
+                <RightPanel
+                  selectedTooth={selectedTooth}
+                  result={result}
+                  statuses={statuses}
+                  onClose={() => setSelectedTooth(undefined)}
+                  numberingSystem={numberingSystem}
+                />
+              </div>
+            )
+          }
 
           {/* Floating Context Menu */}
-          {contextMenu.show && createPortal(
-            <>
-              <div className="fixed inset-0 z-[999]" onClick={() => setContextMenu({ ...contextMenu, show: false })} />
-              <div
-                className="fixed z-[1000] w-[220px] border border-gray-200 rounded-lg shadow-2xl p-1 flex flex-col gap-1 backdrop-blur-sm isolate"
-                style={{
-                  position: 'fixed',
-                  top: `${contextMenu.y}px`,
-                  left: `${contextMenu.x + 12}px`,
-                  backgroundColor: 'rgba(255, 255, 255, 0.98)',
-                  color: '#111827',
-                }}
-              >
-                {contextMenu.menu === 'measure' ? (
-                  <>
-                    <CtxBtn onClick={() => selectSubTool('length')} label="Length" />
-                    <CtxBtn onClick={() => selectSubTool('bidirectional')} label="Bidirectional" />
-                    <CtxBtn onClick={() => selectSubTool('angle')} label="Angle" />
-                  </>
-                ) : contextMenu.menu === 'annotate' ? (
-                  <>
-                    <CtxBtn onClick={() => selectSubTool('text')} label="Annotation" />
-                    <CtxBtn onClick={() => selectSubTool('arrow')} label="Arrow" />
-                    <CtxBtn onClick={() => selectSubTool('ellipse')} label="Ellipse" />
-                    <CtxBtn onClick={() => selectSubTool('rect')} label="Rectangle" />
-                    <CtxBtn onClick={() => selectSubTool('circle')} label="Circle" />
-                    <CtxBtn onClick={() => selectSubTool('roi-free')} label="Freehand ROI" />
-                    <CtxBtn onClick={() => selectSubTool('spline-roi')} label="Spline ROI" />
-                    <CtxBtn onClick={() => selectSubTool('livewire')} label="Livewire Tool" />
-                  </>
-                ) : (
-                  <div className="p-4 space-y-4 min-w-[220px]">
-                    <div className="flex items-center justify-between border-b border-gray-100 pb-2 mb-2">
-                      <span className="text-[11px] font-bold text-gray-800 uppercase tracking-wider">Grid Layout</span>
-                      <span className="text-[10px] text-indigo-500 font-black">{tempGridLayout.rows} x {tempGridLayout.cols}</span>
-                    </div>
-                    <div className="flex gap-4">
-                      <div className="flex-1 space-y-1.5">
-                        <label className="text-[10px] text-gray-500 font-bold uppercase tracking-tight">Rows</label>
-                        <input
-                          type="number"
-                          min="1"
-                          max="8"
-                          value={tempGridLayout.rows}
-                          onChange={(e) => {
-                            const val = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
-                            setTempGridLayout(prev => ({ ...prev, rows: val }));
-                          }}
-                          className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all font-semibold"
-                        />
+          {
+            contextMenu.show && createPortal(
+              <>
+                <div className="fixed inset-0 z-[999]" onClick={() => setContextMenu({ ...contextMenu, show: false })} />
+                <div
+                  className="fixed z-[1000] w-[220px] border border-gray-200 rounded-lg shadow-2xl p-1 flex flex-col gap-1 backdrop-blur-sm isolate"
+                  style={{
+                    position: 'fixed',
+                    top: `${contextMenu.y}px`,
+                    left: `${contextMenu.x + 12}px`,
+                    backgroundColor: 'rgba(255, 255, 255, 0.98)',
+                    color: '#111827',
+                  }}
+                >
+                  {contextMenu.menu === 'measure' ? (
+                    <>
+                      <CtxBtn onClick={() => selectSubTool('length')} label="Length" />
+                      <CtxBtn onClick={() => selectSubTool('bidirectional')} label="Bidirectional" />
+                      <CtxBtn onClick={() => selectSubTool('angle')} label="Angle" />
+                    </>
+                  ) : contextMenu.menu === 'annotate' ? (
+                    <>
+                      <CtxBtn onClick={() => selectSubTool('text')} label="Annotation" />
+                      <CtxBtn onClick={() => selectSubTool('arrow')} label="Arrow" />
+                      <CtxBtn onClick={() => selectSubTool('ellipse')} label="Ellipse" />
+                      <CtxBtn onClick={() => selectSubTool('rect')} label="Rectangle" />
+                      <CtxBtn onClick={() => selectSubTool('circle')} label="Circle" />
+                      <CtxBtn onClick={() => selectSubTool('roi-free')} label="Freehand ROI" />
+                      <CtxBtn onClick={() => selectSubTool('spline-roi')} label="Spline ROI" />
+                      <CtxBtn onClick={() => selectSubTool('livewire')} label="Livewire Tool" />
+                    </>
+                  ) : (
+                    <div className="p-4 space-y-4 min-w-[220px]">
+                      <div className="flex items-center justify-between border-b border-gray-100 pb-2 mb-2">
+                        <span className="text-[11px] font-bold text-gray-800 uppercase tracking-wider">Grid Layout</span>
+                        <span className="text-[10px] text-indigo-500 font-black">{tempGridLayout.rows} x {tempGridLayout.cols}</span>
                       </div>
-                      <div className="flex-1 space-y-1.5">
-                        <label className="text-[10px] text-gray-500 font-bold uppercase tracking-tight">Cols</label>
-                        <input
-                          type="number"
-                          min="1"
-                          max="8"
-                          value={tempGridLayout.cols}
-                          onChange={(e) => {
-                            const val = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
-                            setTempGridLayout(prev => ({ ...prev, cols: val }));
-                          }}
-                          className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all font-semibold"
-                        />
+                      <div className="flex gap-4">
+                        <div className="flex-1 space-y-1.5">
+                          <label className="text-[10px] text-gray-500 font-bold uppercase tracking-tight">Rows</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="8"
+                            value={tempGridLayout.rows}
+                            onChange={(e) => {
+                              const val = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
+                              setTempGridLayout(prev => ({ ...prev, rows: val }));
+                            }}
+                            className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all font-semibold"
+                          />
+                        </div>
+                        <div className="flex-1 space-y-1.5">
+                          <label className="text-[10px] text-gray-500 font-bold uppercase tracking-tight">Cols</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="8"
+                            value={tempGridLayout.cols}
+                            onChange={(e) => {
+                              const val = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
+                              setTempGridLayout(prev => ({ ...prev, cols: val }));
+                            }}
+                            className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all font-semibold"
+                          />
+                        </div>
                       </div>
+                      <button
+                        onClick={() => {
+                          setGridLayout(tempGridLayout);
+                          setViewerMode('grid');
+                          setContextMenu({ ...contextMenu, show: false });
+                        }}
+                        className="w-full py-2.5 bg-indigo-600 text-white text-[10px] font-bold uppercase tracking-widest rounded shadow-md hover:bg-indigo-700 transition-colors"
+                      >
+                        Apply & Close
+                      </button>
                     </div>
-                    <button
-                      onClick={() => {
-                        setGridLayout(tempGridLayout);
-                        setViewerMode('grid');
-                        setContextMenu({ ...contextMenu, show: false });
-                      }}
-                      className="w-full py-2.5 bg-indigo-600 text-white text-[10px] font-bold uppercase tracking-widest rounded shadow-md hover:bg-indigo-700 transition-colors"
-                    >
-                      Apply & Close
-                    </button>
-                  </div>
-                )}
-              </div>
-            </>,
-            document.body
-          )}
+                  )}
+                </div>
+              </>,
+              document.body
+            )
+          }
 
-        </div>
-      )}
-    </div>
+        </div >
+      )
+      }
+    </div >
   );
 }
 

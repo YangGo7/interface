@@ -1,8 +1,17 @@
+import path from 'node:path';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react-swc';
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@cornerstonejs/codec-libjpeg-turbo-8bit/decodewasmjs': path.resolve(__dirname, 'node_modules/@cornerstonejs/codec-libjpeg-turbo-8bit/dist/libjpegturbowasm_decode.js'),
+      '@cornerstonejs/codec-charls/decodewasmjs': path.resolve(__dirname, 'node_modules/@cornerstonejs/codec-charls/dist/charlswasm_decode.js'),
+      '@cornerstonejs/codec-openjpeg/decodewasmjs': path.resolve(__dirname, 'node_modules/@cornerstonejs/codec-openjpeg/dist/openjpegwasm_decode.js'),
+      '@cornerstonejs/codec-openjph/wasmjs': path.resolve(__dirname, 'node_modules/@cornerstonejs/codec-openjph/dist/openjphjs.js'),
+    },
+  },
   server: {
     port: 5173,
     proxy: {
@@ -16,5 +25,15 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  optimizeDeps: {
+    exclude: [
+      '@cornerstonejs/dicom-image-loader',
+      '@cornerstonejs/codec-libjpeg-turbo-8bit',
+      '@cornerstonejs/codec-charls',
+      '@cornerstonejs/codec-openjpeg',
+      '@cornerstonejs/codec-openjph',
+    ],
+    include: ['dicom-parser'],
   },
 });

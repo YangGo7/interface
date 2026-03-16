@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
+import { ImageViewer, CornerstoneViewer, CornerstoneNativeToolsViewer } from '../viewer';
 
-// Simple session ID generator (avoids 'uuid' dependency issues without restart)
 const generateSessionId = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID();
@@ -13,21 +13,38 @@ export function TestPage() {
   const [status, setStatus] = useState<string>('');
   const [statusType, setStatusType] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [reportHtml, setReportHtml] = useState<string | null>(null);
   const [reportPdfUrl, setReportPdfUrl] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string>('');
 
   useEffect(() => {
-    // Generate session ID on mount
     setSessionId(generateSessionId());
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
+  }, [previewUrl]);
+
   const handleUpload = async () => {
-    if (!file || !sessionId) return;
+    if (!file || !sessionId) {
+      return;
+    }
 
     setStatusType('loading');
-    setStatus('1단계: 파일 전송 및 분석 시작...');
+    setStatus('Step 1: uploading file and starting analysis...');
     setResultUrl(null);
+    setReportHtml(null);
+    setReportPdfUrl(null);
+
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+    }
+    setPreviewUrl(URL.createObjectURL(file));
 
     const formData = new FormData();
     formData.append('file', file);
@@ -39,16 +56,17 @@ export function TestPage() {
       });
 
       if (res.ok) {
-        setStatus('2단계: AI 분석 진행 중 (약 10~20초)...');
+        setStatus('Step 2: AI analysis is running...');
         pollStatus();
       } else {
+        const errorText = await res.text();
         setStatusType('error');
-        setStatus('❌ 업로드 실패. 다시 시도해주세요.');
+        setStatus(errorText || 'Upload failed. Please try again.');
       }
-    } catch (e) {
-      console.error(e);
+    } catch (error) {
+      console.error(error);
       setStatusType('error');
-      setStatus('❌ 네트워크 오류.');
+      setStatus('Network error while uploading.');
     }
   };
 
@@ -57,92 +75,173 @@ export function TestPage() {
       try {
         const res = await fetch(`/api/v2/session/${sessionId}`);
         const data = await res.json();
-        console.log("Polling...", data);
 
         if (data.status === 'completed') {
           clearInterval(pollInterval);
           setStatusType('success');
-          setStatus('✅ 분석 완료!');
-          if (data.result && data.result.overlay_url) {
+          setStatus('Analysis completed.');
+          if (data.result?.overlay_url) {
             setResultUrl(data.result.overlay_url);
             setReportHtml(data.result.report_html || null);
-            setReportPdfUrl(data.result.report_url || null); // Use report_url as link (HTML view)
+            setReportPdfUrl(data.result.report_url || null);
           } else {
-            setStatus(prev => prev + ' (이미지 URL 없음)');
+            setStatus((prev) => `${prev} Overlay URL was not returned.`);
           }
         } else if (data.status === 'failed') {
           clearInterval(pollInterval);
           setStatusType('error');
-          setStatus('❌ 분석 실패: ' + (data.error || "Unknown error"));
+          setStatus(`Analysis failed: ${data.error || 'Unknown error'}`);
         }
-      } catch (e) {
-        console.error("Poll Error", e);
+      } catch (error) {
+        console.error('Poll error', error);
       }
     }, 2000);
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4">
-      <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md text-center transition-all" style={{ maxWidth: resultUrl ? '800px' : '400px' }}>
-        <h2 className="text-2xl font-bold mb-2 text-gray-900">🔭 실시간 분석 테스트 (React)</h2>
-        <p className="text-gray-500 mb-6">이미지를 업로드하면 결과 오버레이를<br />이 페이지에서 즉시 확인합니다.</p>
+    <div className="min-h-screen bg-gray-100 px-4 py-10">
+      <div className="mx-auto w-full max-w-5xl rounded-3xl bg-white p-8 shadow-xl">
+        <h2 className="mb-2 text-2xl font-bold text-gray-900">Viewer Sandbox</h2>
+        <p className="mb-6 text-sm text-gray-500">
+          Upload an image, wait for the overlay result, then test the reusable viewer module here first.
+        </p>
 
-        <input
-          type="file"
-          id="fileInput"
-          accept="image/*"
-          className="hidden"
-          onChange={(e) => setFile(e.target.files?.[0] || null)}
-        />
+        <div className="mx-auto mb-6 flex max-w-md flex-col gap-4">
+          <input
+            type="file"
+            id="fileInput"
+            accept="image/*,.dcm,.dicom,application/dicom"
+            className="hidden"
+            onChange={(event) => setFile(event.target.files?.[0] || null)}
+          />
 
-        <label
-          htmlFor="fileInput"
-          className="inline-block w-full py-3 px-6 rounded-full bg-gray-100 text-gray-700 font-medium cursor-pointer hover:bg-gray-200 transition-colors mb-4 border border-gray-300"
-        >
-          {file ? file.name : '사진 선택하기'}
-        </label>
+          <label
+            htmlFor="fileInput"
+            className="inline-block w-full rounded-full border border-gray-300 bg-gray-100 px-6 py-3 text-center font-medium text-gray-700 transition-colors hover:bg-gray-200"
+          >
+            {file ? file.name : 'Select image'}
+          </label>
 
-        <button
-          onClick={handleUpload}
-          disabled={!file || statusType === 'loading'}
-          className={`w-full py-3 px-6 rounded-full text-white font-medium transition-all ${!file || statusType === 'loading'
-            ? 'bg-gray-400 cursor-not-allowed'
-            : 'bg-blue-600 hover:bg-blue-700 shadow-md'
-            }`}
-        >
-          {statusType === 'loading' ? '분석 중...' : '분석 시작'}
-        </button>
+          <button
+            onClick={handleUpload}
+            disabled={!file || statusType === 'loading'}
+            className={`w-full rounded-full px-6 py-3 font-medium text-white transition-all ${!file || statusType === 'loading'
+              ? 'cursor-not-allowed bg-gray-400'
+              : 'bg-blue-600 shadow-md hover:bg-blue-700'
+              }`}
+          >
+            {statusType === 'loading' ? 'Analyzing...' : 'Start analysis'}
+          </button>
 
-        {status && (
-          <div className={`mt-4 p-4 rounded-lg font-medium text-sm ${statusType === 'loading' ? 'bg-blue-50 text-blue-700' :
-            statusType === 'success' ? 'bg-green-50 text-green-700' :
-              statusType === 'error' ? 'bg-red-50 text-red-700' : 'bg-gray-50'
-            }`}>
-            {status}
+          {status && (
+            <div
+              className={`rounded-lg p-4 text-sm font-medium ${statusType === 'loading'
+                ? 'bg-blue-50 text-blue-700'
+                : statusType === 'success'
+                  ? 'bg-green-50 text-green-700'
+                  : statusType === 'error'
+                    ? 'bg-red-50 text-red-700'
+                    : 'bg-gray-50 text-gray-700'
+                }`}
+            >
+              {status}
+            </div>
+          )}
+        </div>
+
+        {previewUrl && file && (
+          <div className="mb-6 space-y-4">
+            <div className="border-t border-dashed border-gray-300 pt-6">
+              <h3 className="mb-2 text-lg font-semibold text-gray-800">Cornerstone Native Tools Viewer</h3>
+              <p className="mb-4 text-sm text-gray-500">
+                Original source rendered through the native Cornerstone tools path for comparison against the reusable viewer wrapper.
+              </p>
+              <CornerstoneNativeToolsViewer
+                file={(file.name.toLowerCase().endsWith('.dcm') || file.name.toLowerCase().endsWith('.dicom')) ? file : undefined}
+                imageUrl={!(file.name.toLowerCase().endsWith('.dcm') || file.name.toLowerCase().endsWith('.dicom')) ? previewUrl : undefined}
+                imageLabel={file.name}
+                scheme={(file.name.toLowerCase().endsWith('.dcm') || file.name.toLowerCase().endsWith('.dicom')) ? 'dicomfile' : 'web'}
+                maxHeight={520}
+              />
+            </div>
           </div>
         )}
 
         {resultUrl && (
-          <div className="mt-6 animate-fade-in">
-            <h3 className="text-lg font-bold mb-2 text-gray-800">분석 결과 (Overlay)</h3>
-            <div className="border border-gray-200 rounded-lg overflow-hidden mb-6">
-              <img src={resultUrl} alt="Overlay Result" className="w-full h-auto object-contain" />
-            </div>
+          <div className="space-y-6">
+            {((file?.name.toLowerCase().endsWith('.dcm') || file?.name.toLowerCase().endsWith('.dicom')) ||
+              resultUrl.toLowerCase().endsWith('.dcm') ||
+              resultUrl.toLowerCase().endsWith('.dicom')) ? (
+              <CornerstoneViewer
+                title="Cornerstone Prototype"
+                sources={[
+                  ...(previewUrl
+                    ? [
+                      {
+                        id: 'original',
+                        label: 'Original',
+                        url: previewUrl,
+                        file: file ?? undefined,
+                        scheme: (file?.name.toLowerCase().endsWith('.dcm') || file?.name.toLowerCase().endsWith('.dicom')
+                          ? 'dicomfile'
+                          : 'web') as 'dicomfile' | 'web',
+                      },
+                    ]
+                    : []),
+                  {
+                    id: 'overlay',
+                    label: 'Overlay',
+                    url: resultUrl,
+                    scheme: (resultUrl.toLowerCase().endsWith('.dcm') || resultUrl.toLowerCase().endsWith('.dicom')
+                      ? 'wadouri'
+                      : 'web') as 'wadouri' | 'web',
+                  },
+                ]}
+                initialSourceId={previewUrl ? 'original' : 'overlay'}
+                maxHeight={560}
+              />
+            ) : (
+              <ImageViewer
+                title="2D Prototype"
+                sources={[
+                  ...(previewUrl
+                    ? [
+                      {
+                        id: 'original',
+                        label: 'Original',
+                        url: previewUrl,
+                      },
+                    ]
+                    : []),
+                  {
+                    id: 'overlay',
+                    label: 'Overlay',
+                    url: resultUrl,
+                  },
+                ]}
+                initialSourceId={previewUrl ? 'original' : 'overlay'}
+                maxHeight={560}
+              />
+            )}
 
-            {/* Report Injection */}
             {reportHtml && (
-              <div className="mt-8 border-t-2 border-dashed border-gray-300 pt-6 text-left">
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-xl font-bold text-gray-800">📄 상세 분석 리포트</h3>
+              <div className="border-t-2 border-dashed border-gray-300 pt-6">
+                <div className="mb-4 flex items-center justify-between">
+                  <h3 className="text-xl font-bold text-gray-800">Report Preview</h3>
                   {reportPdfUrl && (
-                    <a href={reportPdfUrl} target="_blank" rel="noreferrer" className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-green-700 transition-colors">
-                      새 창에서 열기
+                    <a
+                      href={reportPdfUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="rounded-lg bg-green-600 px-4 py-2 text-sm text-white transition-colors hover:bg-green-700"
+                    >
+                      Open report
                     </a>
                   )}
                 </div>
 
                 <div
-                  className="border border-gray-200 rounded-lg p-6 bg-white shadow-sm overflow-auto max-h-[800px]"
+                  className="max-h-[800px] overflow-auto rounded-lg border border-gray-200 bg-white p-6 shadow-sm"
                   dangerouslySetInnerHTML={{ __html: reportHtml }}
                 />
               </div>
