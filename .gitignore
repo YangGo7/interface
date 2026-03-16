@@ -1,24 +1,32 @@
-# gitignore 
+# gitignore
 
-
-
-
-# test_dataset
+# local datasets / clinical samples
+case/
 test_dataset/
+*.dcm
+*.DCM
+*.dicom
 
+# model weights / checkpoints / archives
+backend/weights/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.zip
 
-# Post-processing
+# frontend build / local deps
+frontend/node_modules/
+frontend/dist/
+
+# post-processing outputs
 backend/utils/post_processing/
 
-# vertual env
+# virtual env / local config
 venv/
-
-# ai
+.env
 .claude/
-
-#temp etc save
 temp/
 
 **/__pycache__/
-*.zip
 
