@@ -47,7 +47,7 @@ export function ChartPage(props?: ChartPageProps) {
   const [reportError, setReportError] = useState<string | null>(null);
 
   const [selectedTooth, setSelectedTooth] = useState<number | undefined>(undefined);
-  const [viewMode, setViewMode] = useState<'overlay' | 'original'>('overlay');
+  const [viewMode, setViewMode] = useState<'overlay' | 'original' | 'heatmap'>('overlay');
   const [containerHeight] = useState(560);
   const [numberingSystem, setNumberingSystem] = useState<'fdi' | 'univ'>('fdi'); // [NEW]
 
@@ -441,10 +441,13 @@ export function ChartPage(props?: ChartPageProps) {
 
   const originalUrl = getUrlWithCacheBuster(result?.image_url || result?.overlay_url);
   const overlayUrl = getUrlWithCacheBuster(result?.overlay_url || result?.image_url);
+  const heatmapUrl = getUrlWithCacheBuster(result?.heatmap_overlay_url || result?.overlay_url || result?.image_url);
   let showSrc =
     viewMode === 'original'
       ? originalUrl
-      : overlayUrl;
+      : viewMode === 'heatmap'
+        ? heatmapUrl
+        : overlayUrl;
 
   // If no result yet but we have a preview, show that
   // if (!showSrc && locationState.previewUrl) {
@@ -458,7 +461,19 @@ export function ChartPage(props?: ChartPageProps) {
     isDicomPath(result?.image_url)
   );
   const overlayIsDicom = isDicomPath(result?.overlay_url);
-  const shouldUseCornerstone = viewMode === 'original' ? originalIsDicom : overlayIsDicom;
+  const shouldUseCornerstone = viewMode === 'original' ? originalIsDicom : viewMode === 'overlay' ? overlayIsDicom : false;
+  const viewModeLabel =
+    viewMode === 'overlay'
+      ? 'AI Analysis Mode'
+      : viewMode === 'heatmap'
+        ? 'Risk Overlay Mode'
+        : 'Original Source Mode';
+  const viewModeDotClass =
+    viewMode === 'overlay'
+      ? 'bg-indigo-500 shadow-[0_0_10px_#6366f1] animate-pulse'
+      : viewMode === 'heatmap'
+        ? 'bg-orange-400 shadow-[0_0_12px_rgba(251,146,60,0.95)] animate-pulse'
+        : 'bg-gray-500';
   const hasViewerShell = hasData || isProcessing || Boolean(showSrc) || shouldUseCornerstone;
   const cornerstoneSources = shouldUseCornerstone
     ? [
@@ -1659,16 +1674,41 @@ export function ChartPage(props?: ChartPageProps) {
                 </button>
                 <div className="min-h-[44px]" aria-hidden="true" />
               </div>
-              <button
-                onClick={() => setViewMode(viewMode === 'original' ? 'overlay' : 'original')}
-                className={`w-full p-2 rounded-xl transition-all duration-200 flex items-center justify-center ${viewMode === 'overlay'
-                  ? 'bg-indigo-600 text-white shadow-[0_0_15px_rgba(79,70,229,0.4)] ring-1 ring-indigo-400'
-                  : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
+              <div className="space-y-2">
+                <button
+                  onClick={() => setViewMode('original')}
+                  className={`w-full p-2 rounded-xl transition-all duration-200 flex items-center justify-center ${
+                    viewMode === 'original'
+                      ? 'bg-slate-200 text-slate-950 shadow-[0_0_15px_rgba(226,232,240,0.28)] ring-1 ring-slate-200/70'
+                      : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
                   }`}
-                title="Toggle AI Overlay"
-              >
-                <Layers className="w-5 h-5" />
-              </button>
+                  title="Original Source"
+                >
+                  <ImageIcon className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => setViewMode('overlay')}
+                  className={`w-full p-2 rounded-xl transition-all duration-200 flex items-center justify-center ${
+                    viewMode === 'overlay'
+                      ? 'bg-indigo-600 text-white shadow-[0_0_15px_rgba(79,70,229,0.4)] ring-1 ring-indigo-400'
+                      : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
+                  }`}
+                  title="AI Overlay"
+                >
+                  <Layers className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => setViewMode('heatmap')}
+                  className={`w-full p-2 rounded-xl transition-all duration-200 flex items-center justify-center ${
+                    viewMode === 'heatmap'
+                      ? 'bg-orange-500 text-slate-950 shadow-[0_0_18px_rgba(249,115,22,0.32)] ring-1 ring-orange-300'
+                      : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
+                  }`}
+                  title="Risk Overlay"
+                >
+                  <Activity className="w-5 h-5" />
+                </button>
+              </div>
             </div>
           </aside>
 
@@ -1681,11 +1721,28 @@ export function ChartPage(props?: ChartPageProps) {
                   {/* Viewer column */}
                   <div className="w-full bg-black relative">
                     <div className="absolute top-4 left-4 z-10 flex items-center gap-3 bg-black/60 backdrop-blur-xl px-5 py-2.5 rounded-full border border-white/10 shadow-2xl pointer-events-none">
-                      <div className={`w-2.5 h-2.5 rounded-full ${viewMode === 'overlay' ? 'bg-indigo-500 shadow-[0_0_10px_#6366f1] animate-pulse' : 'bg-gray-500'}`} />
+                      <div className={`w-2.5 h-2.5 rounded-full ${viewModeDotClass}`} />
                       <span className="text-xs font-bold uppercase tracking-wider text-gray-300">
-                        {viewMode === 'overlay' ? 'AI Analysis Mode' : 'Original Source Mode'}
+                        {viewModeLabel}
                       </span>
                     </div>
+                    {viewMode === 'heatmap' && (
+                      <div className="absolute right-4 top-4 z-10 rounded-[20px] border border-white/10 bg-black/60 px-4 py-3 text-[11px] text-slate-200 shadow-2xl backdrop-blur-xl">
+                        <p className="font-semibold uppercase tracking-[0.18em] text-orange-300">Risk Overlay</p>
+                        <div className="mt-2 flex items-center gap-2">
+                          <span className="h-2.5 w-2.5 rounded-full bg-orange-400 shadow-[0_0_10px_rgba(251,146,60,0.9)]" />
+                          <span>Caries</span>
+                        </div>
+                        <div className="mt-1 flex items-center gap-2">
+                          <span className="h-2.5 w-2.5 rounded-full bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.9)]" />
+                          <span>Periapical</span>
+                        </div>
+                        <div className="mt-1 flex items-center gap-2">
+                          <span className="h-2.5 w-2.5 rounded-full bg-yellow-300 shadow-[0_0_10px_rgba(253,224,71,0.9)]" />
+                          <span>Bone loss severity</span>
+                        </div>
+                      </div>
+                    )}
 
                     <div
                       className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : activeTool === 'magnifier' ? 'cursor-zoom-in' : 'cursor-grab active:cursor-grabbing'}`}
