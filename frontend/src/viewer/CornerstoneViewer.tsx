@@ -31,6 +31,7 @@ type CornerstoneViewerProps = {
     maxHeight?: number;
     is3D?: boolean;
     showToolbar?: boolean;
+    invert?: boolean;
 };
 
 type ToolMode = 'pan' | 'length' | 'arrow' | 'rect' | 'ellipse' | 'wl';
@@ -42,6 +43,7 @@ export function CornerstoneViewer({
     maxHeight = 560,
     is3D = false,
     showToolbar = true,
+    invert = false,
 }: CornerstoneViewerProps) {
     const viewerRef = useRef<HTMLDivElement>(null);
     const dicomImageIdsRef = useRef<Record<string, string>>({});
@@ -59,6 +61,30 @@ export function CornerstoneViewer({
     const [debugEnabled, setDebugEnabled] = useState(false);
 
     const activeSource = sources.find((s) => s.id === activeSourceId) || sources[0];
+
+    function applyViewportDisplayState(
+        viewport: cornerstone.Types.IStackViewport | undefined,
+        imageId?: string
+    ) {
+        if (!viewport || !imageId) return;
+
+        const image = cornerstone.cache.getImage(imageId);
+        if (!image) return;
+
+        const props: cornerstone.Types.ViewportProperties = {};
+        if (image.windowCenter != null && image.windowWidth != null) {
+            const wc = Array.isArray(image.windowCenter) ? image.windowCenter[0] : image.windowCenter;
+            const ww = Array.isArray(image.windowWidth) ? image.windowWidth[0] : image.windowWidth;
+            if (typeof wc === 'number' && typeof ww === 'number' && ww > 0) {
+                props.voiRange = { lower: wc - ww / 2, upper: wc + ww / 2 };
+            }
+        } else if (image.minPixelValue !== undefined && image.maxPixelValue !== undefined) {
+            props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
+        }
+
+        props.invert = Boolean(image.invert) !== invert;
+        viewport.setProperties(props);
+    }
 
     // Initialize Cornerstone once
     useEffect(() => {
@@ -137,18 +163,7 @@ export function CornerstoneViewer({
             .then(() => {
                 if (isCancelled) return;
 
-                // Explicitly fall back to image's native min/max to prevent black screen on GPU
-                const image = cornerstone.cache.getImage(imageId);
-                if (image) {
-                    const props: cornerstone.Types.ViewportProperties = {};
-                    if (image.minPixelValue !== undefined && image.maxPixelValue !== undefined) {
-                        props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
-                    }
-                    if (image.invert) {
-                        props.invert = true;
-                    }
-                    viewport.setProperties(props);
-                }
+                applyViewportDisplayState(viewport, imageId);
 
                 console.log('Cornerstone: Stack set, resetting camera...');
                 renderingEngine.resize(true, false);
@@ -185,6 +200,13 @@ export function CornerstoneViewer({
         };
     }, [isInit, activeSource?.id, activeSource?.url, activeSource?.scheme]);
 
+    useEffect(() => {
+        const renderingEngine = renderingEngineRef.current;
+        const viewport = renderingEngine?.getViewport(viewportIdRef.current) as cornerstone.Types.IStackViewport | undefined;
+        applyViewportDisplayState(viewport, lastImageId);
+        viewport?.render();
+    }, [invert, lastImageId]);
+
     const handleToolChange = (tool: ToolMode) => {
         setActiveToolState(tool);
         switch (tool) {
@@ -215,6 +237,7 @@ export function CornerstoneViewer({
         if (viewport) {
             viewport.resetCamera();
             viewport.resetProperties();
+            applyViewportDisplayState(viewport, lastImageId);
             viewport.render();
         }
     };

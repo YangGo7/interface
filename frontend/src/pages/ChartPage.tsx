@@ -2,17 +2,20 @@ import { useLocation } from 'react-router-dom';
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { BottomTeethChart } from '../components/BottomTeethChart';
+import { WebReportDrawer } from '../components/WebReportDrawer';
 import { CornerstoneViewer, CornerstoneGridViewer } from '../viewer';
 import {
   AlertTriangle, Activity, Zap, Layers, Image as ImageIcon,
   MousePointer, Hand, ZoomIn, RotateCw, FlipHorizontal,
   Ruler, PenLine, Loader2, ZoomOut, RotateCcw, AlertCircle, Skull,
   ClipboardList, Quote, Sparkles, Grid, MousePointer2, Eraser, Rotate3d,
-  Trash2, Monitor, ChevronsUpDown, Camera, Crop
+  Trash2, Monitor, ChevronsUpDown, Camera, Crop, Search
 } from 'lucide-react';
 import { RightPanel } from '../components/RightPanel';
 import { TopHeader } from '../components/TopHeader';
 import { setActiveTool as setCornerstoneActiveTool, clearAllAnnotations } from '../viewer/cornerstone/tools';
+import { createWebReportFromChart } from '../lib/webReportApi';
+import { buildWebReportKeywords, countWebReportFindingTeeth } from '../lib/webReportKeywords';
 
 type ChartPageProps = {
   result?: any;
@@ -38,6 +41,10 @@ export function ChartPage(props?: ChartPageProps) {
   const [isProcessing, setIsProcessing] = useState(!result && !!locationState?.jobId);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [timestamp, setTimestamp] = useState(Date.now());
+  const [reportSessionId, setReportSessionId] = useState<string | null>(locationState?.reportSessionId || null);
+  const [reportDrawerOpen, setReportDrawerOpen] = useState(false);
+  const [reportStartState, setReportStartState] = useState<'idle' | 'creating'>('idle');
+  const [reportError, setReportError] = useState<string | null>(null);
 
   const [selectedTooth, setSelectedTooth] = useState<number | undefined>(undefined);
   const [viewMode, setViewMode] = useState<'overlay' | 'original'>('overlay');
@@ -54,11 +61,21 @@ export function ChartPage(props?: ChartPageProps) {
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [brightness, setBrightness] = useState(100);
   const [contrast, setContrast] = useState(100);
+  const [inverted, setInverted] = useState(false);
   const [rotation, setRotation] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [gridLayout, setGridLayout] = useState({ rows: 2, cols: 2 });
   const [tempGridLayout, setTempGridLayout] = useState({ rows: 2, cols: 2 });
   const [captureRect, setCaptureRect] = useState<{ x: number; y: number; w: number; h: number; active: boolean } | null>(null);
+  const [magnifierState, setMagnifierState] = useState<{
+    visible: boolean;
+    clientX: number;
+    clientY: number;
+    viewerX: number;
+    viewerY: number;
+    imgX: number;
+    imgY: number;
+  }>({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
 
   useEffect(() => {
     let timer: any;
@@ -129,6 +146,41 @@ export function ChartPage(props?: ChartPageProps) {
 
   const mmPerPixel = (result as any)?.mm_per_pixel || (result as any)?.mm_per_px || 0.1;
   const hasData = !!result;
+  const reportKeywords = buildWebReportKeywords(result);
+  const reportFindingCount = countWebReportFindingTeeth(result);
+
+  const handleStartReport = async () => {
+    if (reportStartState === 'creating') return;
+
+    if (reportSessionId) {
+      setReportDrawerOpen(true);
+      setReportError(null);
+      return;
+    }
+
+    if (!result) {
+      setReportError('Analysis result is not ready yet.');
+      return;
+    }
+
+    setReportStartState('creating');
+    setReportError(null);
+    try {
+      const response = await createWebReportFromChart({
+        result,
+        source_url: result?.image_url,
+        overlay_url: result?.overlay_url,
+        language: 'English',
+      });
+      setReportSessionId(response.session_id);
+      setReportDrawerOpen(true);
+    } catch (error: any) {
+      console.error(error);
+      setReportError(error?.message || 'Failed to start report workspace');
+    } finally {
+      setReportStartState('idle');
+    }
+  };
 
   // --- Data Mapping Logic ---
   const det = result?.det_counts || {};
@@ -579,6 +631,13 @@ export function ChartPage(props?: ChartPageProps) {
   };
 
   const handleToolChange = (tool: string) => {
+    const primaryTools = new Set(['pointer', 'pan', 'wlww', 'erase', 'rotate', 'scroll', 'capture-area', 'magnifier']);
+    if (primaryTools.has(tool)) {
+      setActiveSubTool(null);
+      setPendingPoints([]);
+      setTempPoint(null);
+      setContextMenu({ show: false, x: 0, y: 0, menu: undefined });
+    }
     setLocalActiveTool(tool);
     // Sync with Cornerstone global tool groups
     switch (tool) {
@@ -591,6 +650,7 @@ export function ChartPage(props?: ChartPageProps) {
       case 'rotate': setCornerstoneActiveTool('TrackballRotate'); break;
       case 'erase': setCornerstoneActiveTool('Eraser'); break;
       case 'scroll': setCornerstoneActiveTool('StackScroll'); break;
+      case 'magnifier': setCornerstoneActiveTool('Pan'); break;
       case 'pointer': setCornerstoneActiveTool('Pan'); break;
     }
   };
@@ -921,6 +981,10 @@ export function ChartPage(props?: ChartPageProps) {
     if (!showSrc) return;
     if (e.button === 2) return; // Right click
 
+    if (activeTool === 'magnifier') {
+      return;
+    }
+
     if (activeTool === 'pan') {
       dragRef.current = { active: true, mode: 'pan', startX: e.clientX, startY: e.clientY };
       return;
@@ -997,6 +1061,25 @@ export function ChartPage(props?: ChartPageProps) {
       return;
     }
 
+    if (activeTool === 'magnifier' && !shouldUseCornerstone) {
+      const pt = toImgCoords(e.clientX, e.clientY);
+      const vRect = viewerRef.current?.getBoundingClientRect();
+      if (!pt || !vRect) {
+        hideMagnifier();
+      } else {
+        setMagnifierState({
+          visible: true,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          viewerX: e.clientX - vRect.left,
+          viewerY: e.clientY - vRect.top,
+          imgX: pt.x,
+          imgY: pt.y,
+        });
+      }
+      return;
+    }
+
     const isDrawing = activeTool === 'measure' || activeTool === 'annotate' || activeSubTool;
     if (activeSubTool && isDrawing) {
       const pt = toImgCoords(e.clientX, e.clientY);
@@ -1018,6 +1101,13 @@ export function ChartPage(props?: ChartPageProps) {
       return;
     }
     dragRef.current.active = false;
+  };
+
+  const handleMouseLeave = () => {
+    dragRef.current.active = false;
+    if (activeTool === 'magnifier') {
+      hideMagnifier();
+    }
   };
 
   const handleContextMenu = (e: React.MouseEvent) => {
@@ -1043,6 +1133,10 @@ export function ChartPage(props?: ChartPageProps) {
     pushDebug(`shape committed type=${activeSubTool} points=${pts.length}`);
   };
 
+  const hideMagnifier = () => {
+    setMagnifierState(prev => (prev.visible ? { ...prev, visible: false } : prev));
+  };
+
   const handleWheel = (e: React.WheelEvent) => {
     if (activeTool !== 'zoom') return;
     const delta = e.deltaY < 0 ? 0.1 : -0.1;
@@ -1065,6 +1159,12 @@ export function ChartPage(props?: ChartPageProps) {
       clearInterval(timer);
     };
   }, [scale, offset, rotation, flipped, showSrc]);
+
+  useEffect(() => {
+    if (activeTool !== 'magnifier' || shouldUseCornerstone || !showSrc) {
+      hideMagnifier();
+    }
+  }, [activeTool, shouldUseCornerstone, showSrc]);
 
   // Handle Wheel Zoom (Non-passive to prevent scroll)
   useEffect(() => {
@@ -1116,6 +1216,81 @@ export function ChartPage(props?: ChartPageProps) {
     handleToolChange(sub); // Use synchronized handler
     setContextMenu(prev => ({ ...prev, show: false }));
     pushDebug(`subtool selected=${sub}`);
+  };
+
+  const renderMagnifier = () => {
+    if (
+      shouldUseCornerstone ||
+      activeTool !== 'magnifier' ||
+      !magnifierState.visible ||
+      !showSrc ||
+      !imageRef.current ||
+      !imgRect
+    ) {
+      return null;
+    }
+
+    const lensSize = 210;
+    const lensRadius = lensSize / 2;
+    const zoomFactor = 2.35;
+    const viewportPadding = 12;
+    const clampedCenterX = Math.max(
+      lensRadius + viewportPadding,
+      Math.min(window.innerWidth - lensRadius - viewportPadding, magnifierState.clientX)
+    );
+    const clampedCenterY = Math.max(
+      lensRadius + viewportPadding,
+      Math.min(window.innerHeight - lensRadius - viewportPadding, magnifierState.clientY)
+    );
+    const relativeX = magnifierState.clientX - imgRect.left;
+    const relativeY = magnifierState.clientY - imgRect.top;
+    const magnifiedWidth = imgRect.width * zoomFactor;
+    const magnifiedHeight = imgRect.height * zoomFactor;
+    const imageLeft = lensRadius - relativeX * zoomFactor;
+    const imageTop = lensRadius - relativeY * zoomFactor;
+
+    return createPortal(
+      <div
+        className="pointer-events-none fixed z-[10020] overflow-hidden rounded-full border-2 border-cyan-200/90 shadow-[0_24px_80px_rgba(8,145,178,0.35)]"
+        style={{
+          left: clampedCenterX - lensRadius,
+          top: clampedCenterY - lensRadius,
+          width: lensSize,
+          height: lensSize,
+          background: 'radial-gradient(circle at 35% 35%, rgba(255,255,255,0.18), rgba(14,116,144,0.10) 52%, rgba(2,6,23,0.88) 100%)',
+        }}
+      >
+        <div
+          className="absolute inset-0 overflow-hidden rounded-full"
+        >
+          <img
+            src={showSrc}
+            alt=""
+            className="pointer-events-none select-none"
+            draggable={false}
+            style={{
+              position: 'absolute',
+              left: imageLeft,
+              top: imageTop,
+              width: magnifiedWidth,
+              height: magnifiedHeight,
+              maxWidth: 'none',
+              filter: `invert(${inverted ? 1 : 0}) brightness(${brightness}%) contrast(${contrast}%)`,
+            }}
+          />
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_40%_35%,rgba(255,255,255,0.18),rgba(255,255,255,0)_58%)]" />
+        </div>
+        <div className="absolute inset-[8px] rounded-full border border-white/25" />
+        <div className="absolute inset-[20px] rounded-full border border-cyan-100/20" />
+        <div className="absolute left-1/2 top-1/2 h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/80 bg-white/5" />
+        <div className="absolute left-1/2 top-[22px] h-[1px] w-10 -translate-x-1/2 bg-white/70" />
+        <div className="absolute left-1/2 top-1/2 h-10 w-[1px] -translate-x-1/2 -translate-y-1/2 bg-white/70" />
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-slate-950/78 px-3 py-1 text-[10px] font-semibold tracking-[0.18em] text-cyan-200">
+          2.35X
+        </div>
+      </div>,
+      document.body
+    );
   };
 
   // Render SVG Helper
@@ -1426,6 +1601,7 @@ export function ChartPage(props?: ChartPageProps) {
             <div className="flex gap-2 [&>*]:flex-1">
               <ToolBtn active={activeTool === 'wlww'} onClick={() => handleToolChange('wlww')} icon={WindowLevelIcon} title="Window / Level" />
               <ToolBtn active={false} onClick={() => setRotation(r => r + 90)} icon={RotateCw} title="Rotate 90" />
+              <ToolBtn active={inverted} onClick={() => setInverted(v => !v)} icon={InvertIcon} title="Invert" />
             </div>
 
             {viewerMode === 'grid' && (
@@ -1439,6 +1615,7 @@ export function ChartPage(props?: ChartPageProps) {
 
             <div className="flex gap-2 [&>*]:flex-1">
               <ToolBtn active={false} onClick={() => setFlipped(f => !f)} icon={FlipHorizontal} title="Flip Horizontal" />
+              <ToolBtn active={activeTool === 'magnifier'} onClick={() => handleToolChange('magnifier')} icon={Search} title="Magnifier" />
               <ToolBtn active={activeTool === 'measure' || activeTool === 'length'} onClick={(e: any) => openMenu(e, 'measure')} icon={Ruler} title="Measure" />
             </div>
             <div className="flex gap-2 [&>*]:flex-1">
@@ -1511,12 +1688,13 @@ export function ChartPage(props?: ChartPageProps) {
                     </div>
 
                     <div
-                      className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : 'cursor-grab active:cursor-grabbing'}`}
+                      className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : activeTool === 'magnifier' ? 'cursor-zoom-in' : 'cursor-grab active:cursor-grabbing'}`}
                       style={{ minHeight: `${shouldUseCornerstone ? containerHeight : viewerHeight}px`, height: `${shouldUseCornerstone ? containerHeight : viewerHeight}px` }}
                       ref={viewerRef}
                       onMouseDown={handleMouseDown}
                       onMouseMove={handleMouseMove}
                       onMouseUp={handleMouseUp}
+                      onMouseLeave={handleMouseLeave}
                       onWheel={shouldUseCornerstone ? undefined : handleWheel}
                       onContextMenu={shouldUseCornerstone ? undefined : handleContextMenu}
                     >
@@ -1557,6 +1735,7 @@ export function ChartPage(props?: ChartPageProps) {
                           showToolbar={false} // Use ChartPage's sidebar instead
                           layout={gridLayout}
                           onLayoutChange={setGridLayout}
+                          invert={inverted}
                         />
                       ) : shouldUseCornerstone ? (
                         <div className="w-full h-full relative flex flex-col">
@@ -1566,6 +1745,7 @@ export function ChartPage(props?: ChartPageProps) {
                             initialSourceId={cornerstoneSources[0]?.id}
                             maxHeight={containerHeight}
                             showToolbar={false} // Use ChartPage's sidebar instead
+                            invert={inverted}
                           />
                           {result?.is_volume && (
                             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 bg-indigo-600/80 backdrop-blur-md px-4 py-2 rounded-full border border-indigo-400/50 shadow-lg flex items-center gap-2 pointer-events-none">
@@ -1596,7 +1776,7 @@ export function ChartPage(props?: ChartPageProps) {
                               style={{
                                 position: 'relative',
                                 zIndex: 1,
-                                filter: `brightness(${brightness}%) contrast(${contrast}%)`,
+                                filter: `invert(${inverted ? 1 : 0}) brightness(${brightness}%) contrast(${contrast}%)`,
                               }}
                               draggable={false}
                               ref={imageRef}
@@ -1628,6 +1808,7 @@ export function ChartPage(props?: ChartPageProps) {
                               {shapes.map((s: any, idx: number) => renderShape(s, false, idx))}
                               {activeSubTool && renderShape({ type: activeSubTool, points: pendingPoints, color: drawingColor }, true)}
                             </svg>
+                            {renderMagnifier()}
                           </div>
                         </div>
                       ) : (
@@ -1707,6 +1888,100 @@ export function ChartPage(props?: ChartPageProps) {
                 onClose={() => setSelectedTooth(undefined)}
                 numberingSystem={numberingSystem}
               />
+            </div>
+          )}
+
+          {createPortal(
+            <>
+              {reportDrawerOpen && reportSessionId && (
+                <WebReportDrawer
+                  sessionId={reportSessionId}
+                  selectedToothId={selectedTooth ? String(selectedTooth) : null}
+                  onClose={() => setReportDrawerOpen(false)}
+                />
+              )}
+
+              {hasData && (
+                <div
+                  className="fixed bottom-5 left-1/2 z-[210] flex w-[520px] max-w-[calc(100vw-2rem)] -translate-x-1/2 cursor-pointer flex-col gap-2 rounded-[26px] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(11,23,45,0.96),rgba(7,16,31,0.96))] px-4 pb-3 pt-4 text-slate-100 shadow-[0_24px_80px_rgba(3,8,20,0.56)] backdrop-blur-xl transition hover:-translate-y-1 hover:border-cyan-300/40"
+                  onClick={handleStartReport}
+                  role="button"
+                  aria-label="Open AI note report dock"
+                >
+                  <div className="absolute -top-2 left-1/2 h-1.5 w-24 -translate-x-1/2 rounded-full bg-cyan-300/70 shadow-[0_0_24px_rgba(34,211,238,0.55)]" />
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-200 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.15)]">
+                      <ClipboardList className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-semibold text-white">AI Note</p>
+                        <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                          {reportSessionId ? 'Draft ready' : reportStartState === 'creating' ? 'Starting' : 'Report'}
+                        </span>
+                      </div>
+                      <p className="truncate text-xs text-slate-400">
+                        {reportFindingCount > 0
+                          ? `${reportFindingCount} finding teeth · ${reportKeywords.slice(0, 2).join(' · ')}`
+                          : 'Open a compact report workspace for this analysis'}
+                      </p>
+                    </div>
+                    <div className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 text-right text-[11px] font-semibold text-cyan-200">
+                      {reportStartState === 'creating' ? 'Loading...' : reportDrawerOpen ? 'Expanded' : 'Lift'}
+                    </div>
+                  </div>
+                  {reportError && (
+                    <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                      {reportError}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>,
+            document.body
+          )}
+
+          {false && reportDrawerOpen && reportSessionId && (
+            <WebReportDrawer
+              sessionId={reportSessionId!}
+              selectedToothId={selectedTooth ? String(selectedTooth) : null}
+              onClose={() => setReportDrawerOpen(false)}
+            />
+          )}
+
+          {false && hasData && (
+            <div
+              className="fixed bottom-5 left-1/2 z-[210] flex w-[460px] max-w-[calc(100vw-2rem)] -translate-x-1/2 cursor-pointer flex-col gap-2 rounded-[24px] border border-cyan-400/20 bg-[#07101F]/94 px-4 py-3 text-slate-100 shadow-[0_20px_60px_rgba(3,8,20,0.5)] backdrop-blur transition hover:border-cyan-300/40"
+              onClick={handleStartReport}
+              role="button"
+              aria-label="Open AI note report dock"
+            >
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-200">
+                  <ClipboardList className="h-5 w-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-semibold text-white">AI Note</p>
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                      {reportSessionId ? 'Draft ready' : reportStartState === 'creating' ? 'Starting' : 'Report'}
+                    </span>
+                  </div>
+                  <p className="truncate text-xs text-slate-400">
+                    {reportFindingCount > 0
+                      ? `${reportFindingCount} finding teeth · ${reportKeywords.slice(0, 2).join(' · ')}`
+                      : 'Open a compact report workspace for this analysis'}
+                  </p>
+                </div>
+                <div className="text-right text-[11px] text-cyan-300">
+                  {reportStartState === 'creating' ? 'Loading...' : reportDrawerOpen ? 'Open' : 'Expand'}
+                </div>
+              </div>
+              {reportError && (
+                <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                  {reportError}
+                </div>
+              )}
             </div>
           )}
 
@@ -1815,6 +2090,16 @@ function WindowLevelIcon({ size = 20 }: { size?: number }) {
       <circle cx="12" cy="12" r="6.5" stroke="currentColor" strokeWidth="1.8" />
       <path d="M12 5.5a6.5 6.5 0 0 1 0 13Z" fill="currentColor" opacity="0.95" />
       <path d="M7 17 17 7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function InvertIcon({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="20" height="20" rx="5" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M12 2v20" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M12 6a6 6 0 1 0 0 12Z" fill="currentColor" opacity="0.92" />
     </svg>
   );
 }

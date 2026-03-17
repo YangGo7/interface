@@ -8,6 +8,8 @@ import { TestPage } from './pages/TestPage';
 import { ReportPage } from './pages/ReportPage';
 import { CornerstonePage } from './pages/CornerstonePage';
 import { MprTestPage } from './pages/MprTestPage';
+import { WebChartPage } from './pages/WebChartPage';
+import { WebReportPage } from './pages/WebReportPage';
 
 type RouteErrorBoundaryProps = {
   children: React.ReactNode;
@@ -65,8 +67,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <Routes>
         <Route path="/" element={<RouteErrorBoundary routeLabel="/"><App /></RouteErrorBoundary>} />
         <Route path="/chart" element={<RouteErrorBoundary routeLabel="/chart"><ChartPage /></RouteErrorBoundary>} />
+        <Route path="/chart/:sessionId" element={<RouteErrorBoundary routeLabel="/chart/:sessionId"><WebChartPage /></RouteErrorBoundary>} />
         <Route path="/test" element={<RouteErrorBoundary routeLabel="/test"><TestPage /></RouteErrorBoundary>} />
         <Route path="/report" element={<RouteErrorBoundary routeLabel="/report"><ReportPage /></RouteErrorBoundary>} />
+        <Route path="/report/:sessionId" element={<RouteErrorBoundary routeLabel="/report/:sessionId"><WebReportPage /></RouteErrorBoundary>} />
         <Route path="/cornerstone_page" element={<RouteErrorBoundary routeLabel="/cornerstone_page"><CornerstonePage /></RouteErrorBoundary>} />
         <Route path="/mpr_test" element={<RouteErrorBoundary routeLabel="/mpr_test"><MprTestPage /></RouteErrorBoundary>} />
       </Routes>

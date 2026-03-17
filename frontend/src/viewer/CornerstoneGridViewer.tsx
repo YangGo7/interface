@@ -31,6 +31,7 @@ type CornerstoneGridViewerProps = {
     onToolChange?: (tool: ToolMode) => void;
     layout?: { rows: number; cols: number };
     onLayoutChange?: (layout: { rows: number; cols: number }) => void;
+    invert?: boolean;
 };
 
 export function CornerstoneGridViewer({
@@ -42,6 +43,7 @@ export function CornerstoneGridViewer({
     onToolChange,
     layout: externalLayout,
     onLayoutChange,
+    invert = false,
 }: CornerstoneGridViewerProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewportRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -57,6 +59,7 @@ export function CornerstoneGridViewer({
     const [statusMessage, setStatusMessage] = useState('Initializing Cornerstone...');
     const [activeTool, setActiveToolState] = useState<ToolMode>('pan');
     const [debugEnabled, setDebugEnabled] = useState(false);
+    const [currentImageId, setCurrentImageId] = useState('');
 
     const [viewportsConfig, setViewportsConfig] = useState<GridControl[]>([]);
     const [preset3D, setPreset3D] = useState<Record<string, string>>({});
@@ -77,6 +80,34 @@ export function CornerstoneGridViewer({
     ];
 
     const activeSource = sources[0];
+
+    function applyViewportDisplayState(renderingEngine: cornerstone.RenderingEngine | null, imageId?: string) {
+        if (!renderingEngine || !imageId) return;
+
+        const image = cornerstone.cache.getImage(imageId);
+        if (!image) return;
+
+        const props: cornerstone.Types.ViewportProperties = {};
+        if (image.windowCenter != null && image.windowWidth != null) {
+            const wc = Array.isArray(image.windowCenter) ? image.windowCenter[0] : image.windowCenter;
+            const ww = Array.isArray(image.windowWidth) ? image.windowWidth[0] : image.windowWidth;
+            if (typeof wc === 'number' && typeof ww === 'number' && ww > 0) {
+                props.voiRange = { lower: wc - ww / 2, upper: wc + ww / 2 };
+            }
+        } else if (image.minPixelValue !== undefined && image.maxPixelValue !== undefined) {
+            props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
+        }
+
+        props.invert = Boolean(image.invert) !== invert;
+        viewportsConfig.forEach(config => {
+            if (config.orientation === 'volume3d') return;
+            const vp = renderingEngine.getViewport(config.id) as any;
+            if (vp?.setProperties) {
+                vp.setProperties(props);
+                vp.render();
+            }
+        });
+    }
 
     useEffect(() => {
         initCornerstone()
@@ -117,6 +148,7 @@ export function CornerstoneGridViewer({
             : scheme === 'dicomlocal' && activeSource.file
                 ? (registerLocalDicomFile(activeSource.id, activeSource.file))
                 : scheme + ':' + activeSource.url;
+        setCurrentImageId(imageId);
 
         const renderingEngineId = renderingEngineIdRef.current;
         const volumeId = 'streaming-volume:' + volumeIdRef.current;
@@ -194,23 +226,7 @@ export function CornerstoneGridViewer({
                     }
                 }
                 if (isCancelled) return;
-                const image = cornerstone.cache.getImage(imageId);
-                if (image) {
-                    const props: cornerstone.Types.ViewportProperties = {};
-                    if (image.windowCenter != null && image.windowWidth != null) {
-                        const wc = Array.isArray(image.windowCenter) ? image.windowCenter[0] : image.windowCenter;
-                        const ww = Array.isArray(image.windowWidth) ? image.windowWidth[0] : image.windowWidth;
-                        if (typeof wc === 'number' && typeof ww === 'number' && ww > 0) props.voiRange = { lower: wc - ww / 2, upper: wc + ww / 2 };
-                    } else if (image.minPixelValue !== undefined && image.maxPixelValue !== undefined) {
-                        props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
-                    }
-                    if (image.invert) props.invert = true;
-                    viewportsConfig.forEach(config => {
-                        if (config.orientation === 'volume3d') return;
-                        const vp = renderingEngine.getViewport(config.id) as any;
-                        if (vp?.setProperties) { vp.setProperties(props); vp.render(); }
-                    });
-                }
+                applyViewportDisplayState(renderingEngine, imageId);
                 // Post-load: Restore presets and reset cameras
                 viewportsConfig.forEach(config => {
                     const vp = renderingEngine.getViewport(config.id) as any;
@@ -263,6 +279,10 @@ export function CornerstoneGridViewer({
         };
     }, [isInit, activeSource?.id, activeSource?.url, activeSource?.scheme, JSON.stringify(viewportsConfig)]);
 
+    useEffect(() => {
+        applyViewportDisplayState(renderingEngineRef.current, currentImageId);
+    }, [invert, currentImageId, viewportsConfig]);
+
     const handleToolChange = (tool: ToolMode) => {
         setActiveToolState(tool);
         onToolChange?.(tool);
@@ -295,8 +315,15 @@ export function CornerstoneGridViewer({
         if (!renderingEngine) return;
         viewportsConfig.forEach(config => {
             const vp = renderingEngine.getViewport(config.id) as any;
-            if (vp) { vp.resetCamera(); vp.resetProperties?.(); vp.render(); }
+            if (vp) {
+                vp.resetCamera();
+                vp.resetProperties?.();
+                if (config.orientation === 'volume3d') {
+                    vp.render?.();
+                }
+            }
         });
+        applyViewportDisplayState(renderingEngine, currentImageId);
     };
 
     return (
