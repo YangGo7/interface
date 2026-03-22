@@ -22,3 +22,8 @@ temp/
 **/__pycache__/
 *.zip
 
+# model weights
+backend/weights/
+backend/weights/*.pth
+backend/weights/*.pt
+
