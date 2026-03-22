@@ -37,7 +37,13 @@ const mockFindings = [
 export function ChartPage(props?: ChartPageProps) {
   const location = useLocation();
   const locationState = (location.state as any) || {};
-  const [result, setResult] = useState<any>(props?.result ?? locationState?.result);
+  const initialResult = props?.result ?? locationState?.result;
+  const inferVolume = (res: any) => Boolean(
+    res?.is_volume ||
+    ((locationState.originalIsDicom || /\.dcm(?:$|[?#])/i.test(String(res?.image_url || ''))) && res?.preview_url)
+  );
+  const initialIsVolume = inferVolume(initialResult);
+  const [result, setResult] = useState<any>(initialResult);
   const [isProcessing, setIsProcessing] = useState(!result && !!locationState?.jobId);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [timestamp, setTimestamp] = useState(Date.now());
@@ -45,16 +51,17 @@ export function ChartPage(props?: ChartPageProps) {
   const [reportDrawerOpen, setReportDrawerOpen] = useState(false);
   const [reportStartState, setReportStartState] = useState<'idle' | 'creating'>('idle');
   const [reportError, setReportError] = useState<string | null>(null);
+  const [captureNotice, setCaptureNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const [selectedTooth, setSelectedTooth] = useState<number | undefined>(undefined);
-  const [viewMode, setViewMode] = useState<'overlay' | 'original' | 'heatmap'>('overlay');
+  const [viewMode, setViewMode] = useState<'overlay' | 'original' | 'heatmap'>(initialIsVolume ? 'original' : 'overlay');
   const [containerHeight] = useState(560);
   const [numberingSystem, setNumberingSystem] = useState<'fdi' | 'univ'>('fdi'); // [NEW]
 
   // Tools
   const [activeTool, setLocalActiveTool] = useState<string>('pointer');
   const [activeSubTool, setActiveSubTool] = useState<string | null>(null);
-  const [viewerMode, setViewerMode] = useState<'single' | 'grid'>('single');
+  const [viewerMode, setViewerMode] = useState<'single' | 'grid'>(initialIsVolume ? 'grid' : 'single');
 
   // Viewport State
   const [scale, setScale] = useState(1);
@@ -66,6 +73,7 @@ export function ChartPage(props?: ChartPageProps) {
   const [flipped, setFlipped] = useState(false);
   const [gridLayout, setGridLayout] = useState({ rows: 2, cols: 2 });
   const [tempGridLayout, setTempGridLayout] = useState({ rows: 2, cols: 2 });
+  const [cornerstoneResetToken, setCornerstoneResetToken] = useState(0);
   const [captureRect, setCaptureRect] = useState<{ x: number; y: number; w: number; h: number; active: boolean } | null>(null);
   const [magnifierState, setMagnifierState] = useState<{
     visible: boolean;
@@ -96,7 +104,14 @@ export function ChartPage(props?: ChartPageProps) {
             setTimestamp(Date.now());
             setIsProcessing(false);
             setLoadingProgress(100);
-            setViewMode('overlay');
+            if (inferVolume(data.result)) {
+              setViewMode('original');
+              setViewerMode('grid');
+              setGridLayout({ rows: 2, cols: 2 });
+              setTempGridLayout({ rows: 2, cols: 2 });
+            } else {
+              setViewMode('overlay');
+            }
           } else if (data.status === 'failed') {
             clearInterval(timer);
             setIsProcessing(false);
@@ -136,6 +151,7 @@ export function ChartPage(props?: ChartPageProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [measurements, setMeasurements] = useState<any[]>([]);
   const [debugEvents, setDebugEvents] = useState<string[]>([]);
+  const autoConfiguredCtRef = useRef(false);
 
   // -- Missing Vars defined here --
   const today = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -148,6 +164,21 @@ export function ChartPage(props?: ChartPageProps) {
   const hasData = !!result;
   const reportKeywords = buildWebReportKeywords(result);
   const reportFindingCount = countWebReportFindingTeeth(result);
+
+  useEffect(() => {
+    if (!inferVolume(result)) {
+      autoConfiguredCtRef.current = false;
+      return;
+    }
+
+    if (autoConfiguredCtRef.current) return;
+
+    setViewMode('original');
+    setViewerMode('grid');
+    setGridLayout({ rows: 2, cols: 2 });
+    setTempGridLayout({ rows: 2, cols: 2 });
+    autoConfiguredCtRef.current = true;
+  }, [result]);
 
   const handleStartReport = async () => {
     if (reportStartState === 'creating') return;
@@ -198,15 +229,93 @@ export function ChartPage(props?: ChartPageProps) {
     ? Object.entries(result.pbl).map(([tooth, val]) => `${tooth}: ${Number(val).toFixed(1)}%`)
     : [];
 
-  const handleCapture = (cropRegion?: { x: number; y: number; w: number; h: number }) => {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const fileName = `dental_capture_${timestamp}.png`;
+  const notifyCapture = (type: 'success' | 'error', text: string) => {
+    setCaptureNotice({ type, text });
+    window.setTimeout(() => {
+      setCaptureNotice((prev) => (prev?.text === text ? null : prev));
+    }, 2200);
+  };
 
+  const getPrimaryCanvas = (root: ParentNode | null | undefined) => {
+    const canvases = Array.from(root?.querySelectorAll?.('canvas') || []) as HTMLCanvasElement[];
+    if (canvases.length === 0) return null;
+    return canvases
+      .filter((canvas) => canvas.width > 0 && canvas.height > 0)
+      .sort((a, b) => {
+        const aArea = Math.max(a.clientWidth, a.width) * Math.max(a.clientHeight, a.height);
+        const bArea = Math.max(b.clientWidth, b.width) * Math.max(b.clientHeight, b.height);
+        return bArea - aArea;
+      })[0] || canvases[0];
+  };
+
+  const buildGridCompositeCanvas = () => {
+    const cells = Array.from(
+      viewerRef.current?.querySelectorAll?.('[data-grid-capture-cell="true"]') || []
+    ) as HTMLElement[];
+    if (cells.length === 0) return null;
+
+    const cellCanvases = cells
+      .map((cell) => getPrimaryCanvas(cell))
+      .filter((canvas): canvas is HTMLCanvasElement => !!canvas);
+
+    if (cellCanvases.length === 0) return null;
+
+    const cellWidth = Math.max(...cellCanvases.map((canvas) => canvas.width));
+    const cellHeight = Math.max(...cellCanvases.map((canvas) => canvas.height));
+    const composite = document.createElement('canvas');
+    composite.width = cellWidth * gridLayout.cols;
+    composite.height = cellHeight * gridLayout.rows;
+    const ctx = composite.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, composite.width, composite.height);
+
+    cellCanvases.forEach((canvas, idx) => {
+      const row = Math.floor(idx / gridLayout.cols);
+      const col = idx % gridLayout.cols;
+      ctx.drawImage(canvas, col * cellWidth, row * cellHeight, cellWidth, cellHeight);
+    });
+
+    return composite;
+  };
+
+  const downloadCanvasCapture = (sourceCanvas: HTMLCanvasElement, filePrefix = 'dental_capture') => {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const fileName = `${filePrefix}_${timestamp}.png`;
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = sourceCanvas.width;
+    exportCanvas.height = sourceCanvas.height;
+    const exportCtx = exportCanvas.getContext('2d');
+    if (!exportCtx) {
+      notifyCapture('error', 'Capture failed: export context unavailable');
+      return;
+    }
+    exportCtx.drawImage(sourceCanvas, 0, 0);
+    exportCanvas.toBlob((blob) => {
+      if (!blob) {
+        notifyCapture('error', 'Capture failed: empty image');
+        return;
+      }
+      const link = document.createElement('a');
+      const objectUrl = URL.createObjectURL(blob);
+      link.download = fileName;
+      link.href = objectUrl;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      notifyCapture('success', `Saved ${fileName}`);
+    }, 'image/png');
+  };
+
+  const handleCapture = (cropRegion?: { x: number; y: number; w: number; h: number }) => {
     try {
       let sourceCanvas: HTMLCanvasElement | null = null;
       if (shouldUseCornerstone) {
-        const canvases = containerRef.current?.querySelectorAll('canvas');
-        if (canvases && canvases.length > 0) sourceCanvas = canvases[0] as HTMLCanvasElement;
+        sourceCanvas = viewerMode === 'grid' && !cropRegion
+          ? buildGridCompositeCanvas()
+          : getPrimaryCanvas(containerRef.current || viewerRef.current);
       } else if (imageRef.current) {
         const canvas = document.createElement('canvas');
         const img = imageRef.current;
@@ -238,12 +347,21 @@ export function ChartPage(props?: ChartPageProps) {
             finalCanvas = tempCanvas;
           }
         }
-        const link = document.createElement('a');
-        link.download = fileName; link.href = finalCanvas.toDataURL('image/png');
-        link.click();
+        downloadCanvasCapture(finalCanvas);
         if (cropRegion) setCaptureRect(null);
+      } else {
+        notifyCapture('error', 'Capture failed: no render canvas found');
       }
-    } catch (err) { alert('Capture failed'); }
+    } catch (err) { notifyCapture('error', 'Capture failed'); }
+  };
+
+  const handleGridViewportCapture = (sourceCanvas: HTMLCanvasElement, viewportLabel?: string) => {
+    try {
+      downloadCanvasCapture(sourceCanvas, viewportLabel ? `dental_capture_${viewportLabel}` : 'dental_capture');
+      handleToolChange('pointer');
+    } catch (error) {
+      notifyCapture('error', 'Capture failed');
+    }
   };
 
   const findings = result
@@ -442,11 +560,12 @@ export function ChartPage(props?: ChartPageProps) {
   const originalUrl = getUrlWithCacheBuster(result?.image_url || result?.overlay_url);
   const overlayUrl = getUrlWithCacheBuster(result?.overlay_url || result?.image_url);
   const heatmapUrl = getUrlWithCacheBuster(result?.heatmap_overlay_url || result?.overlay_url || result?.image_url);
+  const hasHeatmapAsset = Boolean(result?.heatmap_overlay_url);
   let showSrc =
     viewMode === 'original'
       ? originalUrl
       : viewMode === 'heatmap'
-        ? heatmapUrl
+        ? (hasHeatmapAsset ? heatmapUrl : (originalUrl || overlayUrl))
         : overlayUrl;
 
   // If no result yet but we have a preview, show that
@@ -462,6 +581,8 @@ export function ChartPage(props?: ChartPageProps) {
   );
   const overlayIsDicom = isDicomPath(result?.overlay_url);
   const shouldUseCornerstone = viewMode === 'original' ? originalIsDicom : viewMode === 'overlay' ? overlayIsDicom : false;
+  const magnifierDisabled = shouldUseCornerstone && viewerMode === 'grid';
+  const areaCaptureDisabled = shouldUseCornerstone && viewerMode !== 'grid';
   const viewModeLabel =
     viewMode === 'overlay'
       ? 'AI Analysis Mode'
@@ -508,6 +629,19 @@ export function ChartPage(props?: ChartPageProps) {
           },
     ]
     : [];
+
+  useEffect(() => {
+    if (magnifierDisabled && activeTool === 'magnifier') {
+      handleToolChange('pointer');
+    }
+  }, [magnifierDisabled, activeTool]);
+
+  useEffect(() => {
+    if (areaCaptureDisabled && activeTool === 'capture-area') {
+      handleToolChange('pointer');
+      setCaptureRect(null);
+    }
+  }, [areaCaptureDisabled, activeTool]);
 
   const calculateFitScale = (
     viewerWidth: number,
@@ -606,6 +740,82 @@ export function ChartPage(props?: ChartPageProps) {
     return <g id="ai-overlay-layer">{items}</g>;
   };
 
+  const renderRiskDetections = () => {
+    if (viewMode !== 'heatmap' || !result || hasHeatmapAsset) return null;
+
+    const items: React.ReactNode[] = [];
+    const cariesEntries = Object.entries(result.caries_by_tooth_best || {});
+    const periapicalEntries = Object.entries(result.periapical_by_tooth_best || {});
+    const teeth = Array.isArray(result.teeth) ? result.teeth : [];
+
+    cariesEntries.forEach(([tooth, data]: any, idx) => {
+      const box = data?.box;
+      if (!box || box.length < 4) return;
+      const conf = Number(data?.conf || 0.65);
+      const [x1, y1, x2, y2] = box;
+      const cx = (x1 + x2) / 2;
+      const cy = (y1 + y2) / 2;
+      const rx = Math.max((x2 - x1) * 0.85, 18);
+      const ry = Math.max((y2 - y1) * 0.85, 18);
+      const opacity = Math.min(0.55, 0.22 + conf * 0.28);
+      items.push(
+        <g key={`risk-caries-${tooth}-${idx}`} filter="url(#riskBlurStrong)">
+          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill={`rgba(251,146,60,${opacity})`} />
+        </g>
+      );
+    });
+
+    periapicalEntries.forEach(([tooth, data]: any, idx) => {
+      const box = data?.box;
+      if (!box || box.length < 4) return;
+      const conf = Number(data?.conf || 0.72);
+      const [x1, y1, x2, y2] = box;
+      const cx = (x1 + x2) / 2;
+      const cy = (y1 + y2) / 2;
+      const rx = Math.max((x2 - x1) * 0.95, 22);
+      const ry = Math.max((y2 - y1) * 0.95, 22);
+      const opacity = Math.min(0.6, 0.26 + conf * 0.3);
+      items.push(
+        <g key={`risk-peri-${tooth}-${idx}`} filter="url(#riskBlurStrong)">
+          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill={`rgba(239,68,68,${opacity})`} />
+        </g>
+      );
+    });
+
+    teeth.forEach((tooth: any, idx: number) => {
+      const boneLossPct = Number(
+        result?.bonelevel?.[String(tooth?.tooth_label || '')]?.percent ??
+        tooth?.bone_loss_pct ??
+        0
+      );
+      if (boneLossPct < 10) return;
+      const severity = Math.min(1, Math.max(0, (boneLossPct - 10) / 35));
+      const opacity = 0.12 + severity * 0.24;
+      const green = Math.round(224 - severity * 140);
+      const fill = `rgba(255,${green},71,${opacity})`;
+      const contour = tooth?.contour;
+      if (Array.isArray(contour) && contour.length >= 3) {
+        const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
+        items.push(
+          <g key={`risk-bone-contour-${tooth?.tooth_label || idx}`} filter="url(#riskBlurSoft)">
+            <polygon points={points} fill={fill} />
+          </g>
+        );
+        return;
+      }
+      const box = tooth?.box;
+      if (!box || box.length < 4) return;
+      const [x1, y1, x2, y2] = box;
+      items.push(
+        <g key={`risk-bone-box-${tooth?.tooth_label || idx}`} filter="url(#riskBlurSoft)">
+          <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} rx={18} ry={18} fill={fill} />
+        </g>
+      );
+    });
+
+    return <g id="risk-overlay-layer">{items}</g>;
+  };
+
   // --- Handlers ---
   const resetView = () => {
     setScale(1);
@@ -616,6 +826,7 @@ export function ChartPage(props?: ChartPageProps) {
     setContrast(100);
     handleToolChange('pointer');
     setActiveSubTool(null);
+    setCornerstoneResetToken((prev) => prev + 1);
   };
 
   // Image fit handled by CSS (width: 100%, height: auto) to avoid calculation errors
@@ -1010,6 +1221,8 @@ export function ChartPage(props?: ChartPageProps) {
     }
 
     if (activeTool === 'capture-area') {
+      if (shouldUseCornerstone) return;
+      e.preventDefault();
       const vRect = viewerRef.current?.getBoundingClientRect();
       if (!vRect) return;
       setCaptureRect({
@@ -1102,6 +1315,8 @@ export function ChartPage(props?: ChartPageProps) {
     }
 
     if (activeTool === 'capture-area' && captureRect?.active) {
+      if (shouldUseCornerstone) return;
+      e.preventDefault();
       const vRect = viewerRef.current?.getBoundingClientRect();
       if (!vRect) return;
       const currentX = e.clientX - vRect.left;
@@ -1110,8 +1325,10 @@ export function ChartPage(props?: ChartPageProps) {
     }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e?: React.MouseEvent) => {
     if (activeTool === 'capture-area' && captureRect?.active) {
+      if (shouldUseCornerstone) return;
+      e?.preventDefault();
       setCaptureRect(prev => ({ ...prev!, active: false }));
       return;
     }
@@ -1237,76 +1454,122 @@ export function ChartPage(props?: ChartPageProps) {
     if (
       shouldUseCornerstone ||
       activeTool !== 'magnifier' ||
-      !magnifierState.visible ||
       !showSrc ||
-      !imageRef.current ||
-      !imgRect
+      !magnifierState.visible ||
+      !dimensions.width ||
+      !dimensions.height
     ) {
       return null;
     }
 
-    const lensSize = 210;
-    const lensRadius = lensSize / 2;
-    const zoomFactor = 2.35;
-    const viewportPadding = 12;
-    const clampedCenterX = Math.max(
-      lensRadius + viewportPadding,
-      Math.min(window.innerWidth - lensRadius - viewportPadding, magnifierState.clientX)
-    );
-    const clampedCenterY = Math.max(
-      lensRadius + viewportPadding,
-      Math.min(window.innerHeight - lensRadius - viewportPadding, magnifierState.clientY)
-    );
-    const relativeX = magnifierState.clientX - imgRect.left;
-    const relativeY = magnifierState.clientY - imgRect.top;
-    const magnifiedWidth = imgRect.width * zoomFactor;
-    const magnifiedHeight = imgRect.height * zoomFactor;
-    const imageLeft = lensRadius - relativeX * zoomFactor;
-    const imageTop = lensRadius - relativeY * zoomFactor;
+    const currentTransformScale = Math.max(scale * zoom, 0.001);
+    const lensRadius = 150 / currentTransformScale;
+    const zoomFactor = 3.0;
+    const focusImgX = magnifierState.imgX;
+    const focusImgY = magnifierState.imgY;
+    const borderWidth = Math.max(3.5 / currentTransformScale, 1.25);
+    const clipId = 'chart-magnifier-clip';
+    const offsetX = focusImgX - focusImgX * zoomFactor;
+    const offsetY = focusImgY - focusImgY * zoomFactor;
 
-    return createPortal(
-      <div
-        className="pointer-events-none fixed z-[10020] overflow-hidden rounded-full border-2 border-cyan-200/90 shadow-[0_24px_80px_rgba(8,145,178,0.35)]"
-        style={{
-          left: clampedCenterX - lensRadius,
-          top: clampedCenterY - lensRadius,
-          width: lensSize,
-          height: lensSize,
-          background: 'radial-gradient(circle at 35% 35%, rgba(255,255,255,0.18), rgba(14,116,144,0.10) 52%, rgba(2,6,23,0.88) 100%)',
-        }}
-      >
-        <div
-          className="absolute inset-0 overflow-hidden rounded-full"
-        >
-          <img
-            src={showSrc}
-            alt=""
-            className="pointer-events-none select-none"
-            draggable={false}
-            style={{
-              position: 'absolute',
-              left: imageLeft,
-              top: imageTop,
-              width: magnifiedWidth,
-              height: magnifiedHeight,
-              maxWidth: 'none',
-              filter: `invert(${inverted ? 1 : 0}) brightness(${brightness}%) contrast(${contrast}%)`,
-            }}
+    return (
+      <g pointerEvents="none">
+        <defs>
+          <clipPath id={clipId}>
+            <circle cx={focusImgX} cy={focusImgY} r={lensRadius} />
+          </clipPath>
+        </defs>
+        <g clipPath={`url(#${clipId})`}>
+          <circle cx={focusImgX} cy={focusImgY} r={lensRadius} fill="rgba(255,255,255,0.05)" />
+          <g transform={`translate(${offsetX} ${offsetY}) scale(${zoomFactor})`}>
+            <image
+              href={showSrc}
+              x={0}
+              y={0}
+              width={dimensions.width}
+              height={dimensions.height}
+              preserveAspectRatio="none"
+              style={{
+                filter: `invert(${inverted ? 1 : 0}) brightness(${brightness}%) contrast(${contrast}%)`,
+              }}
+            />
+            {renderRiskDetections()}
+            {shapes.map((s: any, idx: number) => renderShape(s, false, idx))}
+            {activeSubTool && renderShape({ type: activeSubTool, points: pendingPoints, color: drawingColor }, true)}
+          </g>
+          <circle
+            cx={focusImgX}
+            cy={focusImgY}
+            r={lensRadius}
+            fill="url(#magnifierGloss)"
+            opacity={0.22}
           />
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_40%_35%,rgba(255,255,255,0.18),rgba(255,255,255,0)_58%)]" />
-        </div>
-        <div className="absolute inset-[8px] rounded-full border border-white/25" />
-        <div className="absolute inset-[20px] rounded-full border border-cyan-100/20" />
-        <div className="absolute left-1/2 top-1/2 h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/80 bg-white/5" />
-        <div className="absolute left-1/2 top-[22px] h-[1px] w-10 -translate-x-1/2 bg-white/70" />
-        <div className="absolute left-1/2 top-1/2 h-10 w-[1px] -translate-x-1/2 -translate-y-1/2 bg-white/70" />
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-slate-950/78 px-3 py-1 text-[10px] font-semibold tracking-[0.18em] text-cyan-200">
-          2.35X
-        </div>
-      </div>,
-      document.body
+        </g>
+        <circle
+          cx={focusImgX}
+          cy={focusImgY}
+          r={lensRadius}
+          fill="none"
+          stroke="rgba(255,255,255,0.92)"
+          strokeWidth={borderWidth}
+        />
+        <circle
+          cx={focusImgX}
+          cy={focusImgY}
+          r={Math.max(lensRadius - borderWidth * 1.8, 0)}
+          fill="none"
+          stroke="rgba(34,211,238,0.55)"
+          strokeWidth={Math.max(1.5 / currentTransformScale, 1)}
+        />
+      </g>
     );
   };
+
+  const magnifierDebug = (() => {
+    const enabled = activeTool === 'magnifier';
+    const renderable =
+      !shouldUseCornerstone &&
+      enabled &&
+      magnifierState.visible &&
+      Boolean(showSrc) &&
+      Boolean(imageRef.current) &&
+      Boolean(dimensions.width) &&
+      Boolean(dimensions.height);
+
+    const currentTransformScale = Math.max(scale * zoom, 0.001);
+    const lensRadius = 150 / currentTransformScale;
+    const displayX =
+      dimensions.width > 0
+        ? (magnifierState.imgX / dimensions.width) * displaySize.width
+        : 0;
+    const displayY =
+      dimensions.height > 0
+        ? (magnifierState.imgY / dimensions.height) * displaySize.height
+        : 0;
+
+    return {
+      enabled,
+      renderable,
+      shouldUseCornerstone,
+      showSrc: Boolean(showSrc),
+      imageRefReady: Boolean(imageRef.current),
+      imgRectReady: Boolean(imgRect),
+      visible: magnifierState.visible,
+      clientX: Math.round(magnifierState.clientX),
+      clientY: Math.round(magnifierState.clientY),
+      viewerX: Math.round(magnifierState.viewerX),
+      viewerY: Math.round(magnifierState.viewerY),
+      imgX: Math.round(magnifierState.imgX),
+      imgY: Math.round(magnifierState.imgY),
+      displayX: Math.round(displayX),
+      displayY: Math.round(displayY),
+      displayWidth: Math.round(displaySize.width),
+      displayHeight: Math.round(displaySize.height),
+      naturalWidth: dimensions.width,
+      naturalHeight: dimensions.height,
+      lensRadius: Number(lensRadius.toFixed(2)),
+    };
+  })();
 
   // Render SVG Helper
   const renderShape = (shape: any, isTemp = false, index?: number) => {
@@ -1607,107 +1870,104 @@ export function ChartPage(props?: ChartPageProps) {
       )}
       {hasViewerShell && (
         <div className="flex flex-1 relative overflow-y-auto">
-          {/* Left Toolbar remains vertical & functional */}
-          <aside className="w-32 min-w-32 flex-shrink-0 border-r border-gray-800 flex flex-col py-4 px-3 gap-4 z-50" style={{ backgroundColor: '#0A0B22' }}>
-            <div className="flex gap-2 [&>*]:flex-1">
-              <ToolBtn active={activeTool === 'pointer'} onClick={() => handleToolChange('pointer')} icon={MousePointer} title="Select Tool" />
-              <ToolBtn active={activeTool === 'pan'} onClick={() => handleToolChange('pan')} icon={Hand} title="Pan" />
-            </div>
-            <div className="flex gap-2 [&>*]:flex-1">
-              <ToolBtn active={activeTool === 'wlww'} onClick={() => handleToolChange('wlww')} icon={WindowLevelIcon} title="Window / Level" />
-              <ToolBtn active={false} onClick={() => setRotation(r => r + 90)} icon={RotateCw} title="Rotate 90" />
-              <ToolBtn active={inverted} onClick={() => setInverted(v => !v)} icon={InvertIcon} title="Invert" />
-            </div>
+          {/* Left Toolbar: 2-column vertical layout */}
+          <aside className="w-36 min-w-36 flex-shrink-0 border-r border-gray-800 flex flex-col py-4 px-3 gap-3 z-50" style={{ backgroundColor: '#0A0B22' }}>
+            <div className="space-y-2">
+              <ToolRow>
+                <ToolBtn active={activeTool === 'pointer'} onClick={() => handleToolChange('pointer')} icon={MousePointer} title="Select Tool" />
+                <ToolBtn active={activeTool === 'pan'} onClick={() => handleToolChange('pan')} icon={Hand} title="Pan" />
+              </ToolRow>
+              <ToolRow>
+                <ToolBtn active={activeTool === 'wlww'} onClick={() => handleToolChange('wlww')} icon={WindowLevelIcon} title="Window / Level" />
+                <ToolBtn active={false} onClick={() => setRotation(r => r + 90)} icon={RotateCw} title="Rotate 90" />
+              </ToolRow>
+              <ToolRow>
+                <ToolBtn active={inverted} onClick={() => setInverted(v => !v)} icon={InvertIcon} title="Invert" />
+                <ToolBtn active={false} onClick={() => setFlipped(f => !f)} icon={FlipHorizontal} title="Flip Horizontal" />
+              </ToolRow>
 
-            {viewerMode === 'grid' && (
-              <div className="flex gap-2 [&>*]:flex-1">
-                <ToolBtn active={activeTool === 'rotate'} onClick={() => handleToolChange('rotate')} icon={Rotate3d} title="3D Rotate" />
-                <ToolBtn active={activeTool === 'scroll'} onClick={() => handleToolChange('scroll')} icon={ChevronsUpDown} title="Slice Scroll" />
-              </div>
-            )}
+              {viewerMode === 'grid' && (
+                <ToolRow>
+                  <ToolBtn active={activeTool === 'rotate'} onClick={() => handleToolChange('rotate')} icon={Rotate3d} title="3D Rotate" />
+                  <ToolBtn active={activeTool === 'scroll'} onClick={() => handleToolChange('scroll')} icon={ChevronsUpDown} title="Slice Scroll" />
+                </ToolRow>
+              )}
+            </div>
 
             <div className="h-px w-full bg-dashed bg-gray-700 opacity-50" />
 
-            <div className="flex gap-2 [&>*]:flex-1">
-              <ToolBtn active={false} onClick={() => setFlipped(f => !f)} icon={FlipHorizontal} title="Flip Horizontal" />
-              <ToolBtn active={activeTool === 'magnifier'} onClick={() => handleToolChange('magnifier')} icon={Search} title="Magnifier" />
-              <ToolBtn active={activeTool === 'measure' || activeTool === 'length'} onClick={(e: any) => openMenu(e, 'measure')} icon={Ruler} title="Measure" />
-            </div>
-            <div className="flex gap-2 [&>*]:flex-1">
-              <ToolBtn active={activeTool === 'annotate' || activeTool === 'arrow'} onClick={(e: any) => openMenu(e, 'annotate')} icon={PenLine} title="Annotate" />
-              <ToolBtn active={activeTool === 'erase'} onClick={() => handleToolChange('erase')} icon={Eraser} title="Eraser" />
+            <div className="space-y-2">
+              <ToolRow>
+                <ToolBtn active={activeTool === 'magnifier'} disabled={magnifierDisabled} onClick={() => handleToolChange('magnifier')} icon={Search} title={magnifierDisabled ? 'Magnifier disabled in Grid/MPR view' : 'Magnifier'} />
+                <ToolBtn active={activeTool === 'measure' || activeTool === 'length'} onClick={(e: any) => openMenu(e, 'measure')} icon={Ruler} title="Measure" />
+              </ToolRow>
+              <ToolRow>
+                <ToolBtn active={activeTool === 'annotate' || activeTool === 'arrow'} onClick={(e: any) => openMenu(e, 'annotate')} icon={PenLine} title="Annotate" />
+                <ToolBtn active={activeTool === 'erase'} onClick={() => handleToolChange('erase')} icon={Eraser} title="Eraser" />
+              </ToolRow>
+              <ToolRow>
+                <ToolBtn active={activeTool === 'capture-area'} disabled={areaCaptureDisabled} onClick={() => {
+                  if (activeTool === 'capture-area') handleToolChange('pointer');
+                  else handleToolChange('capture-area');
+                }} icon={Crop} title={areaCaptureDisabled ? 'Area Capture disabled in CT/DICOM view' : 'Area Capture'} />
+                <ToolBtn active={false} onClick={() => handleCapture()} icon={Camera} title="Full Capture" />
+              </ToolRow>
+              <ToolRow>
+                <ToolBtn active={false} onClick={() => { if (window.confirm('Clear all?')) clearAllAnnotations(); }} icon={Trash2} title="Clear All" />
+                <button onClick={resetView} className="w-full min-h-[44px] p-2 bg-gray-800/50 rounded-lg hover:bg-gray-700 text-gray-400 transition-colors group flex items-center justify-center" title="Reset All Views">
+                  <RotateCcw className="w-5 h-5 group-hover:-rotate-180 transition-transform duration-500" />
+                </button>
+              </ToolRow>
             </div>
 
-            <div className="flex gap-2 [&>*]:flex-1">
-              <ToolBtn active={false} onClick={() => { if (window.confirm('Clear all?')) clearAllAnnotations(); }} icon={Trash2} title="Clear All" />
-              <ToolBtn active={activeTool === 'capture-area'} onClick={() => {
-                if (activeTool === 'capture-area') handleToolChange('pointer');
-                else handleToolChange('capture-area');
-              }} icon={Crop} title="Area Capture" />
-              <ToolBtn active={false} onClick={() => handleCapture()} icon={Camera} title="Full Capture" />
-            </div>
-
-            {/* Grid Toggle - Only if DICOM/3D-ish */}
             {shouldUseCornerstone && (
-              <div className="mt-4 pt-4 border-t border-gray-800 space-y-2">
+              <div className="pt-3 border-t border-gray-800 space-y-2">
                 <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider text-center">Viewer</p>
-                <div className="flex gap-2 [&>*]:flex-1">
+                <ToolRow>
                   <ToolBtn active={viewerMode === 'single'} onClick={() => setViewerMode('single')} icon={Monitor} title="Single View" />
                   <ToolBtn active={viewerMode === 'grid'} onClick={(e: any) => openMenu(e, 'grid')} icon={Grid} title="Grid/MPR Layout" />
-                </div>
+                </ToolRow>
               </div>
             )}
 
-            {/* Zoom Controls at Bottom */}
-            <div className="flex flex-col gap-2 mt-auto pb-2">
-              <div className="flex gap-2 [&>*]:flex-1">
-                <button onClick={() => handleZoom(0.1)} className="w-full p-2 bg-gray-800/50 rounded-xl hover:bg-gray-700 text-gray-400 transition-colors flex items-center justify-center">
+            <div className="mt-auto space-y-2 pt-3 border-t border-gray-800">
+              <ToolRow>
+                <button onClick={() => handleZoom(0.1)} className="w-full min-h-[44px] p-2 bg-gray-800/50 rounded-lg hover:bg-gray-700 text-gray-400 transition-colors flex items-center justify-center" title="Zoom In">
                   <ZoomIn className="w-5 h-5" />
                 </button>
-                <button onClick={() => handleZoom(-0.1)} className="w-full p-2 bg-gray-800/50 rounded-xl hover:bg-gray-700 text-gray-400 transition-colors flex items-center justify-center">
+                <button onClick={() => handleZoom(-0.1)} className="w-full min-h-[44px] p-2 bg-gray-800/50 rounded-lg hover:bg-gray-700 text-gray-400 transition-colors flex items-center justify-center" title="Zoom Out">
                   <ZoomOut className="w-5 h-5" />
                 </button>
-              </div>
-              <div className="flex gap-2 [&>*]:flex-1">
-                <button onClick={resetView} className="w-full p-2 bg-gray-800/50 rounded-xl hover:bg-gray-700 text-gray-400 transition-colors group flex items-center justify-center" title="Reset All Views">
-                  <RotateCcw className="w-5 h-5 group-hover:-rotate-180 transition-transform duration-500" />
-                </button>
-                <div className="min-h-[44px]" aria-hidden="true" />
-              </div>
-              <div className="space-y-2">
-                <button
-                  onClick={() => setViewMode('original')}
-                  className={`w-full p-2 rounded-xl transition-all duration-200 flex items-center justify-center ${
-                    viewMode === 'original'
-                      ? 'bg-slate-200 text-slate-950 shadow-[0_0_15px_rgba(226,232,240,0.28)] ring-1 ring-slate-200/70'
-                      : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
-                  }`}
-                  title="Original Source"
-                >
-                  <ImageIcon className="w-5 h-5" />
-                </button>
-                <button
-                  onClick={() => setViewMode('overlay')}
-                  className={`w-full p-2 rounded-xl transition-all duration-200 flex items-center justify-center ${
-                    viewMode === 'overlay'
-                      ? 'bg-indigo-600 text-white shadow-[0_0_15px_rgba(79,70,229,0.4)] ring-1 ring-indigo-400'
-                      : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
-                  }`}
-                  title="AI Overlay"
-                >
-                  <Layers className="w-5 h-5" />
-                </button>
-                <button
-                  onClick={() => setViewMode('heatmap')}
-                  className={`w-full p-2 rounded-xl transition-all duration-200 flex items-center justify-center ${
-                    viewMode === 'heatmap'
-                      ? 'bg-orange-500 text-slate-950 shadow-[0_0_18px_rgba(249,115,22,0.32)] ring-1 ring-orange-300'
-                      : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
-                  }`}
-                  title="Risk Overlay"
-                >
-                  <Activity className="w-5 h-5" />
-                </button>
+              </ToolRow>
+
+              <div className="pt-2 border-t border-gray-800/80 space-y-2">
+                <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider text-center">Overlay</p>
+                <ToolRow>
+                  <button
+                    onClick={() => setViewMode(viewMode === 'overlay' ? 'original' : 'overlay')}
+                    className={`w-full min-h-[44px] p-2 rounded-lg transition-all duration-200 flex items-center justify-center ${
+                      viewMode === 'overlay'
+                        ? 'bg-indigo-600 text-white shadow-[0_0_15px_rgba(79,70,229,0.4)] ring-1 ring-indigo-400'
+                        : viewMode === 'original'
+                          ? 'bg-slate-200 text-slate-950 shadow-[0_0_15px_rgba(226,232,240,0.28)] ring-1 ring-slate-200/70'
+                          : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
+                    }`}
+                    title={viewMode === 'overlay' ? 'Switch to Original Source' : 'Switch to AI Analysis'}
+                  >
+                    {viewMode === 'overlay' ? <Layers className="w-5 h-5" /> : <ImageIcon className="w-5 h-5" />}
+                  </button>
+                  <button
+                    onClick={() => setViewMode('heatmap')}
+                    className={`w-full min-h-[44px] p-2 rounded-lg transition-all duration-200 flex items-center justify-center ${
+                      viewMode === 'heatmap'
+                        ? 'bg-orange-500 text-slate-950 shadow-[0_0_18px_rgba(249,115,22,0.32)] ring-1 ring-orange-300'
+                        : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
+                    }`}
+                    title="Risk Overlay"
+                  >
+                    <Activity className="w-5 h-5" />
+                  </button>
+                </ToolRow>
               </div>
             </div>
           </aside>
@@ -1719,13 +1979,24 @@ export function ChartPage(props?: ChartPageProps) {
               <div className="bg-[#0f0f0f] border border-white/5 rounded-3xl shadow-2xl overflow-hidden">
                 <div className="flex flex-col lg:flex-row lg:items-start gap-6">
                   {/* Viewer column */}
-                  <div className="w-full bg-black relative">
+                    <div className="w-full bg-black relative select-none">
                     <div className="absolute top-4 left-4 z-10 flex items-center gap-3 bg-black/60 backdrop-blur-xl px-5 py-2.5 rounded-full border border-white/10 shadow-2xl pointer-events-none">
                       <div className={`w-2.5 h-2.5 rounded-full ${viewModeDotClass}`} />
                       <span className="text-xs font-bold uppercase tracking-wider text-gray-300">
                         {viewModeLabel}
                       </span>
                     </div>
+                    {captureNotice && (
+                      <div
+                        className={`absolute top-4 right-4 z-20 rounded-full px-4 py-2 text-[11px] font-bold shadow-2xl ${
+                          captureNotice.type === 'success'
+                            ? 'bg-emerald-500/90 text-white'
+                            : 'bg-red-500/90 text-white'
+                        }`}
+                      >
+                        {captureNotice.text}
+                      </div>
+                    )}
                     {viewMode === 'heatmap' && (
                       <div className="absolute right-4 top-4 z-10 rounded-[20px] border border-white/10 bg-black/60 px-4 py-3 text-[11px] text-slate-200 shadow-2xl backdrop-blur-xl">
                         <p className="font-semibold uppercase tracking-[0.18em] text-orange-300">Risk Overlay</p>
@@ -1743,6 +2014,7 @@ export function ChartPage(props?: ChartPageProps) {
                         </div>
                       </div>
                     )}
+                      {/* Magnifier debug panel kept for local troubleshooting; hidden in normal UI. */}
 
                     <div
                       className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : activeTool === 'magnifier' ? 'cursor-zoom-in' : 'cursor-grab active:cursor-grabbing'}`}
@@ -1792,6 +2064,9 @@ export function ChartPage(props?: ChartPageProps) {
                           showToolbar={false} // Use ChartPage's sidebar instead
                           layout={gridLayout}
                           onLayoutChange={setGridLayout}
+                          interactionMode={activeTool}
+                          resetToken={cornerstoneResetToken}
+                          onViewportCapture={handleGridViewportCapture}
                           invert={inverted}
                         />
                       ) : shouldUseCornerstone ? (
@@ -1802,6 +2077,8 @@ export function ChartPage(props?: ChartPageProps) {
                             initialSourceId={cornerstoneSources[0]?.id}
                             maxHeight={containerHeight}
                             showToolbar={false} // Use ChartPage's sidebar instead
+                            interactionMode={activeTool}
+                            resetToken={cornerstoneResetToken}
                             invert={inverted}
                           />
                           {result?.is_volume && (
@@ -1861,11 +2138,23 @@ export function ChartPage(props?: ChartPageProps) {
                                 <marker id="arrowhead" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
                                   <polygon points="0 0, 6 2, 0 4" fill="#facc15" />
                                 </marker>
+                                <filter id="riskBlurStrong" x="-35%" y="-35%" width="170%" height="170%">
+                                  <feGaussianBlur stdDeviation={22 / effectiveScale} />
+                                </filter>
+                                <filter id="riskBlurSoft" x="-25%" y="-25%" width="150%" height="150%">
+                                  <feGaussianBlur stdDeviation={12 / effectiveScale} />
+                                </filter>
+                                <radialGradient id="magnifierGloss" cx="35%" cy="30%" r="70%">
+                                  <stop offset="0%" stopColor="rgba(255,255,255,0.9)" />
+                                  <stop offset="35%" stopColor="rgba(255,255,255,0.18)" />
+                                  <stop offset="100%" stopColor="rgba(255,255,255,0)" />
+                                </radialGradient>
                               </defs>
+                              {renderRiskDetections()}
                               {shapes.map((s: any, idx: number) => renderShape(s, false, idx))}
                               {activeSubTool && renderShape({ type: activeSubTool, points: pendingPoints, color: drawingColor }, true)}
+                              {renderMagnifier()}
                             </svg>
-                            {renderMagnifier()}
                           </div>
                         </div>
                       ) : (
@@ -2132,11 +2421,30 @@ export function ChartPage(props?: ChartPageProps) {
   );
 }
 
-function ToolBtn({ active, onClick, icon: Icon, title }: any) {
+function ToolBtn({ active, onClick, icon: Icon, title, disabled = false }: any) {
   return (
-    <button onClick={onClick} title={title} className={`w-full min-h-[44px] p-2 rounded-lg transition-all flex items-center justify-center ${active ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
+    <button
+      onClick={disabled ? undefined : onClick}
+      title={title}
+      disabled={disabled}
+      className={`w-full min-h-[44px] p-2 rounded-lg transition-all flex items-center justify-center ${
+        disabled
+          ? 'text-gray-600 bg-white/5 cursor-not-allowed opacity-45'
+          : active
+            ? 'bg-indigo-600 text-white shadow-lg'
+            : 'text-gray-400 hover:text-white hover:bg-white/10'
+      }`}
+    >
       <Icon size={20} />
     </button>
+  );
+}
+
+function ToolRow({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex items-stretch gap-2 [&>*]:flex-1">
+      {children}
+    </div>
   );
 }
 

@@ -32,6 +32,8 @@ type CornerstoneViewerProps = {
     is3D?: boolean;
     showToolbar?: boolean;
     invert?: boolean;
+    interactionMode?: string;
+    resetToken?: number;
 };
 
 type ToolMode = 'pan' | 'length' | 'arrow' | 'rect' | 'ellipse' | 'wl';
@@ -44,6 +46,8 @@ export function CornerstoneViewer({
     is3D = false,
     showToolbar = true,
     invert = false,
+    interactionMode,
+    resetToken = 0,
 }: CornerstoneViewerProps) {
     const viewerRef = useRef<HTMLDivElement>(null);
     const dicomImageIdsRef = useRef<Record<string, string>>({});
@@ -59,6 +63,8 @@ export function CornerstoneViewer({
     );
     const [activeTool, setActiveToolState] = useState<ToolMode>('pan');
     const [debugEnabled, setDebugEnabled] = useState(false);
+    const lensCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const [magnifier, setMagnifier] = useState({ visible: false, x: 0, y: 0 });
 
     const activeSource = sources.find((s) => s.id === activeSourceId) || sources[0];
 
@@ -207,6 +213,67 @@ export function CornerstoneViewer({
         viewport?.render();
     }, [invert, lastImageId]);
 
+    useEffect(() => {
+        if (interactionMode !== 'magnifier') {
+            setMagnifier((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+        }
+    }, [interactionMode]);
+
+    const drawMagnifier = (host: HTMLDivElement, localX: number, localY: number) => {
+        const lensCanvas = lensCanvasRef.current;
+        const sourceCanvas = host.querySelector('canvas') as HTMLCanvasElement | null;
+        if (!lensCanvas || !sourceCanvas) return;
+
+        const rect = host.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0 || sourceCanvas.width <= 0 || sourceCanvas.height <= 0) return;
+
+        const lensSize = 126;
+        const zoomFactor = 1.5;
+        const dpr = window.devicePixelRatio || 1;
+        if (lensCanvas.width !== Math.round(lensSize * dpr) || lensCanvas.height !== Math.round(lensSize * dpr)) {
+            lensCanvas.width = Math.round(lensSize * dpr);
+            lensCanvas.height = Math.round(lensSize * dpr);
+            lensCanvas.style.width = `${lensSize}px`;
+            lensCanvas.style.height = `${lensSize}px`;
+        }
+
+        const ctx = lensCanvas.getContext('2d');
+        if (!ctx) return;
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, lensSize, lensSize);
+        ctx.imageSmoothingEnabled = false;
+
+        const sampleWidth = (lensSize / zoomFactor) * (sourceCanvas.width / rect.width);
+        const sampleHeight = (lensSize / zoomFactor) * (sourceCanvas.height / rect.height);
+        const centerX = (localX / rect.width) * sourceCanvas.width;
+        const centerY = (localY / rect.height) * sourceCanvas.height;
+        const sx = Math.max(0, Math.min(sourceCanvas.width - sampleWidth, centerX - sampleWidth / 2));
+        const sy = Math.max(0, Math.min(sourceCanvas.height - sampleHeight, centerY - sampleHeight / 2));
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(lensSize / 2, lensSize / 2, lensSize / 2 - 2, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(sourceCanvas, sx, sy, sampleWidth, sampleHeight, 0, 0, lensSize, lensSize);
+        ctx.restore();
+    };
+
+    const handleMagnifierMove = (event: React.MouseEvent<HTMLDivElement>) => {
+        if (interactionMode !== 'magnifier') return;
+        const host = viewerRef.current;
+        if (!host) return;
+        const rect = host.getBoundingClientRect();
+        const localX = event.clientX - rect.left;
+        const localY = event.clientY - rect.top;
+        if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
+            setMagnifier((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+            return;
+        }
+        setMagnifier({ visible: true, x: localX, y: localY });
+        drawMagnifier(host, localX, localY);
+    };
+
     const handleToolChange = (tool: ToolMode) => {
         setActiveToolState(tool);
         switch (tool) {
@@ -241,6 +308,12 @@ export function CornerstoneViewer({
             viewport.render();
         }
     };
+
+    useEffect(() => {
+        if (resetToken > 0) {
+            resetView();
+        }
+    }, [resetToken]);
 
     const zoomInOut = (delta: number) => {
         const renderingEngine = renderingEngineRef.current;
@@ -366,6 +439,8 @@ export function CornerstoneViewer({
                     ref={viewerRef}
                     className="w-full h-full bg-black rounded-xl overflow-hidden relative"
                     style={{ maxHeight: maxHeight ? `${maxHeight}px` : undefined, minHeight: '400px' }}
+                    onMouseMove={handleMagnifierMove}
+                    onMouseLeave={() => setMagnifier((prev) => (prev.visible ? { ...prev, visible: false } : prev))}
                     onContextMenu={(e) => e.preventDefault()} // prevent context menu for tools right click
                 >
                     {!isInit && (
@@ -388,6 +463,23 @@ export function CornerstoneViewer({
                     {loadState === 'error' && (
                         <div className="absolute inset-x-4 bottom-4 rounded-xl border border-red-500/40 bg-black/70 px-4 py-3 text-sm text-red-200 z-10">
                             {statusMessage}
+                        </div>
+                    )}
+
+                    {interactionMode === 'magnifier' && magnifier.visible && (
+                        <div
+                            className="pointer-events-none absolute z-20 overflow-hidden rounded-full border border-cyan-200/80 shadow-[0_14px_40px_rgba(0,0,0,0.38)]"
+                            style={{
+                                width: 126,
+                                height: 126,
+                                left: magnifier.x,
+                                top: magnifier.y,
+                                transform: 'translate(-50%, -50%)',
+                                background: 'rgba(9, 17, 40, 0.18)',
+                                boxShadow: '0 0 0 2px rgba(255,255,255,0.22), 0 10px 30px rgba(0,0,0,0.35)',
+                            }}
+                        >
+                            <canvas ref={lensCanvasRef} className="block h-full w-full" />
                         </div>
                     )}
                 </div>

@@ -75,6 +75,25 @@ export function RightPanel({ selectedTooth, result, statuses = {}, onClose, numb
   const iMetrics = key ? result?.implant_metrics?.[key] : undefined;
   const missing = key ? (statusMap[key]?.missing || missingList.includes(key)) : false;
   const requires = key ? (!!statusMap[key]?.caries || !!statusMap[key]?.peri) : false;
+  const triage = key ? statusMap[key]?.triage : undefined;
+  const toothStatus = key ? (statusMap[key] || {}) : {};
+  const triageReasons: string[] = [];
+  if (missing) triageReasons.push('Missing tooth');
+  if (implant) triageReasons.push('Implant / fixture');
+  if (toothStatus.hopeless) triageReasons.push('Hopeless prognosis');
+  if (toothStatus.nerve_overlap) triageReasons.push('Nerve overlap');
+  if (toothStatus.sinus_overlap) triageReasons.push('Sinus overlap');
+  if (Number(toothStatus.nerve_dist_mm || 0) > 0 && Number(toothStatus.nerve_dist_mm || 0) < 2) {
+    triageReasons.push(`Nerve distance ${fmt(toothStatus.nerve_dist_mm, 1)} mm`);
+  }
+  if (Number(toothStatus.bone_loss_level || 0) >= 3) {
+    triageReasons.push(`Bone loss level ${toothStatus.bone_loss_level}`);
+  }
+  if (Number(toothStatus.bone_loss_pct || 0) >= 60) {
+    triageReasons.push(`Bone loss ${fmt(toothStatus.bone_loss_pct, 1)}%`);
+  }
+  if (carBest) triageReasons.push(`Caries ${fmt(carBest.conf)}`);
+  if (periBest) triageReasons.push(`Periapical ${fmt(periBest.conf)}`);
 
   // Dynamic Status Logic
   let statusText = 'Present';
@@ -123,7 +142,28 @@ export function RightPanel({ selectedTooth, result, statuses = {}, onClose, numb
               <span className="text-gray-500 font-medium">PBL level</span>
               <span className="text-gray-900 font-bold">{pblLevel ?? '-'}</span>
             </li>
+            <li className="flex justify-between items-center text-sm">
+              <span className="text-gray-500 font-medium">Triage</span>
+              <span className="text-gray-900 font-bold">{triage || '-'}</span>
+            </li>
           </ul>
+          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 px-3 py-3">
+            <div className="text-[10px] uppercase font-black tracking-widest text-indigo-600 mb-2">Triage Reason</div>
+            {triageReasons.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {triageReasons.map((reason) => (
+                  <span
+                    key={reason}
+                    className="rounded-full border border-indigo-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-700"
+                  >
+                    {reason}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="text-xs text-gray-500">No active triage trigger</div>
+            )}
+          </div>
         </div>
 
         <div className="panel-section mb-6">

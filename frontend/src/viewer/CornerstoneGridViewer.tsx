@@ -32,6 +32,9 @@ type CornerstoneGridViewerProps = {
     layout?: { rows: number; cols: number };
     onLayoutChange?: (layout: { rows: number; cols: number }) => void;
     invert?: boolean;
+    interactionMode?: string;
+    resetToken?: number;
+    onViewportCapture?: (canvas: HTMLCanvasElement, viewportLabel?: string) => void;
 };
 
 export function CornerstoneGridViewer({
@@ -44,6 +47,9 @@ export function CornerstoneGridViewer({
     layout: externalLayout,
     onLayoutChange,
     invert = false,
+    interactionMode,
+    resetToken = 0,
+    onViewportCapture,
 }: CornerstoneGridViewerProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewportRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -60,6 +66,13 @@ export function CornerstoneGridViewer({
     const [activeTool, setActiveToolState] = useState<ToolMode>('pan');
     const [debugEnabled, setDebugEnabled] = useState(false);
     const [currentImageId, setCurrentImageId] = useState('');
+    const magnifierCanvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
+    const [magnifier, setMagnifier] = useState<{ visible: boolean; viewportId: string | null; x: number; y: number }>({
+        visible: false,
+        viewportId: null,
+        x: 0,
+        y: 0,
+    });
 
     const [viewportsConfig, setViewportsConfig] = useState<GridControl[]>([]);
     const [preset3D, setPreset3D] = useState<Record<string, string>>({});
@@ -80,6 +93,27 @@ export function CornerstoneGridViewer({
     ];
 
     const activeSource = sources[0];
+
+    const getViewportCanvas = (viewportId: string, fallbackRoot?: ParentNode | null) => {
+        const viewport = renderingEngineRef.current?.getViewport(viewportId) as any;
+        const directCanvas = viewport?.getCanvas?.() || viewport?.canvas;
+        if (directCanvas instanceof HTMLCanvasElement && directCanvas.width > 0 && directCanvas.height > 0) {
+            return directCanvas;
+        }
+        return getPrimaryCanvas(fallbackRoot);
+    };
+
+    const getPrimaryCanvas = (root: ParentNode | null | undefined) => {
+        const canvases = Array.from(root?.querySelectorAll?.('canvas') || []) as HTMLCanvasElement[];
+        if (canvases.length === 0) return null;
+        return canvases
+            .filter((canvas) => canvas.width > 0 && canvas.height > 0)
+            .sort((a, b) => {
+                const aArea = Math.max(a.clientWidth, a.width) * Math.max(a.clientHeight, a.height);
+                const bArea = Math.max(b.clientWidth, b.width) * Math.max(b.clientHeight, b.height);
+                return bArea - aArea;
+            })[0] || canvases[0];
+    };
 
     function applyViewportDisplayState(renderingEngine: cornerstone.RenderingEngine | null, imageId?: string) {
         if (!renderingEngine || !imageId) return;
@@ -283,6 +317,119 @@ export function CornerstoneGridViewer({
         applyViewportDisplayState(renderingEngineRef.current, currentImageId);
     }, [invert, currentImageId, viewportsConfig]);
 
+    useEffect(() => {
+        if (interactionMode !== 'magnifier') {
+            setMagnifier((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+        }
+    }, [interactionMode]);
+
+    const drawMagnifier = (viewportId: string, host: HTMLDivElement, localX: number, localY: number) => {
+        const lensCanvas = magnifierCanvasRefs.current[viewportId];
+        const sourceCanvas = getViewportCanvas(viewportId, host);
+        if (!lensCanvas || !sourceCanvas) return;
+
+        const rect = host.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0 || sourceCanvas.width <= 0 || sourceCanvas.height <= 0) return;
+
+        const lensSize = 126;
+        const zoomFactor = 1.5;
+        const dpr = window.devicePixelRatio || 1;
+        if (lensCanvas.width !== Math.round(lensSize * dpr) || lensCanvas.height !== Math.round(lensSize * dpr)) {
+            lensCanvas.width = Math.round(lensSize * dpr);
+            lensCanvas.height = Math.round(lensSize * dpr);
+            lensCanvas.style.width = `${lensSize}px`;
+            lensCanvas.style.height = `${lensSize}px`;
+        }
+
+        const ctx = lensCanvas.getContext('2d');
+        if (!ctx) return;
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, lensSize, lensSize);
+        ctx.imageSmoothingEnabled = false;
+
+        const sampleWidth = (lensSize / zoomFactor) * (sourceCanvas.width / rect.width);
+        const sampleHeight = (lensSize / zoomFactor) * (sourceCanvas.height / rect.height);
+        const centerX = (localX / rect.width) * sourceCanvas.width;
+        const centerY = (localY / rect.height) * sourceCanvas.height;
+        const sx = Math.max(0, Math.min(sourceCanvas.width - sampleWidth, centerX - sampleWidth / 2));
+        const sy = Math.max(0, Math.min(sourceCanvas.height - sampleHeight, centerY - sampleHeight / 2));
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(lensSize / 2, lensSize / 2, lensSize / 2 - 2, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(sourceCanvas, sx, sy, sampleWidth, sampleHeight, 0, 0, lensSize, lensSize);
+        ctx.restore();
+    };
+
+    const handleMagnifierMove = (viewportId: string, orientation: ViewportOrientation, event: React.MouseEvent<HTMLDivElement>) => {
+        if (interactionMode !== 'magnifier' || orientation === 'volume3d') return;
+        const host = viewportRefs.current[viewportsConfig.findIndex((c) => c.id === viewportId)];
+        if (!host) return;
+        const rect = host.getBoundingClientRect();
+        const localX = event.clientX - rect.left;
+        const localY = event.clientY - rect.top;
+        if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
+            setMagnifier((prev) => (prev.visible && prev.viewportId === viewportId ? { ...prev, visible: false } : prev));
+            return;
+        }
+        setMagnifier({ visible: true, viewportId, x: localX, y: localY });
+        drawMagnifier(viewportId, host, localX, localY);
+    };
+
+    const handleViewportCaptureClick = (viewportId: string, orientation: ViewportOrientation, idx: number, event: React.MouseEvent<HTMLElement>) => {
+        if (interactionMode !== 'capture-area' || orientation === 'volume3d') return;
+        event.preventDefault();
+        event.stopPropagation();
+        const host = viewportRefs.current[idx];
+        const sourceCanvas = getViewportCanvas(viewportId, host) || getPrimaryCanvas(containerRef.current);
+        if (sourceCanvas && onViewportCapture && host) {
+            const hostRect = host.getBoundingClientRect();
+            const canvasRect = sourceCanvas.getBoundingClientRect();
+            const intersectLeft = Math.max(hostRect.left, canvasRect.left);
+            const intersectTop = Math.max(hostRect.top, canvasRect.top);
+            const intersectRight = Math.min(hostRect.right, canvasRect.right);
+            const intersectBottom = Math.min(hostRect.bottom, canvasRect.bottom);
+            const intersectWidth = intersectRight - intersectLeft;
+            const intersectHeight = intersectBottom - intersectTop;
+
+            if (intersectWidth <= 1 || intersectHeight <= 1) {
+                onViewportCapture(sourceCanvas, orientation);
+                return;
+            }
+
+            const scaleX = sourceCanvas.width / canvasRect.width;
+            const scaleY = sourceCanvas.height / canvasRect.height;
+            const sx = Math.max(0, (intersectLeft - canvasRect.left) * scaleX);
+            const sy = Math.max(0, (intersectTop - canvasRect.top) * scaleY);
+            const sw = Math.max(1, intersectWidth * scaleX);
+            const sh = Math.max(1, intersectHeight * scaleY);
+
+            const croppedCanvas = document.createElement('canvas');
+            croppedCanvas.width = Math.round(sw);
+            croppedCanvas.height = Math.round(sh);
+            const croppedCtx = croppedCanvas.getContext('2d');
+            if (!croppedCtx) {
+                onViewportCapture(sourceCanvas, orientation);
+                return;
+            }
+
+            croppedCtx.drawImage(
+                sourceCanvas,
+                sx,
+                sy,
+                sw,
+                sh,
+                0,
+                0,
+                croppedCanvas.width,
+                croppedCanvas.height
+            );
+            onViewportCapture(croppedCanvas, orientation);
+        }
+    };
+
     const handleToolChange = (tool: ToolMode) => {
         setActiveToolState(tool);
         onToolChange?.(tool);
@@ -325,6 +472,12 @@ export function CornerstoneGridViewer({
         });
         applyViewportDisplayState(renderingEngine, currentImageId);
     };
+
+    useEffect(() => {
+        if (resetToken > 0) {
+            resetView();
+        }
+    }, [resetToken]);
 
     return (
         <div className="w-full h-full flex flex-col rounded-2xl border border-gray-200 bg-white overflow-hidden shadow-sm">
@@ -403,7 +556,13 @@ export function CornerstoneGridViewer({
                 {!isInit && <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', backgroundColor: '#111827', zIndex: 50 }}>Initializing...</div>}
                 <div style={{ position: 'absolute', inset: 0, display: 'grid', gap: '2px', backgroundColor: '#4b5563', gridTemplateColumns: 'repeat(' + layout.cols + ', 1fr)', gridTemplateRows: 'repeat(' + layout.rows + ', 1fr)' }}>
                     {viewportsConfig.map((config, idx) => (
-                        <div key={config.id} style={{ position: 'relative', backgroundColor: '#000', width: '100%', height: '100%', overflow: 'hidden' }}>
+                        <div
+                            key={config.id}
+                            data-grid-capture-cell="true"
+                            style={{ position: 'relative', backgroundColor: '#000', width: '100%', height: '100%', overflow: 'hidden', cursor: interactionMode === 'magnifier' && config.orientation !== 'volume3d' ? 'zoom-in' : interactionMode === 'capture-area' && config.orientation !== 'volume3d' ? 'crosshair' : 'default' }}
+                            onMouseMove={(event) => handleMagnifierMove(config.id, config.orientation, event)}
+                            onMouseLeave={() => setMagnifier((prev) => (prev.visible && prev.viewportId === config.id ? { ...prev, visible: false } : prev))}
+                        >
                             <div ref={(el) => { viewportRefs.current[idx] = el; }} style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, width: '100%', height: '100%' }} />
                             <div
                                 style={{
@@ -423,6 +582,38 @@ export function CornerstoneGridViewer({
                                     </select>
                                 )}
                             </div>
+                            {interactionMode === 'capture-area' && config.orientation !== 'volume3d' && (
+                                <button
+                                    type="button"
+                                    className="absolute inset-0 z-[11] border border-cyan-300/70 bg-cyan-400/5 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.35)] transition-colors hover:bg-cyan-300/10"
+                                    onMouseDown={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                    }}
+                                    onClick={(event) => handleViewportCaptureClick(config.id, config.orientation, idx, event)}
+                                    title={`Capture ${config.orientation} viewport`}
+                                >
+                                    <span className="pointer-events-none absolute left-3 top-3 rounded-full border border-cyan-200/60 bg-slate-950/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
+                                        Click To Capture
+                                    </span>
+                                </button>
+                            )}
+                            {interactionMode === 'magnifier' && config.orientation !== 'volume3d' && magnifier.visible && magnifier.viewportId === config.id && (
+                                <div
+                                    className="pointer-events-none absolute z-20 overflow-hidden rounded-full border border-cyan-200/80 shadow-[0_14px_40px_rgba(0,0,0,0.38)]"
+                                    style={{
+                                        width: 126,
+                                        height: 126,
+                                        left: magnifier.x,
+                                        top: magnifier.y,
+                                        transform: 'translate(-50%, -50%)',
+                                        background: 'rgba(9, 17, 40, 0.18)',
+                                        boxShadow: '0 0 0 2px rgba(255,255,255,0.22), 0 10px 30px rgba(0,0,0,0.35)',
+                                    }}
+                                >
+                                    <canvas ref={(el) => { magnifierCanvasRefs.current[config.id] = el; }} className="block h-full w-full" />
+                                </div>
+                            )}
                         </div>
                     ))}
                 </div>
