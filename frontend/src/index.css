@@ -1044,6 +1044,16 @@ html {
   font-size: var(--font-size);
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+}
+
 @property --tw-scale-x {
   syntax: "*";
   inherits: false;

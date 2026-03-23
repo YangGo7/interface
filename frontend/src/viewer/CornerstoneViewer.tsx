@@ -34,6 +34,10 @@ type CornerstoneViewerProps = {
     invert?: boolean;
     interactionMode?: string;
     resetToken?: number;
+    brightness?: number;
+    contrast?: number;
+    rotation?: number;
+    flipped?: boolean;
 };
 
 type ToolMode = 'pan' | 'length' | 'arrow' | 'rect' | 'ellipse' | 'wl';
@@ -48,6 +52,10 @@ export function CornerstoneViewer({
     invert = false,
     interactionMode,
     resetToken = 0,
+    brightness = 100,
+    contrast = 100,
+    rotation = 0,
+    flipped = false,
 }: CornerstoneViewerProps) {
     const viewerRef = useRef<HTMLDivElement>(null);
     const dicomImageIdsRef = useRef<Record<string, string>>({});
@@ -88,7 +96,7 @@ export function CornerstoneViewer({
             props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
         }
 
-        props.invert = Boolean(image.invert) !== invert;
+        props.invert = Boolean(image.invert);
         viewport.setProperties(props);
     }
 
@@ -211,7 +219,21 @@ export function CornerstoneViewer({
         const viewport = renderingEngine?.getViewport(viewportIdRef.current) as cornerstone.Types.IStackViewport | undefined;
         applyViewportDisplayState(viewport, lastImageId);
         viewport?.render();
-    }, [invert, lastImageId]);
+    }, [lastImageId]);
+
+    useEffect(() => {
+        const root = viewerRef.current;
+        if (!root) return;
+
+        const visualFilter = `${invert ? 'invert(1) ' : ''}brightness(${brightness}%) contrast(${contrast}%)`;
+        const visualTransform = `rotate(${rotation}deg) scaleX(${flipped ? -1 : 1})`;
+        const canvases = Array.from(root.querySelectorAll('canvas')) as HTMLCanvasElement[];
+        canvases.forEach((canvas) => {
+            canvas.style.filter = visualFilter;
+            canvas.style.transform = visualTransform;
+            canvas.style.transformOrigin = 'center center';
+        });
+    }, [invert, brightness, contrast, rotation, flipped, loadState, lastImageId, activeSourceId]);
 
     useEffect(() => {
         if (interactionMode !== 'magnifier') {

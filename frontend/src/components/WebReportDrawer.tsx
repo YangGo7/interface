@@ -36,16 +36,20 @@ export function WebReportDrawer({
   sessionId,
   selectedToothId: linkedToothId,
   onClose,
+  open = true,
+  layout = 'modal',
 }: {
   sessionId: string;
   selectedToothId?: string | null;
   onClose: () => void;
+  open?: boolean;
+  layout?: 'modal' | 'dock';
 }) {
   const [session, setSession] = useState<WebReportSessionResponse['session'] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionState, setActionState] = useState<'idle' | 'regenerating' | 'finalizing'>('idle');
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [activeTab, setActiveTab] = useState<'keywords' | 'review' | 'report'>('keywords');
+  const [activeTab, setActiveTab] = useState<'keywords' | 'review' | 'report' | 'guide'>('keywords');
   const [selectedToothId, setSelectedToothId] = useState('');
   const [reviewForm, setReviewForm] = useState<ToothReviewForm>(emptyForm);
   const [reportNoteDraft, setReportNoteDraft] = useState('');
@@ -115,31 +119,71 @@ export function WebReportDrawer({
 
   useEffect(() => {
     if (!session || !selectedTooth || editorDirty) return;
-    const note = (session.doctor_overrides?.teeth?.[selectedToothId]?.note as string | undefined) || selectedTooth.note || '';
+    const toothOverride = session.doctor_overrides?.teeth?.[selectedToothId] || {};
+    const hasOverrideField = (field: string) => Object.prototype.hasOwnProperty.call(toothOverride, field);
+    const note = (toothOverride.note as string | undefined) ?? selectedTooth.note ?? '';
     setReviewForm({
-      caries: Boolean(selectedTooth.caries),
-      periapical: Boolean(selectedTooth.periapical),
-      missing: Boolean(selectedTooth.missing),
-      implant: Boolean(selectedTooth.implant),
-      crown: Boolean(selectedTooth.crown),
-      filling: Boolean(selectedTooth.filling),
-      bone_loss_level: Number(selectedTooth.bone_loss_level || 0),
-      bone_loss_pct: Number(selectedTooth.bone_loss_pct || 0),
+      caries: hasOverrideField('caries') ? Boolean(toothOverride.caries) : Boolean(selectedTooth.caries),
+      periapical: hasOverrideField('periapical') ? Boolean(toothOverride.periapical) : Boolean(selectedTooth.periapical),
+      missing: hasOverrideField('missing') ? Boolean(toothOverride.missing) : Boolean(selectedTooth.missing),
+      implant: hasOverrideField('implant') ? Boolean(toothOverride.implant) : Boolean(selectedTooth.implant),
+      crown: hasOverrideField('crown') ? Boolean(toothOverride.crown) : Boolean(selectedTooth.crown),
+      filling: hasOverrideField('filling') ? Boolean(toothOverride.filling) : Boolean(selectedTooth.filling),
+      bone_loss_level: hasOverrideField('bone_loss_level')
+        ? Number(toothOverride.bone_loss_level || 0)
+        : Number(selectedTooth.bone_loss_level || 0),
+      bone_loss_pct: hasOverrideField('bone_loss_pct')
+        ? Number(toothOverride.bone_loss_pct || 0)
+        : Number(selectedTooth.bone_loss_pct || 0),
       note,
     });
     setReportNoteDraft((session.doctor_overrides?.report_note as string | undefined) || '');
   }, [session, selectedTooth, selectedToothId, editorDirty]);
 
   const currentPayload = useMemo(() => {
-    if (!selectedToothId) return '';
     return JSON.stringify({
-      tooth_overrides: { [selectedToothId]: reviewForm },
+      tooth_overrides: selectedToothId ? { [selectedToothId]: reviewForm } : {},
       report_note: reportNoteDraft,
     });
   }, [selectedToothId, reviewForm, reportNoteDraft]);
 
+  const persistOverrides = async () => {
+    if (!sessionId || !session || session.is_finalized) return true;
+    if (currentPayload === lastSavedPayloadRef.current) {
+      setEditorDirty(false);
+      setSaveState('saved');
+      return true;
+    }
+
+    setSaveState('saving');
+    try {
+      const response = await patchWebReportOverrides(sessionId, {
+        tooth_overrides: selectedToothId ? { [selectedToothId]: reviewForm } : {},
+        report_note: reportNoteDraft,
+      });
+      setSession((prev) =>
+        prev
+          ? {
+              ...prev,
+              doctor_overrides: response.doctor_overrides,
+              effective_result: response.effective_result,
+              updated_at: new Date().toISOString(),
+            }
+          : prev
+      );
+      lastSavedPayloadRef.current = currentPayload;
+      setEditorDirty(false);
+      setSaveState('saved');
+      return true;
+    } catch (err: any) {
+      setError(err?.message || 'Autosave failed');
+      setSaveState('error');
+      return false;
+    }
+  };
+
   useEffect(() => {
-    if (!sessionId || !session || !selectedToothId || !editorDirty || session.is_finalized) return;
+    if (!sessionId || !session || !editorDirty || session.is_finalized) return;
     if (currentPayload === lastSavedPayloadRef.current) {
       setEditorDirty(false);
       setSaveState('saved');
@@ -147,40 +191,22 @@ export function WebReportDrawer({
     }
 
     const timer = window.setTimeout(async () => {
-      setSaveState('saving');
-      try {
-        const response = await patchWebReportOverrides(sessionId, {
-          tooth_overrides: { [selectedToothId]: reviewForm },
-          report_note: reportNoteDraft,
-        });
-        setSession((prev) =>
-          prev
-            ? {
-                ...prev,
-                doctor_overrides: response.doctor_overrides,
-                effective_result: response.effective_result,
-                updated_at: new Date().toISOString(),
-              }
-            : prev
-        );
-        lastSavedPayloadRef.current = currentPayload;
-        setEditorDirty(false);
-        setSaveState('saved');
-      } catch (err: any) {
-        setError(err?.message || 'Autosave failed');
-        setSaveState('error');
-      }
+      await persistOverrides();
     }, 800);
 
     return () => {
       window.clearTimeout(timer);
     };
-  }, [currentPayload, editorDirty, reviewForm, reportNoteDraft, selectedToothId, session, sessionId]);
+  }, [currentPayload, editorDirty, selectedToothId, session, sessionId]);
 
   const handleRegenerate = async () => {
     setActionState('regenerating');
     setError(null);
     try {
+      if (editorDirty) {
+        const saved = await persistOverrides();
+        if (!saved) return;
+      }
       await regenerateWebReport(sessionId);
       const refreshed = await fetchWebReportSession(sessionId);
       setSession(refreshed.session || null);
@@ -192,13 +218,27 @@ export function WebReportDrawer({
   };
 
   const handleFinalize = async () => {
+    const finalWindow = typeof window !== 'undefined' ? window.open('about:blank', '_blank') : null;
     setActionState('finalizing');
     setError(null);
     try {
+      if (editorDirty) {
+        const saved = await persistOverrides();
+        if (!saved) {
+          finalWindow?.close();
+          return;
+        }
+      }
       await finalizeWebReport(sessionId);
       const refreshed = await fetchWebReportSession(sessionId);
       setSession(refreshed.session || null);
+      if (finalWindow) {
+        finalWindow.location.href = reportPageUrl;
+      } else if (typeof window !== 'undefined') {
+        window.open(reportPageUrl, '_blank');
+      }
     } catch (err: any) {
+      finalWindow?.close();
       setError(err?.message || 'Report finalization failed');
     } finally {
       setActionState('idle');
@@ -232,34 +272,71 @@ export function WebReportDrawer({
     }
   };
 
+  const handleOpenReportActions = async () => {
+    setActiveTab('report');
+    await handleRegenerate();
+  };
+
   const reportUrl = `/api/web_report/session/${sessionId}/report`;
   const reportPageUrl = reportUrl;
   const hasPdf = Boolean(session?.report?.pdf_path);
   const pdfUrl = `/api/web_report/session/${sessionId}/report/pdf`;
   const statusLabel = session?.is_finalized ? 'Final' : 'Draft';
+  const isDock = layout === 'dock';
+  const rootClassName = isDock
+    ? 'flex flex-col overflow-hidden rounded-[28px] border text-slate-100 backdrop-blur-xl'
+    : 'fixed bottom-3 left-3 right-3 top-20 z-[220] flex flex-col overflow-hidden rounded-[30px] border text-slate-100 backdrop-blur-xl md:bottom-5 md:left-auto md:right-5 md:top-24 md:w-[540px]';
+  const rootStyle = isDock
+      ? {
+        position: 'fixed' as const,
+        right: 24,
+        bottom: 120,
+        zIndex: 2147482900,
+        width: 420,
+        maxWidth: 'calc(100vw - 2rem)',
+        height: 520,
+        background: 'linear-gradient(180deg, rgba(12, 28, 52, 0.98), rgba(8, 17, 34, 0.98))',
+        borderColor: 'rgba(103, 232, 249, 0.35)',
+        boxShadow: '0 32px 100px rgba(3, 8, 20, 0.62)',
+        color: '#E2E8F0',
+        opacity: open ? 1 : 0,
+        transform: open ? 'translateY(0) scale(1)' : 'translateY(12px) scale(0.95)',
+        pointerEvents: open ? 'auto' : 'none',
+        transition: 'opacity 200ms ease, transform 200ms ease',
+        colorScheme: 'dark' as const,
+      }
+    : {
+        background: 'linear-gradient(180deg, rgba(12, 28, 52, 0.98), rgba(8, 17, 34, 0.98))',
+        borderColor: 'rgba(103, 232, 249, 0.35)',
+        boxShadow: '0 36px 120px rgba(3, 8, 20, 0.62)',
+        color: '#E2E8F0',
+        colorScheme: 'dark' as const,
+      };
 
   return (
-    <div className="fixed bottom-16 left-1/2 z-[220] flex h-[74vh] max-h-[800px] w-[960px] max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col overflow-hidden rounded-[34px] border border-white/10 bg-[#07101F]/98 text-slate-100 shadow-[0_36px_120px_rgba(3,8,20,0.62)] backdrop-blur-xl">
-      <div className="pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2">
+    <div className={rootClassName} style={rootStyle}>
+      <div className={`pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2 ${isDock ? 'right-14 md:left-auto md:translate-x-0' : 'md:left-auto md:right-14 md:translate-x-0'}`}>
         <div className="h-12 w-44 rounded-full bg-gradient-to-r from-cyan-400 via-sky-400 to-blue-500 opacity-75 blur-[10px]" />
       </div>
-      <div className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full border border-cyan-300/30 bg-[#09172f] px-5 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-cyan-200 shadow-[0_10px_30px_rgba(34,211,238,0.22)]">
-        Report Sheet
+      <div className="absolute left-5 top-5 rounded-full border border-cyan-300/30 bg-[#09172f] px-4 py-1 text-[10px] font-semibold uppercase tracking-[0.28em] text-cyan-200 shadow-[0_10px_30px_rgba(34,211,238,0.22)]">
+        Report Panel
       </div>
-      <div className="absolute left-1/2 top-4 h-1.5 w-24 -translate-x-1/2 rounded-full bg-white/25" />
+      <div className="hidden" />
 
-      <div className="flex items-center justify-between border-b border-white/10 bg-[linear-gradient(180deg,rgba(10,25,47,0.96),rgba(7,16,31,0.86))] px-6 pb-4 pt-8">
-        <div className="flex items-center gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-200 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.15)]">
+      <div className={`flex items-center justify-between border-b border-cyan-300/15 bg-[linear-gradient(180deg,rgba(27,78,113,0.34),rgba(7,16,31,0.12))] ${isDock ? 'px-4 pb-3 pt-12' : 'px-5 pb-4 pt-14 md:px-6'}`}>
+        <div className="flex min-w-0 items-center gap-4">
+          <div className={`flex items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-200 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.15)] ${isDock ? 'h-10 w-10' : 'h-12 w-12'}`}>
             <span className="text-sm font-bold tracking-[0.18em]">AI</span>
           </div>
-          <div>
+          <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-[0.26em] text-cyan-300">AI Note</p>
-            <p className="mt-1 text-sm text-slate-200">Session {sessionId.slice(0, 8)} · {statusLabel}</p>
-            <p className="mt-1 text-xs text-slate-400">Bottom-sheet workspace for report actions, notes, and clinical review.</p>
+            <p className="mt-1 truncate text-sm text-slate-200">Session {sessionId.slice(0, 8)} - {statusLabel}</p>
+            <p className="mt-1 text-xs text-slate-400">
+              {isDock ? 'Write notes here and keep the draft pinned to this view.' : 'Floating workspace for report actions, notes, and clinical review.'}
+            </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="ml-3 flex items-center gap-2">
           <a
             href={reportPageUrl}
             target="_blank"
@@ -270,15 +347,15 @@ export function WebReportDrawer({
           </a>
           <button
             onClick={onClose}
-            className="rounded-full border border-slate-700 bg-white/5 px-3 py-1.5 text-xs text-slate-100 hover:bg-white/10"
+            className="rounded-full border-2 border-white/90 bg-cyan-400 px-3 py-1.5 text-xs font-semibold text-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.22)] hover:bg-cyan-300"
           >
-            Minimize
+            Hide
           </button>
         </div>
       </div>
 
-      <div className="flex items-center gap-2 border-b border-white/10 bg-black/10 px-6 py-3">
-        {(['keywords', 'review', 'report'] as const).map((tab) => (
+      <div className={`flex items-center gap-2 border-b border-white/10 bg-black/10 ${isDock ? 'px-4 py-2.5' : 'px-6 py-3'}`}>
+        {(['keywords', 'review', 'report', 'guide'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -288,39 +365,23 @@ export function WebReportDrawer({
                 : 'bg-white/5 text-slate-200 hover:bg-white/10'
             }`}
           >
-            {tab === 'keywords' ? 'Keywords' : tab === 'review' ? 'Review' : 'Report'}
+            {tab === 'keywords' ? 'Keywords' : tab === 'review' ? 'Review' : tab === 'report' ? 'Report' : 'Guide'}
           </button>
         ))}
-        <div className="ml-auto flex gap-2">
-          <button
-            onClick={handleRegenerate}
-            disabled={actionState !== 'idle'}
-            className="rounded-full border border-slate-700 bg-white/5 px-3 py-1.5 text-xs text-slate-100 disabled:opacity-50"
-          >
-            {actionState === 'regenerating' ? 'Regenerating...' : 'Regenerate'}
-          </button>
-          <button
-            onClick={handleFinalize}
-            disabled={actionState !== 'idle' || Boolean(session?.is_finalized)}
-            className="rounded-full bg-emerald-500 px-3 py-1.5 text-xs font-medium text-slate-950 disabled:opacity-50"
-          >
-            {session?.is_finalized ? 'Finalized' : actionState === 'finalizing' ? 'Finalizing...' : 'Finalize'}
-          </button>
-        </div>
       </div>
 
       {error && (
-        <div className="mx-6 mt-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+        <div className={`${isDock ? 'mx-4 mt-3' : 'mx-6 mt-4'} rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200`}>
           {error}
         </div>
       )}
 
       {activeTab === 'report' ? (
-        <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
           <div className="rounded-[28px] border border-cyan-400/15 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(14,165,233,0.04))] p-5">
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Report Workspace</p>
             <p className="mt-2 text-sm leading-6 text-slate-200">
-              The report is no longer embedded in the bottom sheet. Review findings here, then open the full HTML document in its own page.
+              Review findings in this floating panel, then open the full HTML document in its own page when you need the final layout.
             </p>
           </div>
 
@@ -375,23 +436,24 @@ export function WebReportDrawer({
             </div>
           </div>
 
-          <div className="mt-4 rounded-[24px] border border-white/10 bg-white/5 p-5">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Workflow</p>
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              {[
-                '1. Review AI keywords and tooth findings.',
-                '2. Edit labels and report note in Review.',
-                '3. Regenerate and open the full report page.',
-              ].map((step) => (
-                <div key={step} className="rounded-2xl border border-white/10 bg-black/10 px-4 py-4 text-sm text-slate-200">
-                  {step}
-                </div>
-              ))}
+          <div className="mt-4 flex items-center justify-between rounded-[24px] border border-white/10 bg-white/5 p-5">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Actions</p>
+              <p className="mt-1 text-xs text-slate-400">Finalize only after the regenerated report looks correct.</p>
             </div>
+            <button
+              onClick={handleFinalize}
+              disabled={actionState !== 'idle' || Boolean(session?.is_finalized)}
+              className="rounded-full bg-emerald-500 px-4 py-2 text-xs font-semibold text-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.22)] disabled:opacity-100"
+              style={{ border: '2px solid rgba(255,255,255,0.95)' }}
+            >
+              {session?.is_finalized ? 'Finalized' : actionState === 'finalizing' ? 'Finalizing...' : 'Finalize'}
+            </button>
           </div>
+
         </div>
       ) : activeTab === 'keywords' ? (
-        <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
           <div className="rounded-[26px] border border-cyan-400/15 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(14,165,233,0.04))] p-5">
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Model Findings</p>
             <p className="mt-2 text-sm leading-6 text-slate-300">
@@ -426,8 +488,8 @@ export function WebReportDrawer({
             />
           </div>
         </div>
-      ) : (
-        <div className="flex-1 overflow-y-auto px-6 py-5">
+      ) : activeTab === 'review' ? (
+        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
           <div className="mb-4 flex items-center justify-between">
             <span
               className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
@@ -442,7 +504,7 @@ export function WebReportDrawer({
             >
               {saveState === 'saving' ? 'Saving' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Error' : 'Idle'}
             </span>
-            <div className="text-xs text-slate-400">Review updates apply to the effective result and next report regeneration.</div>
+            <div className="text-xs text-slate-400">Review edits are autosaved for the next report generation.</div>
           </div>
 
           <div className="space-y-4">
@@ -456,9 +518,14 @@ export function WebReportDrawer({
                   setSaveState('idle');
                 }}
                 className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-cyan-400"
+                style={{ backgroundColor: '#0f172a', color: '#e2e8f0', colorScheme: 'dark' }}
               >
                 {teeth.map((tooth) => (
-                  <option key={tooth.tooth_label} value={String(tooth.tooth_label)}>
+                  <option
+                    key={tooth.tooth_label}
+                    value={String(tooth.tooth_label)}
+                    style={{ backgroundColor: '#0f172a', color: '#e2e8f0' }}
+                  >
                     Tooth {tooth.tooth_label}
                   </option>
                 ))}
@@ -567,11 +634,77 @@ export function WebReportDrawer({
                 Reset Tooth
               </button>
               <button
-                onClick={() => setActiveTab('report')}
-                className="flex-1 rounded-2xl bg-cyan-500 px-3 py-2 text-sm font-medium text-slate-950"
+                onClick={handleOpenReportActions}
+                disabled={actionState !== 'idle'}
+                className="flex-1 rounded-2xl bg-cyan-500 px-3 py-2 text-sm font-medium text-slate-950 disabled:opacity-50"
               >
-                Open Report Actions
+                {actionState === 'regenerating' ? 'Generating...' : 'Open Report Actions'}
               </button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Session Info</p>
+              <div className="mt-4 space-y-3 text-sm text-slate-200">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Session</span>
+                  <span className="font-medium text-white">{sessionId.slice(0, 8)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Language</span>
+                  <span>{session?.language || '-'}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Status</span>
+                  <span>{statusLabel}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Updated</span>
+                  <span>{session?.updated_at ? new Date(session.updated_at).toLocaleString() : '-'}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Document Info</p>
+              <div className="mt-4 space-y-3 text-sm text-slate-200">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Version</span>
+                  <span>{session?.report?.version ?? 1}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">HTML</span>
+                  <span>{session?.report?.html_path ? 'Ready' : 'Pending'}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">PDF</span>
+                  <span>{hasPdf ? 'Ready' : 'Unavailable'}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Reviewed Tooth</span>
+                  <span>{selectedToothId || '-'}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-[26px] border border-cyan-400/15 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(14,165,233,0.04))] p-5">
+            <br/>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Workflow</p>
+            <div className="mt-4 grid gap-3">
+              {[
+                '1. Review AI keywords and tooth findings.',
+                '2. Edit labels and report note in Review.',
+                '3. Generate the report from Review.',
+                '4. Inspect the result in Report and finalize.',
+              ].map((step) => (
+                <div key={step} className="rounded-2xl border border-white/10 bg-black/10 px-4 py-4 text-sm text-slate-200">
+                  {step}
+                </div>
+              ))}
             </div>
           </div>
         </div>

@@ -1,4 +1,4 @@
-import { useLocation } from 'react-router-dom';
+﻿import { useLocation } from 'react-router-dom';
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { BottomTeethChart } from '../components/BottomTeethChart';
@@ -97,6 +97,14 @@ export function ChartPage(props?: ChartPageProps) {
           setLoadingProgress(p => Math.min(p + 5, 95));
 
           const res = await fetch(`/api/detect/status/${jobId}`);
+          if (!res.ok) {
+            if (res.status === 404) {
+              clearInterval(timer);
+              setIsProcessing(false);
+              setLoadingProgress(0);
+            }
+            return;
+          }
           const data = await res.json();
           if (data.success && data.status === 'done' && data.result) {
             clearInterval(timer);
@@ -184,7 +192,7 @@ export function ChartPage(props?: ChartPageProps) {
     if (reportStartState === 'creating') return;
 
     if (reportSessionId) {
-      setReportDrawerOpen(true);
+      setReportDrawerOpen((prev) => !prev);
       setReportError(null);
       return;
     }
@@ -309,7 +317,32 @@ export function ChartPage(props?: ChartPageProps) {
     }, 'image/png');
   };
 
-  const handleCapture = (cropRegion?: { x: number; y: number; w: number; h: number }) => {
+  const copyCanvasCapture = async (sourceCanvas: HTMLCanvasElement, successText = 'Copied capture to clipboard') => {
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+        notifyCapture('error', 'Clipboard copy is not supported in this browser');
+        return false;
+      }
+
+      const blob = await new Promise<Blob | null>((resolve) => sourceCanvas.toBlob(resolve, 'image/png'));
+      if (!blob) {
+        notifyCapture('error', 'Capture failed: empty image');
+        return false;
+      }
+
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      notifyCapture('success', successText);
+      return true;
+    } catch (error) {
+      notifyCapture('error', 'Clipboard copy failed');
+      return false;
+    }
+  };
+
+  const handleCapture = async (
+    cropRegion?: { x: number; y: number; w: number; h: number },
+    options?: { destination?: 'download' | 'clipboard' }
+  ) => {
     try {
       let sourceCanvas: HTMLCanvasElement | null = null;
       if (shouldUseCornerstone) {
@@ -329,25 +362,62 @@ export function ChartPage(props?: ChartPageProps) {
         let finalCanvas = sourceCanvas;
         if (cropRegion && (cropRegion.w !== 0 && cropRegion.h !== 0)) {
           const tempCanvas = document.createElement('canvas');
-          const sx = Math.max(0, cropRegion.w > 0 ? cropRegion.x : cropRegion.x + cropRegion.w);
-          const sy = Math.max(0, cropRegion.h > 0 ? cropRegion.y : cropRegion.y + cropRegion.h);
-          const sw = Math.abs(cropRegion.w);
-          const sh = Math.abs(cropRegion.h);
+          let sx = Math.max(0, cropRegion.w > 0 ? cropRegion.x : cropRegion.x + cropRegion.w);
+          let sy = Math.max(0, cropRegion.h > 0 ? cropRegion.y : cropRegion.y + cropRegion.h);
+          let sw = Math.abs(cropRegion.w);
+          let sh = Math.abs(cropRegion.h);
 
-          const vW = viewerRef.current?.clientWidth || 1;
-          const vH = viewerRef.current?.clientHeight || 1;
-          const scX = sourceCanvas.width / vW;
-          const scY = sourceCanvas.height / vH;
+          if (shouldUseCornerstone && viewerRef.current) {
+            const viewerRect = viewerRef.current.getBoundingClientRect();
+            const canvasRect = sourceCanvas.getBoundingClientRect();
+            const cropLeft = viewerRect.left + sx;
+            const cropTop = viewerRect.top + sy;
+            const cropRight = cropLeft + sw;
+            const cropBottom = cropTop + sh;
 
-          tempCanvas.width = sw * scX;
-          tempCanvas.height = sh * scY;
+            const intersectLeft = Math.max(cropLeft, canvasRect.left);
+            const intersectTop = Math.max(cropTop, canvasRect.top);
+            const intersectRight = Math.min(cropRight, canvasRect.right);
+            const intersectBottom = Math.min(cropBottom, canvasRect.bottom);
+
+            sw = Math.max(0, intersectRight - intersectLeft);
+            sh = Math.max(0, intersectBottom - intersectTop);
+            if (sw <= 1 || sh <= 1) {
+              notifyCapture('error', 'Capture failed: select an area inside the viewport');
+              return;
+            }
+
+            const scaleX = sourceCanvas.width / Math.max(1, canvasRect.width);
+            const scaleY = sourceCanvas.height / Math.max(1, canvasRect.height);
+            sx = Math.max(0, (intersectLeft - canvasRect.left) * scaleX);
+            sy = Math.max(0, (intersectTop - canvasRect.top) * scaleY);
+            sw *= scaleX;
+            sh *= scaleY;
+          } else {
+            const vW = viewerRef.current?.clientWidth || 1;
+            const vH = viewerRef.current?.clientHeight || 1;
+            const scX = sourceCanvas.width / vW;
+            const scY = sourceCanvas.height / vH;
+            sx *= scX;
+            sy *= scY;
+            sw *= scX;
+            sh *= scY;
+          }
+
+          tempCanvas.width = Math.max(1, Math.round(sw));
+          tempCanvas.height = Math.max(1, Math.round(sh));
           const tempCtx = tempCanvas.getContext('2d');
           if (tempCtx) {
-            tempCtx.drawImage(sourceCanvas, sx * scX, sy * scY, sw * scX, sh * scY, 0, 0, sw * scX, sh * scY);
+            tempCtx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, tempCanvas.width, tempCanvas.height);
             finalCanvas = tempCanvas;
           }
         }
-        downloadCanvasCapture(finalCanvas);
+        const shouldCopyToClipboard = options?.destination === 'clipboard';
+        if (shouldCopyToClipboard) {
+          await copyCanvasCapture(finalCanvas, 'Copied area capture to clipboard');
+        } else {
+          downloadCanvasCapture(finalCanvas);
+        }
         if (cropRegion) setCaptureRect(null);
       } else {
         notifyCapture('error', 'Capture failed: no render canvas found');
@@ -355,9 +425,12 @@ export function ChartPage(props?: ChartPageProps) {
     } catch (err) { notifyCapture('error', 'Capture failed'); }
   };
 
-  const handleGridViewportCapture = (sourceCanvas: HTMLCanvasElement, viewportLabel?: string) => {
+  const handleGridViewportCapture = async (sourceCanvas: HTMLCanvasElement, viewportLabel?: string) => {
     try {
-      downloadCanvasCapture(sourceCanvas, viewportLabel ? `dental_capture_${viewportLabel}` : 'dental_capture');
+      await copyCanvasCapture(
+        sourceCanvas,
+        viewportLabel ? `Copied ${viewportLabel} viewport to clipboard` : 'Copied viewport to clipboard'
+      );
       handleToolChange('pointer');
     } catch (error) {
       notifyCapture('error', 'Capture failed');
@@ -582,7 +655,7 @@ export function ChartPage(props?: ChartPageProps) {
   const overlayIsDicom = isDicomPath(result?.overlay_url);
   const shouldUseCornerstone = viewMode === 'original' ? originalIsDicom : viewMode === 'overlay' ? overlayIsDicom : false;
   const magnifierDisabled = shouldUseCornerstone && viewerMode === 'grid';
-  const areaCaptureDisabled = shouldUseCornerstone && viewerMode !== 'grid';
+  const areaCaptureDisabled = false;
   const viewModeLabel =
     viewMode === 'overlay'
       ? 'AI Analysis Mode'
@@ -1221,17 +1294,15 @@ export function ChartPage(props?: ChartPageProps) {
     }
 
     if (activeTool === 'capture-area') {
-      if (shouldUseCornerstone) return;
+      if (shouldUseCornerstone) {
+        if (viewerMode !== 'grid') {
+          e.preventDefault();
+          void handleCapture(undefined, { destination: 'clipboard' });
+        }
+        return;
+      }
       e.preventDefault();
-      const vRect = viewerRef.current?.getBoundingClientRect();
-      if (!vRect) return;
-      setCaptureRect({
-        x: e.clientX - vRect.left,
-        y: e.clientY - vRect.top,
-        w: 0,
-        h: 0,
-        active: true
-      });
+      void handleCapture(undefined, { destination: 'clipboard' });
       return;
     }
 
@@ -1788,7 +1859,7 @@ export function ChartPage(props?: ChartPageProps) {
             renderInfoLabel(pts[0].x + rad + (16 / effectiveScale), pts[0].y - (12 / effectiveScale), [
               `Radius ${(rad * mmPerPixel).toFixed(2)} mm`,
               `Diameter ${(diameter * mmPerPixel).toFixed(2)} mm`,
-              `Area ${area.toFixed(2)} mm짼`
+              `Area ${area.toFixed(2)} mm2`
             ])
           )}
         </g>
@@ -1805,7 +1876,7 @@ export function ChartPage(props?: ChartPageProps) {
           {!isTemp && renderInfoLabel(x + w + (16 / effectiveScale), y + h - (4 / effectiveScale), [
             `Width ${(w * mmPerPixel).toFixed(2)} mm`,
             `Height ${(h * mmPerPixel).toFixed(2)} mm`,
-            `Area ${(w * h * mmPerPixel * mmPerPixel).toFixed(2)} mm짼`
+            `Area ${(w * h * mmPerPixel * mmPerPixel).toFixed(2)} mm2`
           ])}
         </g>
       );
@@ -1831,7 +1902,7 @@ export function ChartPage(props?: ChartPageProps) {
           {!isTemp && renderInfoLabel(x + w + (16 / effectiveScale), y + h - (4 / effectiveScale), [
             `Rx ${((w / 2) * mmPerPixel).toFixed(2)} mm`,
             `Ry ${((h / 2) * mmPerPixel).toFixed(2)} mm`,
-            `Area ${(Math.PI * (w / 2) * (h / 2) * mmPerPixel * mmPerPixel).toFixed(2)} mm짼`
+            `Area ${(Math.PI * (w / 2) * (h / 2) * mmPerPixel * mmPerPixel).toFixed(2)} mm2`
           ])}
         </g>
       );
@@ -1863,8 +1934,8 @@ export function ChartPage(props?: ChartPageProps) {
       {!hasViewerShell && (
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center space-y-3 text-gray-300">
-            <p className="text-lg font-semibold">遺꾩꽍 寃곌낵媛 ?놁뒿?덈떎.</p>
-            <p className="text-sm text-gray-400">?대?吏瑜??낅줈?쒗븯嫄곕굹 泥섎━ ?꾨즺???몄뀡?먯꽌 吏꾩엯??二쇱꽭??</p>
+            <p className="text-lg font-semibold">표시할 분석 화면이 아직 준비되지 않았습니다.</p>
+            <p className="text-sm text-gray-400">업로드 또는 분석이 완료되면 뷰어와 차트가 이 화면에 표시됩니다.</p>
           </div>
         </div>
       )}
@@ -1910,7 +1981,7 @@ export function ChartPage(props?: ChartPageProps) {
                   if (activeTool === 'capture-area') handleToolChange('pointer');
                   else handleToolChange('capture-area');
                 }} icon={Crop} title={areaCaptureDisabled ? 'Area Capture disabled in CT/DICOM view' : 'Area Capture'} />
-                <ToolBtn active={false} onClick={() => handleCapture()} icon={Camera} title="Full Capture" />
+                <ToolBtn active={false} onClick={() => { void handleCapture(); }} icon={Camera} title="Full Capture" />
               </ToolRow>
               <ToolRow>
                 <ToolBtn active={false} onClick={() => { if (window.confirm('Clear all?')) clearAllAnnotations(); }} icon={Trash2} title="Clear All" />
@@ -1980,23 +2051,46 @@ export function ChartPage(props?: ChartPageProps) {
                 <div className="flex flex-col lg:flex-row lg:items-start gap-6">
                   {/* Viewer column */}
                     <div className="w-full bg-black relative select-none">
+                    {captureNotice?.type === 'success' && (
+                      <div
+                        className="pointer-events-none"
+                        style={{
+                          position: 'absolute',
+                          inset: 0,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          zIndex: 20000,
+                        }}
+                      >
+                        <div
+                          className="flex max-w-[220px] items-start gap-2 rounded-xl px-3 py-2 text-white backdrop-blur-sm"
+                          style={{
+                            backgroundColor: 'rgba(115, 115, 115, 0.5)',
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            boxShadow: '0 12px 28px rgba(0,0,0,0.24)',
+                          }}
+                        >
+                          <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/10">
+                            <Camera className="h-3 w-3 text-white/95" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-semibold leading-none text-white" style={{ fontSize: 10 }}>
+                              Copied
+                            </p>
+                            <p className="mt-0.5 break-words text-white/75" style={{ fontSize: 10, lineHeight: '14px' }}>
+                              {captureNotice.text}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     <div className="absolute top-4 left-4 z-10 flex items-center gap-3 bg-black/60 backdrop-blur-xl px-5 py-2.5 rounded-full border border-white/10 shadow-2xl pointer-events-none">
                       <div className={`w-2.5 h-2.5 rounded-full ${viewModeDotClass}`} />
                       <span className="text-xs font-bold uppercase tracking-wider text-gray-300">
                         {viewModeLabel}
                       </span>
                     </div>
-                    {captureNotice && (
-                      <div
-                        className={`absolute top-4 right-4 z-20 rounded-full px-4 py-2 text-[11px] font-bold shadow-2xl ${
-                          captureNotice.type === 'success'
-                            ? 'bg-emerald-500/90 text-white'
-                            : 'bg-red-500/90 text-white'
-                        }`}
-                      >
-                        {captureNotice.text}
-                      </div>
-                    )}
                     {viewMode === 'heatmap' && (
                       <div className="absolute right-4 top-4 z-10 rounded-[20px] border border-white/10 bg-black/60 px-4 py-3 text-[11px] text-slate-200 shadow-2xl backdrop-blur-xl">
                         <p className="font-semibold uppercase tracking-[0.18em] text-orange-300">Risk Overlay</p>
@@ -2041,10 +2135,10 @@ export function ChartPage(props?: ChartPageProps) {
                           {!captureRect.active && Math.abs(captureRect.w) > 5 && (
                             <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 flex gap-1 pointer-events-auto">
                               <button
-                                onClick={(e) => { e.stopPropagation(); handleCapture(captureRect); }}
+                                onClick={(e) => { e.stopPropagation(); void handleCapture(captureRect); }}
                                 className="bg-indigo-600 text-white text-[10px] px-3 py-1.5 rounded-full font-bold shadow-lg flex items-center gap-1 hover:bg-indigo-700 whitespace-nowrap"
                               >
-                                <Camera size={12} /> Capture
+                                <Camera size={12} /> {shouldUseCornerstone && viewerMode !== 'grid' ? 'Copy' : 'Capture'}
                               </button>
                               <button
                                 onClick={(e) => { e.stopPropagation(); setCaptureRect(null); }}
@@ -2068,10 +2162,31 @@ export function ChartPage(props?: ChartPageProps) {
                           resetToken={cornerstoneResetToken}
                           onViewportCapture={handleGridViewportCapture}
                           invert={inverted}
+                          brightness={brightness}
+                          contrast={contrast}
+                          rotation={rotation}
+                          flipped={flipped}
                         />
                       ) : shouldUseCornerstone ? (
                         <div className="w-full h-full relative flex flex-col">
-                          <CornerstoneViewer
+                          <CornerstoneGridViewer
+                            sources={cornerstoneSources}
+                            title={viewMode === 'original' ? 'Original Axial' : 'Overlay Axial'}
+                            maxHeight={containerHeight}
+                            showToolbar={false}
+                            hideLayoutControls
+                            layout={{ rows: 1, cols: 1 }}
+                            interactionMode={activeTool}
+                            resetToken={cornerstoneResetToken}
+                            onViewportCapture={handleGridViewportCapture}
+                            invert={inverted}
+                            brightness={brightness}
+                            contrast={contrast}
+                            rotation={rotation}
+                            flipped={flipped}
+                          />
+                          {/* Test path: single CT view renders as 1x1 axial MPR instead of stack viewer. */}
+                          {/* <CornerstoneViewer
                             title={viewMode === 'original' ? 'Original DICOM' : 'Overlay DICOM'}
                             sources={cornerstoneSources}
                             initialSourceId={cornerstoneSources[0]?.id}
@@ -2080,7 +2195,7 @@ export function ChartPage(props?: ChartPageProps) {
                             interactionMode={activeTool}
                             resetToken={cornerstoneResetToken}
                             invert={inverted}
-                          />
+                          /> */}
                           {result?.is_volume && (
                             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 bg-indigo-600/80 backdrop-blur-md px-4 py-2 rounded-full border border-indigo-400/50 shadow-lg flex items-center gap-2 pointer-events-none">
                               <Rotate3d className="w-4 h-4 text-white animate-pulse" />
@@ -2237,112 +2352,18 @@ export function ChartPage(props?: ChartPageProps) {
             </div>
           )}
 
-          {createPortal(
-            <>
-              {reportDrawerOpen && reportSessionId && (
-                <WebReportDrawer
-                  sessionId={reportSessionId}
-                  selectedToothId={selectedTooth ? String(selectedTooth) : null}
-                  onClose={() => setReportDrawerOpen(false)}
-                />
-              )}
-
-              {hasData && (
-                <div
-                  className="fixed bottom-5 left-1/2 z-[210] flex w-[520px] max-w-[calc(100vw-2rem)] -translate-x-1/2 cursor-pointer flex-col gap-2 rounded-[26px] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(11,23,45,0.96),rgba(7,16,31,0.96))] px-4 pb-3 pt-4 text-slate-100 shadow-[0_24px_80px_rgba(3,8,20,0.56)] backdrop-blur-xl transition hover:-translate-y-1 hover:border-cyan-300/40"
-                  onClick={handleStartReport}
-                  role="button"
-                  aria-label="Open AI note report dock"
-                >
-                  <div className="absolute -top-2 left-1/2 h-1.5 w-24 -translate-x-1/2 rounded-full bg-cyan-300/70 shadow-[0_0_24px_rgba(34,211,238,0.55)]" />
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-200 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.15)]">
-                      <ClipboardList className="h-5 w-5" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-semibold text-white">AI Note</p>
-                        <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-300">
-                          {reportSessionId ? 'Draft ready' : reportStartState === 'creating' ? 'Starting' : 'Report'}
-                        </span>
-                      </div>
-                      <p className="truncate text-xs text-slate-400">
-                        {reportFindingCount > 0
-                          ? `${reportFindingCount} finding teeth · ${reportKeywords.slice(0, 2).join(' · ')}`
-                          : 'Open a compact report workspace for this analysis'}
-                      </p>
-                    </div>
-                    <div className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 text-right text-[11px] font-semibold text-cyan-200">
-                      {reportStartState === 'creating' ? 'Loading...' : reportDrawerOpen ? 'Expanded' : 'Lift'}
-                    </div>
-                  </div>
-                  {reportError && (
-                    <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                      {reportError}
-                    </div>
-                  )}
-                </div>
-              )}
-            </>,
-            document.body
-          )}
-
-          {false && reportDrawerOpen && reportSessionId && (
-            <WebReportDrawer
-              sessionId={reportSessionId!}
-              selectedToothId={selectedTooth ? String(selectedTooth) : null}
-              onClose={() => setReportDrawerOpen(false)}
-            />
-          )}
-
-          {false && hasData && (
-            <div
-              className="fixed bottom-5 left-1/2 z-[210] flex w-[460px] max-w-[calc(100vw-2rem)] -translate-x-1/2 cursor-pointer flex-col gap-2 rounded-[24px] border border-cyan-400/20 bg-[#07101F]/94 px-4 py-3 text-slate-100 shadow-[0_20px_60px_rgba(3,8,20,0.5)] backdrop-blur transition hover:border-cyan-300/40"
-              onClick={handleStartReport}
-              role="button"
-              aria-label="Open AI note report dock"
-            >
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-200">
-                  <ClipboardList className="h-5 w-5" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-semibold text-white">AI Note</p>
-                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-300">
-                      {reportSessionId ? 'Draft ready' : reportStartState === 'creating' ? 'Starting' : 'Report'}
-                    </span>
-                  </div>
-                  <p className="truncate text-xs text-slate-400">
-                    {reportFindingCount > 0
-                      ? `${reportFindingCount} finding teeth · ${reportKeywords.slice(0, 2).join(' · ')}`
-                      : 'Open a compact report workspace for this analysis'}
-                  </p>
-                </div>
-                <div className="text-right text-[11px] text-cyan-300">
-                  {reportStartState === 'creating' ? 'Loading...' : reportDrawerOpen ? 'Open' : 'Expand'}
-                </div>
-              </div>
-              {reportError && (
-                <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-                  {reportError}
-                </div>
-              )}
-            </div>
-          )}
-
           {/* Floating Context Menu */}
           {contextMenu.show && createPortal(
             <>
               <div className="fixed inset-0 z-[999]" onClick={() => setContextMenu({ ...contextMenu, show: false })} />
               <div
-                className="fixed z-[1000] w-[220px] border border-gray-200 rounded-lg shadow-2xl p-1 flex flex-col gap-1 backdrop-blur-sm isolate"
+                className="fixed z-[1000] w-[220px] rounded-2xl border border-white/10 p-1 flex flex-col gap-1 backdrop-blur-md isolate shadow-[0_24px_60px_rgba(0,0,0,0.42)]"
                 style={{
                   position: 'fixed',
                   top: `${contextMenu.y}px`,
                   left: `${contextMenu.x + 12}px`,
-                  backgroundColor: 'rgba(255, 255, 255, 0.98)',
-                  color: '#111827',
+                  background: 'linear-gradient(180deg, rgba(10,16,34,0.98), rgba(8,12,28,0.96))',
+                  color: '#e5eefc',
                 }}
               >
                 {contextMenu.menu === 'measure' ? (
@@ -2363,14 +2384,14 @@ export function ChartPage(props?: ChartPageProps) {
                     <CtxBtn onClick={() => selectSubTool('livewire')} label="Livewire Tool" />
                   </>
                 ) : (
-                  <div className="p-4 space-y-4 min-w-[220px]">
-                    <div className="flex items-center justify-between border-b border-gray-100 pb-2 mb-2">
-                      <span className="text-[11px] font-bold text-gray-800 uppercase tracking-wider">Grid Layout</span>
-                      <span className="text-[10px] text-indigo-500 font-black">{tempGridLayout.rows} x {tempGridLayout.cols}</span>
+                  <div className="min-w-[220px] space-y-4 p-4">
+                    <div className="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-100">Grid Layout</span>
+                      <span className="text-[10px] font-black text-cyan-300">{tempGridLayout.rows} x {tempGridLayout.cols}</span>
                     </div>
                     <div className="flex gap-4">
                       <div className="flex-1 space-y-1.5">
-                        <label className="text-[10px] text-gray-500 font-bold uppercase tracking-tight">Rows</label>
+                        <label className="text-[10px] font-bold uppercase tracking-tight text-slate-400">Rows</label>
                         <input
                           type="number"
                           min="1"
@@ -2380,11 +2401,11 @@ export function ChartPage(props?: ChartPageProps) {
                             const val = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
                             setTempGridLayout(prev => ({ ...prev, rows: val }));
                           }}
-                          className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all font-semibold"
+                          className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-slate-100 outline-none transition-all focus:border-cyan-400/70 focus:ring-2 focus:ring-cyan-400/30"
                         />
                       </div>
                       <div className="flex-1 space-y-1.5">
-                        <label className="text-[10px] text-gray-500 font-bold uppercase tracking-tight">Cols</label>
+                        <label className="text-[10px] font-bold uppercase tracking-tight text-slate-400">Cols</label>
                         <input
                           type="number"
                           min="1"
@@ -2394,7 +2415,7 @@ export function ChartPage(props?: ChartPageProps) {
                             const val = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
                             setTempGridLayout(prev => ({ ...prev, cols: val }));
                           }}
-                          className="w-full px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all font-semibold"
+                          className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-slate-100 outline-none transition-all focus:border-cyan-400/70 focus:ring-2 focus:ring-cyan-400/30"
                         />
                       </div>
                     </div>
@@ -2404,7 +2425,7 @@ export function ChartPage(props?: ChartPageProps) {
                         setViewerMode('grid');
                         setContextMenu({ ...contextMenu, show: false });
                       }}
-                      className="w-full py-2.5 bg-indigo-600 text-white text-[10px] font-bold uppercase tracking-widest rounded shadow-md hover:bg-indigo-700 transition-colors"
+                      className="w-full rounded-xl border border-cyan-300/30 bg-cyan-400 px-3 py-2.5 text-[10px] font-bold uppercase tracking-widest text-slate-950 shadow-[0_12px_24px_rgba(34,211,238,0.18)] transition-colors hover:bg-cyan-300"
                     >
                       Apply & Close
                     </button>
@@ -2417,6 +2438,70 @@ export function ChartPage(props?: ChartPageProps) {
 
         </div>
       )}
+      {reportSessionId && createPortal(
+        <WebReportDrawer
+          sessionId={reportSessionId}
+          selectedToothId={selectedTooth ? String(selectedTooth) : null}
+          onClose={() => setReportDrawerOpen(false)}
+          open={reportDrawerOpen}
+          layout="dock"
+        />,
+        document.body
+      )}
+      {reportError && (
+        <div
+          className="fixed rounded-2xl border border-red-500/30 bg-[rgba(60,10,16,0.92)] px-3 py-2 text-xs text-red-100 shadow-[0_18px_36px_rgba(0,0,0,0.35)] backdrop-blur-xl"
+          style={{ right: 24, bottom: 128, zIndex: 2147483001, width: 280, maxWidth: 'calc(100vw - 2rem)' }}
+        >
+          {reportError}
+        </div>
+      )}
+      <button
+        type="button"
+        className="cursor-pointer bg-cyan-400 text-slate-950 transition hover:bg-cyan-300"
+        style={{
+          position: 'fixed',
+          right: 24,
+          bottom: 24,
+          zIndex: 2147483002,
+          pointerEvents: 'auto',
+          opacity: hasViewerShell ? 1 : 0.7,
+          width: 88,
+          height: 88,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexDirection: 'column',
+          gap: 4,
+          overflow: 'visible',
+          borderRadius: '9999px',
+          // border: '4px solid #ef4444',
+          boxShadow: '0 18px 40px rgba(0,0,0,0.32)',
+        }}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+        }}
+        onMouseDown={(event) => {
+          event.stopPropagation();
+        }}
+        onClick={(event) => {
+          event.stopPropagation();
+          void handleStartReport();
+        }}
+        aria-label="Open AI note report panel"
+        title={reportStartState === 'creating' ? 'Loading report workspace' : reportSessionId ? 'Open report draft' : 'Open report workspace'}
+        >
+          <ClipboardList className="h-7 w-7" />
+          <span className="text-[11px] font-black uppercase tracking-[0.12em]">Report</span>
+          {reportStartState === 'creating' && (
+            <span
+              className="pointer-events-none absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full border border-white bg-cyan-400 px-1 text-[9px] font-bold text-slate-950 shadow-[0_6px_16px_rgba(34,211,238,0.28)]"
+              style={{ position: 'absolute' }}
+            >
+              ...
+            </span>
+          )}
+        </button>
     </div>
   );
 }

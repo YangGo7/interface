@@ -22,6 +22,25 @@ type GridControl = {
     orientation: ViewportOrientation;
 };
 
+type VolumePresetDefinition = {
+    name: string;
+    gradientOpacity: string;
+    specularPower: string;
+    scalarOpacity: string;
+    specular: string;
+    shade: string;
+    ambient: string;
+    colorTransfer: string;
+    diffuse: string;
+    interpolation: string;
+};
+
+type VolumePresetOption = {
+    value: string;
+    label: string;
+    preset: VolumePresetDefinition;
+};
+
 type CornerstoneGridViewerProps = {
     sources: ViewerSource[];
     title?: string;
@@ -35,6 +54,10 @@ type CornerstoneGridViewerProps = {
     interactionMode?: string;
     resetToken?: number;
     onViewportCapture?: (canvas: HTMLCanvasElement, viewportLabel?: string) => void;
+    brightness?: number;
+    contrast?: number;
+    rotation?: number;
+    flipped?: boolean;
 };
 
 export function CornerstoneGridViewer({
@@ -50,6 +73,10 @@ export function CornerstoneGridViewer({
     interactionMode,
     resetToken = 0,
     onViewportCapture,
+    brightness = 100,
+    contrast = 100,
+    rotation = 0,
+    flipped = false,
 }: CornerstoneGridViewerProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewportRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -77,20 +104,76 @@ export function CornerstoneGridViewer({
     const [viewportsConfig, setViewportsConfig] = useState<GridControl[]>([]);
     const [preset3D, setPreset3D] = useState<Record<string, string>>({});
 
-    const PRESETS_3D = [
-        { value: 'CT-Bone', label: 'CT Bone' },
-        { value: 'CT-Soft-Tissue', label: 'CT Soft Tissue' },
-        { value: 'CT-Lung', label: 'CT Lung' },
-        { value: 'CT-Fat', label: 'CT Fat' },
-        { value: 'CT-Muscle', label: 'CT Muscle' },
-        { value: 'CT-Cardiac', label: 'CT Cardiac' },
-        { value: 'CT-MIP', label: 'CT MIP' },
-        { value: 'CT-Chest-Contrast-Enhanced', label: 'CT Chest CE' },
-        { value: 'CT-Chest-Vessels', label: 'CT Vessels' },
-        { value: 'CT-Air', label: 'CT Air' },
-        { value: 'MR-Default', label: 'MR Default' },
-        { value: 'MR-MIP', label: 'MR MIP' },
+    const PRESETS_3D: VolumePresetOption[] = [
+        {
+            value: 'dental-bone',
+            label: 'Dental Bone',
+            preset: {
+                name: 'Dental Bone',
+                gradientOpacity: '4 0 1 255 1',
+                specularPower: '10',
+                scalarOpacity: '8 -3024 0 -16.4458 0 641.385 0.715686 3071 0.705882',
+                specular: '0.2',
+                shade: '1',
+                ambient: '0.1',
+                colorTransfer: '16 -3024 0 0 0 -16.4458 0.729412 0.254902 0.301961 641.385 0.905882 0.815686 0.552941 3071 1 1 1',
+                diffuse: '0.9',
+                interpolation: '1',
+            },
+        },
+        {
+            value: 'dental-surface',
+            label: 'Dental Surface',
+            preset: {
+                name: 'Dental Surface',
+                gradientOpacity: '4 0 1 255 1',
+                specularPower: '1',
+                scalarOpacity: '10 -2048 0 -451 0 -450 1 1050 1 3661 1',
+                specular: '0',
+                shade: '0',
+                ambient: '0.2',
+                colorTransfer: '20 -2048 0 0 0 -451 0 0 0 -450 0.0556356 0.0556356 0.0556356 1050 1 1 1 3661 1 1 1',
+                diffuse: '1',
+                interpolation: '1',
+            },
+        },
+        {
+            value: 'dental-soft-tissue',
+            label: 'Dental Soft Tissue',
+            preset: {
+                name: 'Dental Soft Tissue',
+                gradientOpacity: '4 0 1 255 1',
+                specularPower: '1',
+                scalarOpacity: '10 -2048 0 -167.01 0 -160 1 240 1 3661 1',
+                specular: '0',
+                shade: '0',
+                ambient: '0.2',
+                colorTransfer: '20 -2048 0 0 0 -167.01 0 0 0 -160 0.0556356 0.0556356 0.0556356 240 1 1 1 3661 1 1 1',
+                diffuse: '1',
+                interpolation: '1',
+            },
+        },
+        {
+            value: 'dental-mip',
+            label: 'Dental MIP',
+            preset: {
+                name: 'Dental MIP',
+                gradientOpacity: '4 0 1 255 1',
+                specularPower: '10',
+                scalarOpacity: '8 -3024 0 -637.62 0 700 1 3071 1',
+                specular: '0.2',
+                shade: '1',
+                ambient: '0.1',
+                colorTransfer: '16 -3024 0 0 0 -637.62 1 1 1 700 1 1 1 3071 1 1 1',
+                diffuse: '0.9',
+                interpolation: '1',
+            },
+        },
     ];
+    const DEFAULT_3D_PRESET = PRESETS_3D[0].value;
+
+    const getPresetOption = (presetValue?: string) =>
+        PRESETS_3D.find((preset) => preset.value === presetValue) || PRESETS_3D[0];
 
     const activeSource = sources[0];
 
@@ -132,7 +215,7 @@ export function CornerstoneGridViewer({
             props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
         }
 
-        props.invert = Boolean(image.invert) !== invert;
+        props.invert = Boolean(image.invert);
         viewportsConfig.forEach(config => {
             if (config.orientation === 'volume3d') return;
             const vp = renderingEngine.getViewport(config.id) as any;
@@ -268,7 +351,7 @@ export function CornerstoneGridViewer({
 
                     if (config.orientation === 'volume3d') {
                         try {
-                            vp.setProperties({ preset: preset3D[config.id] || 'CT-Bone' });
+                            vp.setProperties({ preset: getPresetOption(preset3D[config.id] || DEFAULT_3D_PRESET).preset });
                         } catch (e) {
                             console.warn('Failed to set 3D preset', e);
                         }
@@ -315,7 +398,22 @@ export function CornerstoneGridViewer({
 
     useEffect(() => {
         applyViewportDisplayState(renderingEngineRef.current, currentImageId);
-    }, [invert, currentImageId, viewportsConfig]);
+    }, [currentImageId, viewportsConfig]);
+
+    useEffect(() => {
+        const visualFilter = `${invert ? 'invert(1) ' : ''}brightness(${brightness}%) contrast(${contrast}%)`;
+        const visualTransform = `rotate(${rotation}deg) scaleX(${flipped ? -1 : 1})`;
+
+        viewportRefs.current.forEach((host) => {
+            if (!host) return;
+            const canvases = Array.from(host.querySelectorAll('canvas')) as HTMLCanvasElement[];
+            canvases.forEach((canvas) => {
+                canvas.style.filter = visualFilter;
+                canvas.style.transform = visualTransform;
+                canvas.style.transformOrigin = 'center center';
+            });
+        });
+    }, [invert, brightness, contrast, rotation, flipped, loadState, currentImageId, viewportsConfig]);
 
     useEffect(() => {
         if (interactionMode !== 'magnifier') {
@@ -454,7 +552,14 @@ export function CornerstoneGridViewer({
         const renderingEngine = renderingEngineRef.current;
         if (!renderingEngine) return;
         const vp = renderingEngine.getViewport(viewportId) as any;
-        if (vp?.setProperties) { try { vp.setProperties({ preset: presetName }); vp.render(); setPreset3D(prev => ({ ...prev, [viewportId]: presetName })); } catch (e) { } }
+        const preset = getPresetOption(presetName);
+        if (vp?.setProperties) {
+            try {
+                vp.setProperties({ preset: preset.preset });
+                vp.render();
+                setPreset3D((prev) => ({ ...prev, [viewportId]: preset.value }));
+            } catch (e) { }
+        }
     };
 
     const resetView = () => {
@@ -530,7 +635,7 @@ export function CornerstoneGridViewer({
                                 {viewportsConfig[0].orientation === 'volume3d' && (
                                     <select
                                         className="text-xs font-semibold bg-blue-50 border border-blue-200 rounded-md px-2 py-1 outline-none text-blue-700 shadow-sm"
-                                        value={preset3D[viewportsConfig[0].id] || 'CT-Bone'}
+                                        value={preset3D[viewportsConfig[0].id] || DEFAULT_3D_PRESET}
                                         onChange={(e) => handlePresetChange(viewportsConfig[0].id, e.target.value)}
                                     >
                                         {PRESETS_3D.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
@@ -560,6 +665,15 @@ export function CornerstoneGridViewer({
                             key={config.id}
                             data-grid-capture-cell="true"
                             style={{ position: 'relative', backgroundColor: '#000', width: '100%', height: '100%', overflow: 'hidden', cursor: interactionMode === 'magnifier' && config.orientation !== 'volume3d' ? 'zoom-in' : interactionMode === 'capture-area' && config.orientation !== 'volume3d' ? 'crosshair' : 'default' }}
+                            onMouseDown={(event) => {
+                                if (interactionMode !== 'capture-area' || config.orientation === 'volume3d') return;
+                                event.preventDefault();
+                                event.stopPropagation();
+                            }}
+                            onClick={(event) => {
+                                if (interactionMode !== 'capture-area' || config.orientation === 'volume3d') return;
+                                handleViewportCaptureClick(config.id, config.orientation, idx, event);
+                            }}
                             onMouseMove={(event) => handleMagnifierMove(config.id, config.orientation, event)}
                             onMouseLeave={() => setMagnifier((prev) => (prev.visible && prev.viewportId === config.id ? { ...prev, visible: false } : prev))}
                         >
@@ -577,26 +691,20 @@ export function CornerstoneGridViewer({
                                     <option value="axial">Axial</option><option value="sagittal">Sagittal</option><option value="coronal">Coronal</option><option value="acquisition">Original</option><option value="volume3d">3D Volume</option>
                                 </select>
                                 {config.orientation === 'volume3d' && (
-                                    <select style={{ backgroundColor: 'rgba(0,0,0,0.6)', color: '#60a5fa', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', border: '1px solid #3b82f6', outline: 'none', marginLeft: '4px' }} value={preset3D[config.id] || 'CT-Bone'} onChange={(e) => handlePresetChange(config.id, e.target.value)}>
+                                    <select style={{ backgroundColor: 'rgba(0,0,0,0.6)', color: '#60a5fa', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', border: '1px solid #3b82f6', outline: 'none', marginLeft: '4px' }} value={preset3D[config.id] || DEFAULT_3D_PRESET} onChange={(e) => handlePresetChange(config.id, e.target.value)}>
                                         {PRESETS_3D.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                                     </select>
                                 )}
                             </div>
                             {interactionMode === 'capture-area' && config.orientation !== 'volume3d' && (
-                                <button
-                                    type="button"
-                                    className="absolute inset-0 z-[11] border border-cyan-300/70 bg-cyan-400/5 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.35)] transition-colors hover:bg-cyan-300/10"
-                                    onMouseDown={(event) => {
-                                        event.preventDefault();
-                                        event.stopPropagation();
-                                    }}
-                                    onClick={(event) => handleViewportCaptureClick(config.id, config.orientation, idx, event)}
-                                    title={`Capture ${config.orientation} viewport`}
+                                <div
+                                    className="pointer-events-none absolute inset-0 z-[11] border border-cyan-300/70 bg-cyan-400/5 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.35)] transition-colors"
+                                    aria-hidden="true"
                                 >
                                     <span className="pointer-events-none absolute left-3 top-3 rounded-full border border-cyan-200/60 bg-slate-950/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-100">
                                         Click To Capture
                                     </span>
-                                </button>
+                                </div>
                             )}
                             {interactionMode === 'magnifier' && config.orientation !== 'volume3d' && magnifier.visible && magnifier.viewportId === config.id && (
                                 <div
