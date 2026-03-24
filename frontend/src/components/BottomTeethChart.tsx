@@ -1,3 +1,6 @@
+import { useState } from 'react';
+import { createPortal } from 'react-dom';
+
 interface ToothStatus {
   missing?: boolean;
   caries?: boolean;
@@ -8,6 +11,17 @@ interface ToothStatus {
   triage?: 'triage-1' | 'triage-2' | 'triage-3' | 'missing' | 'implant';
 }
 
+interface ToothTooltipData {
+  kind?: 'finding' | 'implant';
+  status?: string;
+  pblPct?: number | null;
+  level?: number | string | null;
+  caries?: boolean;
+  periapical?: boolean;
+  gapMm?: number | null;
+  nerveDistMm?: number | null;
+}
+
 interface BottomTeethChartProps {
   onToothClick: (tooth: number) => void;
   selectedTooth?: number;
@@ -16,6 +30,7 @@ interface BottomTeethChartProps {
   extraction?: (number | string)[];
   implantSites?: (number | string)[];
   numberingSystem?: 'fdi' | 'univ'; // [NEW]
+  tooltipData?: Record<string, ToothTooltipData>;
 }
 
 export function BottomTeethChart({
@@ -26,6 +41,7 @@ export function BottomTeethChart({
   extraction = [],
   implantSites = [],
   numberingSystem = 'fdi',
+  tooltipData = {},
 }: BottomTeethChartProps) {
   const tileWidth = 52;
   const tileHeight = 117;
@@ -33,7 +49,8 @@ export function BottomTeethChart({
   const imageHeight = 88;
   const tileGap = 5;
   const rowGap = 32;
-  const chamfer = 14;
+  const [hoveredTooth, setHoveredTooth] = useState<number | null>(null);
+  const [tooltipAnchor, setTooltipAnchor] = useState({ x: 0, y: 0 });
 
   const upperTeeth = [18, 17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27, 28];
   const lowerTeeth = [48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38];
@@ -81,6 +98,14 @@ export function BottomTeethChart({
     return quadrant === 2 || quadrant === 3;
   };
 
+  const formatValue = (value?: number | string | null, suffix = '') => {
+    if (value === null || value === undefined || value === '') return '-';
+    if (typeof value === 'number') return `${value.toFixed(1)}${suffix}`;
+    return `${value}${suffix}`;
+  };
+
+  const hoveredTooltip = hoveredTooth ? tooltipData[String(hoveredTooth)] : null;
+
   const renderRow = (teeth: number[]) => (
     <div
       className="grid items-center"
@@ -95,10 +120,18 @@ export function BottomTeethChart({
         const displayNum = numberingSystem === 'univ' ? toUniv(tooth) : tooth;
 
         return (
-          <div key={tooth} className="flex flex-col items-center gap-1.5">
-
+          <div key={tooth} className="relative flex flex-col items-center gap-1.5 overflow-visible">
             <button
               onClick={() => onToothClick(tooth)}
+              onMouseEnter={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setHoveredTooth(tooth);
+                setTooltipAnchor({
+                  x: rect.left + rect.width / 2,
+                  y: rect.top - 22,
+                });
+              }}
+              onMouseLeave={() => setHoveredTooth((current) => (current === tooth ? null : current))}
               className={`flex items-center justify-center border-2 transition-all ${selectedTooth === tooth ? 'ring-2 ring-[#2563EB]/35 ring-offset-2 ring-offset-white' : ''
                 }`}
               style={{
@@ -108,7 +141,7 @@ export function BottomTeethChart({
                 borderColor: border,
                 borderStyle: dashed ? 'dashed' : 'solid',
                 boxShadow: ring ? '0 0 0 1.5px #DC2626 inset, 0 4px 10px rgba(15,23,42,0.06)' : '0 4px 10px rgba(15,23,42,0.05)',
-                clipPath: `polygon(${chamfer}px 0, calc(100% - ${chamfer}px) 0, 100% ${chamfer}px, 100% calc(100% - ${chamfer}px), calc(100% - ${chamfer}px) 100%, ${chamfer}px 100%, 0 calc(100% - ${chamfer}px), 0 ${chamfer}px)`,
+                borderRadius: 18,
               }}
             >
               <img
@@ -158,6 +191,89 @@ export function BottomTeethChart({
           </span>
         </div>
       </div>
+      {hoveredTooth && hoveredTooltip && typeof document !== 'undefined' ? createPortal(
+        <div
+          style={{
+            position: 'fixed',
+            pointerEvents: 'none',
+            left: tooltipAnchor.x,
+            top: tooltipAnchor.y,
+            zIndex: 5000,
+            minWidth: 220,
+            padding: '12px',
+            textAlign: 'left',
+            transform: 'translate(-50%, -100%)',
+            borderRadius: 18,
+            border: '1px solid rgba(103, 232, 249, 0.35)',
+            backgroundColor: '#16203f',
+            boxShadow: '0 22px 46px rgba(2, 6, 23, 0.52)',
+          }}
+        >
+          <div
+            style={{
+              marginBottom: 8,
+              fontSize: 10,
+              fontWeight: 900,
+              letterSpacing: '0.18em',
+              textTransform: 'uppercase',
+              color: '#67E8F9',
+            }}
+          >
+            Tooth #{numberingSystem === 'univ' ? toUniv(hoveredTooth) : hoveredTooth}
+          </div>
+          <div className="space-y-1.5 text-[11px] text-slate-200">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-slate-400">Status</span>
+              <span className="font-semibold text-white">{hoveredTooltip.status || '-'}</span>
+            </div>
+            {hoveredTooltip.kind === 'implant' ? (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Space X</span>
+                  <span className="font-semibold text-white">{formatValue(hoveredTooltip.gapMm, ' mm')}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Axis To Nerve</span>
+                  <span className="font-semibold text-white">{formatValue(hoveredTooltip.nerveDistMm, ' mm')}</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">PBL / Level</span>
+                  <span className="font-semibold text-white">
+                    {hoveredTooltip.pblPct !== null && hoveredTooltip.pblPct !== undefined
+                      ? `${formatValue(hoveredTooltip.pblPct, '%')} / ${hoveredTooltip.level ?? '-'}`
+                      : '-'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Caries</span>
+                  <span className="font-semibold text-white">{hoveredTooltip.caries ? 'Yes' : 'No'}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-400">Periapical</span>
+                  <span className="font-semibold text-white">{hoveredTooltip.periapical ? 'Yes' : 'No'}</span>
+                </div>
+              </>
+            )}
+          </div>
+          <div
+            style={{
+              position: 'absolute',
+              left: '50%',
+              bottom: 0,
+              width: 12,
+              height: 12,
+              transform: 'translate(-50%, 50%) rotate(45deg)',
+              borderRight: '1px solid rgba(103, 232, 249, 0.35)',
+              borderBottom: '1px solid rgba(103, 232, 249, 0.35)',
+              backgroundColor: '#16203f',
+            }}
+          />
+        </div>,
+        document.body
+      ) : null}
     </div>
   );
 }

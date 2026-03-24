@@ -7,12 +7,12 @@ import { CornerstoneViewer, CornerstoneGridViewer } from '../viewer';
 import {
   AlertTriangle, Activity, Zap, Layers, Image as ImageIcon,
   MousePointer, Hand, ZoomIn, RotateCw, FlipHorizontal,
-  Ruler, PenLine, Loader2, ZoomOut, RotateCcw, AlertCircle, Skull,
+  Ruler, PenLine, Loader2, RotateCcw, AlertCircle, Skull,
   ClipboardList, Quote, Sparkles, Grid, MousePointer2, Eraser, Rotate3d,
   Trash2, Monitor, ChevronsUpDown, Camera, Crop, Search
 } from 'lucide-react';
-import { RightPanel } from '../components/RightPanel';
 import { TopHeader } from '../components/TopHeader';
+import { StudiesWorkspacePanel } from '../components/chart/StudiesWorkspacePanel';
 import { setActiveTool as setCornerstoneActiveTool, clearAllAnnotations } from '../viewer/cornerstone/tools';
 import { createWebReportFromChart } from '../lib/webReportApi';
 import { buildWebReportKeywords, countWebReportFindingTeeth } from '../lib/webReportKeywords';
@@ -34,6 +34,19 @@ const mockCounts = [
 const mockFindings = [
   { label: 'No Data', value: '', color: 'bg-gray-700' },
 ];
+
+const padTimestampUnit = (value: number) => String(value).padStart(2, '0');
+
+const formatCaptureTimeline = (date: Date) => {
+  const hour = padTimestampUnit(date.getHours());
+  const minute = padTimestampUnit(date.getMinutes());
+  return `${hour}:${minute}`;
+};
+
+const formatCaptureFileTimestamp = (date: Date) => {
+  const second = padTimestampUnit(date.getSeconds());
+  return `${formatCaptureTimeline(date)}-${second}`;
+};
 
 export function ChartPage(props?: ChartPageProps) {
   const location = useLocation();
@@ -60,7 +73,7 @@ export function ChartPage(props?: ChartPageProps) {
   const [reportStartState, setReportStartState] = useState<'idle' | 'creating'>('idle');
   const [reportError, setReportError] = useState<string | null>(null);
   const [captureNotice, setCaptureNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [workspaceOpen, setWorkspaceOpen] = useState(true);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'captures'>('studies');
   const [selectedFolderSeriesId, setSelectedFolderSeriesId] = useState<string | null>(initialFolderSeriesId);
   const [captureGallery, setCaptureGallery] = useState<Array<{
@@ -85,6 +98,7 @@ export function ChartPage(props?: ChartPageProps) {
 
   // Tools
   const [activeTool, setLocalActiveTool] = useState<string>('pointer');
+  const [selectedToolbarButton, setSelectedToolbarButton] = useState<string>('pointer');
   const [activeSubTool, setActiveSubTool] = useState<string | null>(null);
   const [viewerMode, setViewerMode] = useState<'single' | 'grid'>(initialIsVolume ? 'grid' : 'single');
 
@@ -189,6 +203,7 @@ export function ChartPage(props?: ChartPageProps) {
   // -- Missing Vars defined here --
   const today = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   const handleZoom = (delta: number) => setZoom(z => Math.max(0.1, Math.min(5, z + delta)));
+  const zoomWheelActive = activeTool === 'zoom';
   const effectiveScale = Math.max(fitScale * scale * zoom, 0.001);
   // Alias for drawing:
   const currentMeasurement = pendingPoints.length > 0 ? { start: pendingPoints[0], current: tempPoint || pendingPoints[pendingPoints.length - 1] } : null;
@@ -286,11 +301,11 @@ export function ChartPage(props?: ChartPageProps) {
     }, 2200);
   };
 
-  const rememberCapturePreview = (sourceCanvas: HTMLCanvasElement, label: string) => {
+  const rememberCapturePreview = (sourceCanvas: HTMLCanvasElement, label: string, capturedAt: Date = new Date()) => {
     try {
       const previewCanvas = document.createElement('canvas');
-      const maxWidth = 240;
-      const maxHeight = 148;
+      const maxWidth = 80;
+      const maxHeight = 40;
       const scaleFactor = Math.min(maxWidth / sourceCanvas.width, maxHeight / sourceCanvas.height, 1);
       previewCanvas.width = Math.max(1, Math.round(sourceCanvas.width * scaleFactor));
       previewCanvas.height = Math.max(1, Math.round(sourceCanvas.height * scaleFactor));
@@ -302,7 +317,7 @@ export function ChartPage(props?: ChartPageProps) {
         label,
         dataUrl: previewCanvas.toDataURL('image/png'),
         size: `${sourceCanvas.width}x${sourceCanvas.height}`,
-        createdAt: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        createdAt: formatCaptureTimeline(capturedAt),
       };
       setCaptureGallery((prev) => [preview, ...prev].slice(0, 12));
     } catch (error) {
@@ -391,7 +406,8 @@ export function ChartPage(props?: ChartPageProps) {
   };
 
   const downloadCanvasCapture = (sourceCanvas: HTMLCanvasElement, filePrefix = 'dental_capture') => {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const capturedAt = new Date();
+    const timestamp = formatCaptureFileTimestamp(capturedAt);
     const fileName = `${filePrefix}_${timestamp}.png`;
     const exportCanvas = document.createElement('canvas');
     exportCanvas.width = sourceCanvas.width;
@@ -415,13 +431,14 @@ export function ChartPage(props?: ChartPageProps) {
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-      rememberCapturePreview(exportCanvas, fileName);
+      rememberCapturePreview(exportCanvas, fileName, capturedAt);
       notifyCapture('success', `Saved ${fileName}`);
     }, 'image/png');
   };
 
   const copyCanvasCapture = async (sourceCanvas: HTMLCanvasElement, successText = 'Copied capture to clipboard') => {
     try {
+      const capturedAt = new Date();
       if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
         notifyCapture('error', 'Clipboard copy is not supported in this browser');
         return false;
@@ -434,7 +451,7 @@ export function ChartPage(props?: ChartPageProps) {
       }
 
       await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-      rememberCapturePreview(sourceCanvas, successText);
+      rememberCapturePreview(sourceCanvas, successText, capturedAt);
       notifyCapture('success', successText);
       return true;
     } catch (error) {
@@ -725,6 +742,47 @@ export function ChartPage(props?: ChartPageProps) {
     ...perioHighlights,
     ...implantSiteCandidates.map((c: any) => c?.site_fdi || c?.tooth || c),
   ];
+  const implantMetricsByTooth = (() => {
+    const map: Record<string, any> = {};
+    const metrics = Array.isArray(result?.implant_metrics)
+      ? result.implant_metrics
+      : Object.values(result?.implant_metrics || {});
+    metrics.forEach((item: any) => {
+      const key = getToothId(item?.label || item?.tooth_label || item?.tooth || item?.id);
+      if (key && key !== 'undefined') {
+        map[key] = item;
+      }
+    });
+    return map;
+  })();
+  const odontogramTooltipData = Object.keys(statuses).reduce((acc, key) => {
+    const tooth = toothRecords[key] || {};
+    const status = statuses[key] || {};
+    const gapMm = Number(
+      tooth?.mesiodistal_gap_mm ??
+      tooth?.implant_guide?.mesiodistal_gap_mm ??
+      implantMetricsByTooth[key]?.mesiodistal_gap_mm ??
+      0
+    );
+    const nerveDistMm = Number(tooth?.nerve_dist_mm ?? status?.nerve_dist_mm ?? 0);
+    const isImplantLike = Boolean(status?.implant || gapMm > 0);
+    let statusLabel = 'Healthy';
+    if (status?.missing && !status?.implant) statusLabel = 'Missing';
+    else if (isImplantLike) statusLabel = 'Implant';
+    else if (status?.caries || status?.peri || Number(status?.bone_loss_level || 0) >= 3) statusLabel = 'Requires Tx';
+
+    acc[key] = {
+      kind: isImplantLike ? 'implant' : 'finding',
+      status: statusLabel,
+      pblPct: Number.isFinite(Number(status?.bone_loss_pct)) ? Number(status?.bone_loss_pct) : null,
+      level: status?.bone_loss_level ?? null,
+      caries: Boolean(status?.caries),
+      periapical: Boolean(status?.peri),
+      gapMm: gapMm > 0 ? gapMm : null,
+      nerveDistMm: nerveDistMm > 0 ? nerveDistMm : null,
+    };
+    return acc;
+  }, {} as Record<string, any>);
   // --- Image Source Logic ---
   const isDicomPath = (url?: string) => !!url && /\.(dcm|dicom)(?:$|[?#])/i.test(url);
 
@@ -1005,12 +1063,14 @@ export function ChartPage(props?: ChartPageProps) {
   // --- Handlers ---
   const resetView = () => {
     setScale(1);
+    setZoom(1);
     setOffset({ x: 0, y: 0 });
     setRotation(0);
     setFlipped(false);
     setBrightness(100);
     setContrast(100);
     handleToolChange('pointer');
+    setSelectedToolbarButton('pointer');
     setActiveSubTool(null);
     setCornerstoneResetToken((prev) => prev + 1);
   };
@@ -1043,7 +1103,7 @@ export function ChartPage(props?: ChartPageProps) {
   };
 
   const handleToolChange = (tool: string) => {
-    const primaryTools = new Set(['pointer', 'pan', 'wlww', 'erase', 'rotate', 'scroll', 'capture-area', 'magnifier']);
+    const primaryTools = new Set(['pointer', 'pan', 'wlww', 'erase', 'rotate', 'scroll', 'capture-area', 'magnifier', 'zoom']);
     if (primaryTools.has(tool)) {
       setActiveSubTool(null);
       setPendingPoints([]);
@@ -1062,9 +1122,39 @@ export function ChartPage(props?: ChartPageProps) {
       case 'rotate': setCornerstoneActiveTool('TrackballRotate'); break;
       case 'erase': setCornerstoneActiveTool('Eraser'); break;
       case 'scroll': setCornerstoneActiveTool('StackScroll'); break;
+      case 'zoom': setCornerstoneActiveTool('Pan'); break;
       case 'magnifier': setCornerstoneActiveTool('Pan'); break;
       case 'pointer': setCornerstoneActiveTool('Pan'); break;
     }
+  };
+
+  const toggleToolOrPointer = (tool: string) => {
+    if (activeTool === tool) {
+      handleToolChange('pointer');
+      setSelectedToolbarButton('pointer');
+      return;
+    }
+    handleToolChange(tool);
+    setSelectedToolbarButton(tool);
+  };
+
+  const toggleGroupedToolOrPointer = (
+    event: React.MouseEvent,
+    group: 'measure' | 'annotate',
+    isActive: boolean,
+  ) => {
+    if (isActive) {
+      event.stopPropagation();
+      setContextMenu({ show: false, x: 0, y: 0, menu: undefined });
+      setActiveSubTool(null);
+      setPendingPoints([]);
+      setTempPoint(null);
+      handleToolChange('pointer');
+      setSelectedToolbarButton('pointer');
+      return;
+    }
+    setSelectedToolbarButton(group);
+    openMenu(event, group);
   };
 
   const distance = (p1: any, p2: any) => Math.hypot(p2.x - p1.x, p2.y - p1.y);
@@ -1393,7 +1483,7 @@ export function ChartPage(props?: ChartPageProps) {
     if (!showSrc) return;
     if (e.button === 2) return; // Right click
 
-    if (activeTool === 'magnifier') {
+    if (activeTool === 'magnifier' || activeTool === 'zoom') {
       return;
     }
 
@@ -1555,8 +1645,8 @@ export function ChartPage(props?: ChartPageProps) {
 
   const handleWheel = (e: React.WheelEvent) => {
     if (activeTool !== 'zoom') return;
-    const delta = e.deltaY < 0 ? 0.1 : -0.1;
-    setScale(s => Math.min(5, Math.max(0.2, s + delta)));
+    e.preventDefault();
+    handleZoom(e.deltaY < 0 ? 0.1 : -0.1);
   };
 
   // Re-calc imgRect on change
@@ -1591,8 +1681,7 @@ export function ChartPage(props?: ChartPageProps) {
       if (activeTool === 'zoom') {
         e.preventDefault();
         e.stopPropagation();
-        const delta = e.deltaY < 0 ? 0.1 : -0.1;
-        setScale(s => Math.min(5, Math.max(0.2, s + delta)));
+        handleZoom(e.deltaY < 0 ? 0.1 : -0.1);
       }
     };
 
@@ -2041,9 +2130,61 @@ export function ChartPage(props?: ChartPageProps) {
     return null;
   };
 
+  const toolbarActions = (
+    <div className="flex flex-col items-start gap-2" style={{ marginLeft: 100 }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <ToolBtn compact active={selectedToolbarButton === 'pointer'} onClick={() => { handleToolChange('pointer'); setSelectedToolbarButton('pointer'); }} icon={MousePointer} title="Select Tool" />
+        <ToolBtn compact active={selectedToolbarButton === 'pan'} onClick={() => toggleToolOrPointer('pan')} icon={Hand} title="Pan" />
+        <ToolBtn compact active={selectedToolbarButton === 'wlww'} onClick={() => toggleToolOrPointer('wlww')} icon={WindowLevelIcon} title="Window / Level" />
+        <ToolBtn compact active={selectedToolbarButton === 'invert'} onClick={() => { setInverted((value) => !value); setSelectedToolbarButton((value) => value === 'invert' ? 'pointer' : 'invert'); }} icon={InvertIcon} title="Invert" />
+        <ToolBtn compact active={selectedToolbarButton === 'flip'} onClick={() => { setFlipped((value) => !value); setSelectedToolbarButton((value) => value === 'flip' ? 'pointer' : 'flip'); }} icon={FlipHorizontal} title="Flip Horizontal" />
+        <ToolBtn compact active={false} onClick={() => setRotation((value) => value + 90)} icon={RotateCw} title="Rotate 90" />
+        {viewerMode === 'grid' && (
+          <>
+            <ToolBtn compact active={selectedToolbarButton === 'rotate'} onClick={() => toggleToolOrPointer('rotate')} icon={Rotate3d} title="3D Rotate" />
+            <ToolBtn compact active={selectedToolbarButton === 'scroll'} onClick={() => toggleToolOrPointer('scroll')} icon={ChevronsUpDown} title="Slice Scroll" />
+          </>
+        )}
+        <ToolBtn compact active={selectedToolbarButton === 'magnifier'} disabled={magnifierDisabled} onClick={() => toggleToolOrPointer('magnifier')} icon={Search} title={magnifierDisabled ? 'Magnifier disabled in Grid/MPR view' : 'Magnifier'} />
+        <ToolBtn compact active={selectedToolbarButton === 'measure'} onClick={(event: any) => toggleGroupedToolOrPointer(event, 'measure', selectedToolbarButton === 'measure')} icon={Ruler} title="Measure" />
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <ToolBtn compact active={selectedToolbarButton === 'annotate'} onClick={(event: any) => toggleGroupedToolOrPointer(event, 'annotate', selectedToolbarButton === 'annotate')} icon={PenLine} title="Annotate" />
+        <ToolBtn compact active={selectedToolbarButton === 'erase'} onClick={() => toggleToolOrPointer('erase')} icon={Eraser} title="Eraser" />
+        <ToolBtn compact active={selectedToolbarButton === 'capture-area'} disabled={areaCaptureDisabled} onClick={() => {
+          toggleToolOrPointer('capture-area');
+        }} icon={Crop} title={areaCaptureDisabled ? 'Area Capture disabled in CT/DICOM view' : 'Area Capture'} />
+        <ToolBtn compact active={false} onClick={() => { void handleCapture(); }} icon={Camera} title="Full Capture" />
+        <ToolBtn compact active={false} onClick={() => { if (window.confirm('Clear all?')) clearAllAnnotations(); }} icon={Trash2} title="Clear All" />
+        <button
+          onClick={resetView}
+          className={getToolbarButtonClass({ compact: true })}
+          title="Reset All Views"
+        >
+          <RotateCcw className="h-5 w-5" />
+        </button>
+        <ToolBtn compact active={selectedToolbarButton === 'zoom'} onClick={() => toggleToolOrPointer('zoom')} icon={ZoomIn} title={zoomWheelActive ? 'Disable Wheel Zoom' : 'Enable Wheel Zoom'} />
+        <button
+          onClick={() => { setViewMode(viewMode === 'overlay' ? 'original' : 'overlay'); setSelectedToolbarButton('view-toggle'); }}
+          className={getToolbarButtonClass({ active: selectedToolbarButton === 'view-toggle', compact: true })}
+          title={viewMode === 'overlay' ? 'Switch to Original Source' : 'Switch to AI Analysis'}
+        >
+          {viewMode === 'overlay' ? <Layers className="h-5 w-5" /> : <ImageIcon className="h-5 w-5" />}
+        </button>
+        <button
+          onClick={() => { setViewMode('heatmap'); setSelectedToolbarButton('heatmap'); }}
+          className={getToolbarButtonClass({ active: selectedToolbarButton === 'heatmap', compact: true })}
+          title="Risk Overlay"
+        >
+          <Activity className="h-5 w-5" />
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <div className="h-screen w-full text-gray-100 flex flex-col overflow-hidden font-sans" style={{ backgroundColor: '#06071A' }}>
-      <TopHeader />
+      <TopHeader actions={toolbarActions} />
       {!hasViewerShell && (
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center space-y-3 text-gray-300">
@@ -2055,7 +2196,7 @@ export function ChartPage(props?: ChartPageProps) {
       {hasViewerShell && (
         <div className="flex flex-1 relative overflow-y-auto">
           <aside
-            className={`flex-shrink-0 overflow-hidden border-r border-gray-800/80 transition-all duration-300 ${workspaceOpen ? 'w-[10vw] min-w-[96px] max-w-[160px]' : 'w-[68px] min-w-[68px]'}`}
+            className={`flex-shrink-0 overflow-hidden border-r border-gray-800/80 transition-all duration-300 ${workspaceOpen ? 'w-[96px] min-w-[96px] max-w-[96px]' : 'w-[68px] min-w-[68px]'}`}
             style={{ backgroundColor: '#050816' }}
           >
             <div className="flex h-full flex-col px-3 py-4">
@@ -2107,7 +2248,7 @@ export function ChartPage(props?: ChartPageProps) {
                             className="overflow-y-auto pr-1"
                             style={{
                               display: 'grid',
-                              gridTemplateColumns: 'repeat(auto-fit, minmax(42px, 1fr))',
+                              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
                               gap: 6,
                             }}
                           >
@@ -2146,7 +2287,7 @@ export function ChartPage(props?: ChartPageProps) {
                                 <img
                                   src={capture.dataUrl}
                                   alt={capture.label}
-                                  className="h-[42px] w-[42px] rounded-[10px] border border-white/8 bg-black object-cover"
+                                  className="h-[21px] w-[21px] rounded-[10px] border border-white/8 bg-black object-cover"
                                 />
                                 <div className="mt-1 text-center">
                                   <p className="text-[9px] text-slate-400">{capture.createdAt}</p>
@@ -2157,61 +2298,21 @@ export function ChartPage(props?: ChartPageProps) {
                         )}
                       </div>
                     ) : (
-                      <div className="flex h-full flex-col overflow-y-auto p-2">
-                        {originalFolderStudies.length === 0 ? (
-                          <div className="flex h-full items-center justify-center px-2 text-center text-[11px] leading-5 text-slate-500">
-                            No local study list is loaded.
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            {originalFolderStudies.map((study) => (
-                              <section key={study.id} className="rounded-[16px] border border-white/8 bg-black/20 p-2">
-                                <div className="mb-2">
-                                  <p className="truncate text-[10px] font-black uppercase tracking-[0.14em] text-cyan-300/80">
-                                    {study.label || 'Study'}
-                                  </p>
-                                  {study.description && (
-                                    <p className="mt-1 line-clamp-2 text-[10px] text-slate-500">{study.description}</p>
-                                  )}
-                                </div>
-                                <div className="space-y-1.5">
-                                  {study.series.map((series) => {
-                                    const isActive = selectedFolderSeriesId === series.id;
-                                    return (
-                                      <button
-                                        key={series.id}
-                                        type="button"
-                                        onClick={() => {
-                                          setSelectedFolderSeriesId(series.id);
-                                          setViewMode('original');
-                                          setViewerMode('grid');
-                                        }}
-                                        className={`w-full rounded-[14px] border px-2 py-2 text-left transition ${
-                                          isActive
-                                            ? 'border-cyan-300/40 bg-cyan-400/14 text-white'
-                                            : 'border-white/8 bg-white/5 text-slate-300 hover:border-cyan-300/20 hover:bg-white/8 hover:text-white'
-                                        }`}
-                                        title={series.label}
-                                      >
-                                        <div className="truncate text-[11px] font-semibold">{series.label || 'Unnamed Series'}</div>
-                                        <div className="mt-1 flex items-center justify-between gap-2 text-[9px] uppercase tracking-[0.12em] text-slate-500">
-                                          <span>{series.modality || 'OT'}</span>
-                                          <span>{series.files.length} files</span>
-                                        </div>
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              </section>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                      <StudiesWorkspacePanel
+                        studies={originalFolderStudies}
+                        selectedSeriesId={selectedFolderSeriesId}
+                        onSelectSeries={(seriesId) => {
+                          setSelectedFolderSeriesId(seriesId);
+                          setViewMode('original');
+                          setViewerMode('grid');
+                        }}
+                      />
                     )}
                   </div>
-                  <div className="rounded-[20px] border border-white/8 bg-black/15 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-                    {workspaceSection === 'studies' ? 'Study Dock' : 'Capture Dock'}
-                  </div>
+                  {workspaceSection === 'captures' && (
+                    <div className="rounded-[20px] border border-white/8 bg-black/15 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="mt-4 flex flex-1 flex-col items-center gap-2">
@@ -2233,108 +2334,6 @@ export function ChartPage(props?: ChartPageProps) {
                   ))}
                 </div>
               )}
-            </div>
-          </aside>
-
-          {/* Left Toolbar: 2-column vertical layout */}
-          <aside className="w-36 min-w-36 flex-shrink-0 border-r border-gray-800 flex flex-col py-4 px-3 gap-3 z-50" style={{ backgroundColor: '#0A0B22' }}>
-            <div className="space-y-2">
-              <ToolRow>
-                <ToolBtn active={activeTool === 'pointer'} onClick={() => handleToolChange('pointer')} icon={MousePointer} title="Select Tool" />
-                <ToolBtn active={activeTool === 'pan'} onClick={() => handleToolChange('pan')} icon={Hand} title="Pan" />
-              </ToolRow>
-              <ToolRow>
-                <ToolBtn active={activeTool === 'wlww'} onClick={() => handleToolChange('wlww')} icon={WindowLevelIcon} title="Window / Level" />
-                <ToolBtn active={false} onClick={() => setRotation(r => r + 90)} icon={RotateCw} title="Rotate 90" />
-              </ToolRow>
-              <ToolRow>
-                <ToolBtn active={inverted} onClick={() => setInverted(v => !v)} icon={InvertIcon} title="Invert" />
-                <ToolBtn active={false} onClick={() => setFlipped(f => !f)} icon={FlipHorizontal} title="Flip Horizontal" />
-              </ToolRow>
-
-              {viewerMode === 'grid' && (
-                <ToolRow>
-                  <ToolBtn active={activeTool === 'rotate'} onClick={() => handleToolChange('rotate')} icon={Rotate3d} title="3D Rotate" />
-                  <ToolBtn active={activeTool === 'scroll'} onClick={() => handleToolChange('scroll')} icon={ChevronsUpDown} title="Slice Scroll" />
-                </ToolRow>
-              )}
-            </div>
-
-            <div className="h-px w-full bg-dashed bg-gray-700 opacity-50" />
-
-            <div className="space-y-2">
-              <ToolRow>
-                <ToolBtn active={activeTool === 'magnifier'} disabled={magnifierDisabled} onClick={() => handleToolChange('magnifier')} icon={Search} title={magnifierDisabled ? 'Magnifier disabled in Grid/MPR view' : 'Magnifier'} />
-                <ToolBtn active={activeTool === 'measure' || activeTool === 'length'} onClick={(e: any) => openMenu(e, 'measure')} icon={Ruler} title="Measure" />
-              </ToolRow>
-              <ToolRow>
-                <ToolBtn active={activeTool === 'annotate' || activeTool === 'arrow'} onClick={(e: any) => openMenu(e, 'annotate')} icon={PenLine} title="Annotate" />
-                <ToolBtn active={activeTool === 'erase'} onClick={() => handleToolChange('erase')} icon={Eraser} title="Eraser" />
-              </ToolRow>
-              <ToolRow>
-                <ToolBtn active={activeTool === 'capture-area'} disabled={areaCaptureDisabled} onClick={() => {
-                  if (activeTool === 'capture-area') handleToolChange('pointer');
-                  else handleToolChange('capture-area');
-                }} icon={Crop} title={areaCaptureDisabled ? 'Area Capture disabled in CT/DICOM view' : 'Area Capture'} />
-                <ToolBtn active={false} onClick={() => { void handleCapture(); }} icon={Camera} title="Full Capture" />
-              </ToolRow>
-              <ToolRow>
-                <ToolBtn active={false} onClick={() => { if (window.confirm('Clear all?')) clearAllAnnotations(); }} icon={Trash2} title="Clear All" />
-                <button onClick={resetView} className="w-full min-h-[44px] p-2 bg-gray-800/50 rounded-lg hover:bg-gray-700 text-gray-400 transition-colors group flex items-center justify-center" title="Reset All Views">
-                  <RotateCcw className="w-5 h-5 group-hover:-rotate-180 transition-transform duration-500" />
-                </button>
-              </ToolRow>
-            </div>
-
-            {shouldUseCornerstone && (
-              <div className="pt-3 border-t border-gray-800 space-y-2">
-                <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider text-center">Viewer</p>
-                <ToolRow>
-                  <ToolBtn active={viewerMode === 'single'} onClick={() => setViewerMode('single')} icon={Monitor} title="Single View" />
-                  <ToolBtn active={viewerMode === 'grid'} onClick={(e: any) => openMenu(e, 'grid')} icon={Grid} title="Grid/MPR Layout" />
-                </ToolRow>
-              </div>
-            )}
-
-            <div className="mt-auto space-y-2 pt-3 border-t border-gray-800">
-              <ToolRow>
-                <button onClick={() => handleZoom(0.1)} className="w-full min-h-[44px] p-2 bg-gray-800/50 rounded-lg hover:bg-gray-700 text-gray-400 transition-colors flex items-center justify-center" title="Zoom In">
-                  <ZoomIn className="w-5 h-5" />
-                </button>
-                <button onClick={() => handleZoom(-0.1)} className="w-full min-h-[44px] p-2 bg-gray-800/50 rounded-lg hover:bg-gray-700 text-gray-400 transition-colors flex items-center justify-center" title="Zoom Out">
-                  <ZoomOut className="w-5 h-5" />
-                </button>
-              </ToolRow>
-
-              <div className="pt-2 border-t border-gray-800/80 space-y-2">
-                <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider text-center">Overlay</p>
-                <ToolRow>
-                  <button
-                    onClick={() => setViewMode(viewMode === 'overlay' ? 'original' : 'overlay')}
-                    className={`w-full min-h-[44px] p-2 rounded-lg transition-all duration-200 flex items-center justify-center ${
-                      viewMode === 'overlay'
-                        ? 'bg-indigo-600 text-white shadow-[0_0_15px_rgba(79,70,229,0.4)] ring-1 ring-indigo-400'
-                        : viewMode === 'original'
-                          ? 'bg-slate-200 text-slate-950 shadow-[0_0_15px_rgba(226,232,240,0.28)] ring-1 ring-slate-200/70'
-                          : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
-                    }`}
-                    title={viewMode === 'overlay' ? 'Switch to Original Source' : 'Switch to AI Analysis'}
-                  >
-                    {viewMode === 'overlay' ? <Layers className="w-5 h-5" /> : <ImageIcon className="w-5 h-5" />}
-                  </button>
-                  <button
-                    onClick={() => setViewMode('heatmap')}
-                    className={`w-full min-h-[44px] p-2 rounded-lg transition-all duration-200 flex items-center justify-center ${
-                      viewMode === 'heatmap'
-                        ? 'bg-orange-500 text-slate-950 shadow-[0_0_18px_rgba(249,115,22,0.32)] ring-1 ring-orange-300'
-                        : 'bg-gray-800/50 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
-                    }`}
-                    title="Risk Overlay"
-                  >
-                    <Activity className="w-5 h-5" />
-                  </button>
-                </ToolRow>
-              </div>
             </div>
           </aside>
 
@@ -2406,7 +2405,7 @@ export function ChartPage(props?: ChartPageProps) {
                       {/* Magnifier debug panel kept for local troubleshooting; hidden in normal UI. */}
 
                     <div
-                      className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : activeTool === 'magnifier' ? 'cursor-zoom-in' : 'cursor-grab active:cursor-grabbing'}`}
+                      className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : activeTool === 'magnifier' || activeTool === 'zoom' ? 'cursor-zoom-in' : 'cursor-grab active:cursor-grabbing'}`}
                       style={{ minHeight: `${shouldUseCornerstone ? containerHeight : viewerHeight}px`, height: `${shouldUseCornerstone ? containerHeight : viewerHeight}px` }}
                       ref={viewerRef}
                       onMouseDown={handleMouseDown}
@@ -2610,7 +2609,17 @@ export function ChartPage(props?: ChartPageProps) {
                     </div>
 
                     <section className="rounded-2xl border px-6 py-5 shadow-sm" style={{ backgroundColor: '#090B20', borderColor: 'rgba(255,255,255,0.10)' }}>
-                      <h3 className="mb-5 text-[28px] font-bold tracking-[-0.03em] text-white">Dental Chart</h3>
+                      <div className="mb-5 flex items-start justify-between gap-4">
+                        <h3 className="text-[28px] font-bold tracking-[-0.03em] text-white">Dental Chart</h3>
+                        <button
+                          onClick={() => setNumberingSystem(prev => prev === 'fdi' ? 'univ' : 'fdi')}
+                          className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm transition-all"
+                          style={{ backgroundColor: '#10132F', borderColor: '#2A3166', color: '#E5E7EB' }}
+                        >
+                          <RotateCw size={12} className="text-[#2563EB]" />
+                          Notation: <span className="text-[#2563EB] whitespace-nowrap">{numberingSystem === 'fdi' ? 'FDI (11-48)' : 'Univ (1-32)'}</span>
+                        </button>
+                      </div>
                       <div className="flex flex-col items-center">
                         <BottomTeethChart
                           onToothClick={(id) => setSelectedTooth(id)}
@@ -2620,17 +2629,8 @@ export function ChartPage(props?: ChartPageProps) {
                           extraction={extractionCandidates}
                           implantSites={implantSiteCandidates}
                           numberingSystem={numberingSystem}
+                          tooltipData={odontogramTooltipData}
                         />
-                        <div className="mt-5 flex justify-center">
-                          <button
-                            onClick={() => setNumberingSystem(prev => prev === 'fdi' ? 'univ' : 'fdi')}
-                            className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm transition-all"
-                            style={{ backgroundColor: '#10132F', borderColor: '#2A3166', color: '#E5E7EB' }}
-                          >
-                            <RotateCw size={12} className="text-[#2563EB]" />
-                            Notation: <span className="text-[#2563EB] whitespace-nowrap">{numberingSystem === 'fdi' ? 'FDI (11-48)' : 'Univ (1-32)'}</span>
-                          </button>
-                        </div>
                       </div>
                     </section>
                   </div>
@@ -2639,8 +2639,7 @@ export function ChartPage(props?: ChartPageProps) {
             </div>
           </div>
 
-          {/* Right Panel (Drill-down details) */}
-
+          {/* Right Panel (Drill-down details)
           {selectedTooth && (
             <div className="absolute top-0 right-0 h-full z-50 shadow-xl border-l border-gray-100">
               <RightPanel
@@ -2652,6 +2651,7 @@ export function ChartPage(props?: ChartPageProps) {
               />
             </div>
           )}
+          */}
 
           {/* Floating Context Menu */}
           {contextMenu.show && createPortal(
@@ -2807,19 +2807,26 @@ export function ChartPage(props?: ChartPageProps) {
   );
 }
 
-function ToolBtn({ active, onClick, icon: Icon, title, disabled = false }: any) {
+function getToolbarButtonClass({ active = false, disabled = false, compact = false }: { active?: boolean; disabled?: boolean; compact?: boolean }) {
+  const sizeClass = compact ? 'h-9 w-9 rounded-xl' : 'w-full min-h-[44px] rounded-lg p-2';
+  if (disabled) {
+    return `${sizeClass} flex items-center justify-center border border-white/8 bg-white/5 text-gray-600 opacity-40 cursor-not-allowed transition-all`;
+  }
+  if (active) {
+    return `${sizeClass} flex items-center justify-center border border-white/40 bg-[#0b1120] text-white ring-1 ring-white/25 shadow-[0_12px_28px_rgba(15,23,42,0.32)] transition-all`;
+  }
+  return `${sizeClass} flex items-center justify-center border border-slate-700 bg-[#0b1120] text-gray-600 transition-all hover:border-slate-500 hover:bg-[#111827] hover:text-gray-400`;
+}
+
+function ToolBtn({ active, onClick, icon: Icon, title, disabled = false, compact = false }: any) {
   return (
     <button
+      type="button"
       onClick={disabled ? undefined : onClick}
       title={title}
       disabled={disabled}
-      className={`w-full min-h-[44px] p-2 rounded-lg transition-all flex items-center justify-center ${
-        disabled
-          ? 'text-gray-600 bg-white/5 cursor-not-allowed opacity-45'
-          : active
-            ? 'bg-indigo-600 text-white shadow-lg'
-            : 'text-gray-400 hover:text-white hover:bg-white/10'
-      }`}
+      aria-pressed={active}
+      className={getToolbarButtonClass({ active, disabled, compact })}
     >
       <Icon size={20} />
     </button>
