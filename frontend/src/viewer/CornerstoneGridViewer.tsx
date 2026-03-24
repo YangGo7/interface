@@ -9,7 +9,7 @@ import {
     Bug, Hand, RotateCcw, Ruler, Square, LayoutGrid,
     Rotate3d, Eraser, MousePointer2, Sliders, Trash2
 } from 'lucide-react';
-import { initCornerstone, registerNativeDicomFile, registerLocalDicomFile } from './cornerstone/init';
+import { initCornerstone, registerNativeDicomFile, registerNativeDicomFileWithMetadata, registerLocalDicomFile } from './cornerstone/init';
 import { registerMultiframeDicomFile, generateMultiframeImageIds } from './cornerstone/multiframeLoader';
 import { addAndGroupTools, createOrGetToolGroup, createOrGet3DToolGroup, setActiveTool, clearAllAnnotations, initToolEventListeners } from './cornerstone/tools';
 import { ViewerSource } from './CornerstoneViewer';
@@ -106,6 +106,7 @@ export function CornerstoneGridViewer({
     const [activeTool, setActiveToolState] = useState<ToolMode>('pan');
     const [debugEnabled, setDebugEnabled] = useState(false);
     const [currentImageId, setCurrentImageId] = useState('');
+    const [debugTrace, setDebugTrace] = useState<string[]>([]);
     const magnifierCanvasRefs = useRef<Record<string, HTMLCanvasElement | null>>({});
     const [magnifier, setMagnifier] = useState<{ visible: boolean; viewportId: string | null; x: number; y: number }>({
         visible: false,
@@ -190,6 +191,13 @@ export function CornerstoneGridViewer({
         PRESETS_3D.find((preset) => preset.value === presetValue) || PRESETS_3D[0];
 
     const activeSource = sources[0];
+    const shouldShowDiagnostics = debugEnabled || activeSource?.scheme === 'dicomfolder';
+
+    const pushDebugTrace = (message: string) => {
+        const line = `[${new Date().toLocaleTimeString('en-US', { hour12: false })}] ${message}`;
+        console.log('[CornerstoneGridViewer]', line);
+        setDebugTrace((prev) => [...prev.slice(-11), line]);
+    };
 
     const getViewportCanvas = (viewportId: string, fallbackRoot?: ParentNode | null) => {
         const viewport = renderingEngineRef.current?.getViewport(viewportId) as any;
@@ -284,9 +292,10 @@ export function CornerstoneGridViewer({
 
     useEffect(() => {
         if (!isInit || !activeSource || viewportsConfig.length === 0) return;
+        setDebugTrace([]);
 
         const scheme = activeSource.scheme || 'web';
-        const imageId = scheme === 'dicomfile' && activeSource.file
+        let imageId = scheme === 'dicomfile' && activeSource.file
             ? (registerNativeDicomFile(activeSource.file))
             : scheme === 'dicomlocal' && activeSource.file
                 ? (registerLocalDicomFile(activeSource.id, activeSource.file))
@@ -294,6 +303,7 @@ export function CornerstoneGridViewer({
                     ? ''
                     : scheme + ':' + activeSource.url;
         setCurrentImageId(imageId);
+        pushDebugTrace(`source=${activeSource.label} scheme=${scheme} layout=${layout.rows}x${layout.cols}`);
 
         const renderingEngineId = renderingEngineIdRef.current;
         const volumeId = 'streaming-volume:' + volumeIdRef.current;
@@ -357,37 +367,62 @@ export function CornerstoneGridViewer({
         const loadVolume = async () => {
             setLoadState('loading');
             setStatusMessage('Loading ' + (isVolume ? 'Volume' : 'Stack') + '...');
+            pushDebugTrace(`begin load isVolume=${isVolume}`);
             try {
                 if (isVolume) {
                     let allImageIds: string[] = [];
                     if (activeSource.scheme === 'dicomfolder' && activeSource.files?.length) {
-                        allImageIds = activeSource.files.map((file) => registerNativeDicomFile(file));
+                        pushDebugTrace(`folder series files=${activeSource.files.length}`);
+                        allImageIds = await Promise.all(
+                            activeSource.files.map((file) => registerNativeDicomFileWithMetadata(file))
+                        );
+                        imageId = allImageIds[0] || imageId;
+                        pushDebugTrace(`registered folder imageIds=${allImageIds.length}`);
+                        if (allImageIds[0]) {
+                            pushDebugTrace(`first imageId=${allImageIds[0]}`);
+                        }
                     } else if (activeSource.file) {
                         const reg = await registerMultiframeDicomFile(activeSource.file);
                         if (isCancelled) return;
+                        pushDebugTrace(`multiframe registered frames=${reg.numberOfFrames}`);
                         if (reg.numberOfFrames > 1) { allImageIds = generateMultiframeImageIds(reg); }
                         else { await cornerstone.imageLoader.loadAndCacheImage(imageId); if (isCancelled) return; allImageIds = [imageId]; }
                     } else { await cornerstone.imageLoader.loadAndCacheImage(imageId); if (isCancelled) return; allImageIds = [imageId]; }
                     if (allImageIds.length > 0) {
                         setCurrentImageId(allImageIds[0]);
                     }
+                    if (!allImageIds.length) {
+                        throw new Error('No imageIds were generated for this volume source.');
+                    }
+                    try {
+                        await cornerstone.imageLoader.loadAndCacheImage(allImageIds[0]);
+                        pushDebugTrace('first imageId cache load ok');
+                    } catch (preloadError: any) {
+                        pushDebugTrace(`first imageId cache load failed: ${preloadError?.message || preloadError}`);
+                        throw preloadError;
+                    }
                     const volume = await cornerstone.volumeLoader.createAndCacheVolume(volumeId, { imageIds: allImageIds });
+                    pushDebugTrace(`volume object created imageIds=${allImageIds.length}`);
                     if (isCancelled) return;
                     await volume.load();
+                    pushDebugTrace('volume.load complete');
                     if (isCancelled) return;
                     await cornerstone.setVolumesForViewports(
                         renderingEngine,
                         [{ volumeId }],
                         viewportsConfig.filter((v) => v.orientation !== 'empty').map(v => v.id)
                     );
+                    pushDebugTrace('setVolumesForViewports complete');
                 } else {
                     for (const config of viewportsConfig.filter((v) => v.orientation !== 'empty')) {
                         const vp = renderingEngine.getViewport(config.id) as cornerstone.Types.IStackViewport;
                         await vp.setStack([imageId]);
                     }
+                    pushDebugTrace('stack viewport set complete');
                 }
                 if (isCancelled) return;
                 applyViewportDisplayState(renderingEngine, imageId);
+                pushDebugTrace(`display state applied imageId=${imageId || 'n/a'}`);
                 // Post-load: Restore presets and reset cameras
                 viewportsConfig.forEach(config => {
                     if (config.orientation === 'empty') return;
@@ -405,20 +440,24 @@ export function CornerstoneGridViewer({
                     vp.resetCamera();
                     vp.render();
                 });
+                pushDebugTrace('viewport reset/render complete');
 
                 // Final global render pass after a short delay for stability
                 setTimeout(() => {
                     if (!isCancelled) {
                         renderingEngine.render();
+                        pushDebugTrace('renderingEngine.render complete');
                     }
                 }, 100);
 
                 setLoadState('ready');
                 setStatusMessage('Ready');
+                pushDebugTrace('load state ready');
             } catch (err) {
                 if (isCancelled) return;
                 setLoadState('error');
                 setStatusMessage(err instanceof Error ? err.message : 'Rendering failed');
+                pushDebugTrace(`load error: ${err instanceof Error ? err.message : String(err)}`);
             }
         };
 
@@ -705,6 +744,26 @@ export function CornerstoneGridViewer({
 
             <div ref={containerRef} style={{ position: 'relative', backgroundColor: '#000', width: '100%', height: maxHeight + 'px', overflow: 'hidden' }} onContextMenu={(e) => e.preventDefault()}>
                 {!isInit && <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', backgroundColor: '#111827', zIndex: 50 }}>Initializing...</div>}
+                {shouldShowDiagnostics && (
+                    <div className="pointer-events-none absolute left-3 top-3 z-[60] max-w-[min(440px,calc(100%-1.5rem))] rounded-xl border border-emerald-400/25 bg-black/70 px-3 py-2 text-[10px] leading-4 text-emerald-300 shadow-[0_10px_30px_rgba(0,0,0,0.35)] backdrop-blur">
+                        <div className="font-semibold text-emerald-200">CS3D Diagnostics</div>
+                        <div>state={loadState}</div>
+                        <div>source={activeSource.label}</div>
+                        <div>scheme={activeSource.scheme || 'web'}</div>
+                        <div>files={activeSource.files?.length || (activeSource.file ? 1 : 0)}</div>
+                        <div>imageId={currentImageId || '-'}</div>
+                        <div>status={statusMessage}</div>
+                        {debugTrace.length > 0 && (
+                            <div className="mt-2 border-t border-emerald-400/20 pt-2">
+                                {debugTrace.map((line, index) => (
+                                    <div key={`${line}-${index}`} className="break-all text-emerald-300/90">
+                                        {line}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
                 <div style={{ position: 'absolute', inset: 0, display: 'grid', gap: '2px', backgroundColor: '#4b5563', gridTemplateColumns: 'repeat(' + layout.cols + ', 1fr)', gridTemplateRows: 'repeat(' + layout.rows + ', 1fr)' }}>
                     {viewportsConfig.map((config, idx) => (
                         (() => {

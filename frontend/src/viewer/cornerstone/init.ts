@@ -12,6 +12,29 @@ export function registerNativeDicomFile(file: File) {
   return cornerstoneDICOMImageLoader.wadouri.fileManager.add(file);
 }
 
+type ParsedDicomMetadata = {
+  modality: string;
+  seriesInstanceUID: string;
+  frameOfReferenceUID: string;
+  rows: number;
+  columns: number;
+  samplesPerPixel: number;
+  photometricInterpretation: string;
+  bitsAllocated: number;
+  bitsStored: number;
+  highBit: number;
+  pixelRepresentation: number;
+  windowCenter: number;
+  windowWidth: number;
+  pixelSpacing: [number, number];
+  rowPixelSpacing: number;
+  columnPixelSpacing: number;
+  imageOrientationPatient: number[];
+  imagePositionPatient: number[];
+  sliceThickness: number;
+  spacingBetweenSlices: number;
+};
+
 export function registerLocalDicomFile(key: string, file: File) {
   const imageId = `dicomlocal:${key}`;
   localDicomFiles.set(imageId, file);
@@ -40,6 +63,63 @@ const parseDicomNumberList = (value: string | undefined, fallback: number[]) => 
 
   return parsed.length > 0 ? parsed : fallback;
 };
+
+const parseDicomMetadataFromDataSet = (dataSet: dicomParser.DataSet): ParsedDicomMetadata => {
+  const rows = dataSet.uint16('x00280010') || 0;
+  const columns = dataSet.uint16('x00280011') || 0;
+  const samplesPerPixel = dataSet.uint16('x00280002') || 1;
+  const photometricInterpretation = dataSet.string('x00280004') || 'MONOCHROME2';
+  const bitsAllocated = dataSet.uint16('x00280100') || 16;
+  const bitsStored = dataSet.uint16('x00280101') || bitsAllocated;
+  const highBit = dataSet.uint16('x00280102') || bitsStored - 1;
+  const pixelRepresentation = dataSet.uint16('x00280103') || 0;
+  const modality = dataSet.string('x00080060') || 'OT';
+  const seriesInstanceUID = dataSet.string('x0020000e') || '';
+  const frameOfReferenceUID = dataSet.string('x00200052') || '';
+  const pixelSpacing = parseDicomNumberList(dataSet.string('x00280030'), [1, 1]);
+  const rowPixelSpacing = pixelSpacing[0] || 1;
+  const columnPixelSpacing = pixelSpacing[1] || 1;
+  const imageOrientationPatient = parseDicomNumberList(dataSet.string('x00200037'), [1, 0, 0, 0, 1, 0]);
+  const imagePositionPatient = parseDicomNumberList(dataSet.string('x00200032'), [0, 0, 0]);
+  const sliceThickness = parseDicomNumber(dataSet.string('x00180050'), 1);
+  const spacingBetweenSlices = parseDicomNumber(dataSet.string('x00180088'), sliceThickness);
+  const derivedWindowWidth = Math.max(1, (dataSet.uint16('x00280107') || 4095) - (dataSet.uint16('x00280106') || 0));
+  const derivedWindowCenter = (dataSet.uint16('x00280106') || 0) + derivedWindowWidth / 2;
+  const windowCenter = parseDicomNumber(dataSet.string('x00281050'), derivedWindowCenter);
+  const windowWidth = parseDicomNumber(dataSet.string('x00281051'), derivedWindowWidth);
+
+  return {
+    modality,
+    seriesInstanceUID,
+    frameOfReferenceUID,
+    rows,
+    columns,
+    samplesPerPixel,
+    photometricInterpretation,
+    bitsAllocated,
+    bitsStored,
+    highBit,
+    pixelRepresentation,
+    windowCenter,
+    windowWidth,
+    pixelSpacing: [rowPixelSpacing, columnPixelSpacing],
+    rowPixelSpacing,
+    columnPixelSpacing,
+    imageOrientationPatient,
+    imagePositionPatient,
+    sliceThickness,
+    spacingBetweenSlices,
+  };
+};
+
+export async function registerNativeDicomFileWithMetadata(file: File) {
+  const imageId = registerNativeDicomFile(file);
+  if (!localDicomMetadata.has(imageId)) {
+    const dataSet = dicomParser.parseDicom(new Uint8Array(await file.arrayBuffer()), { untilTag: 'x7fe00010' });
+    localDicomMetadata.set(imageId, parseDicomMetadataFromDataSet(dataSet));
+  }
+  return imageId;
+}
 
 const getMinMax = (scalarData: ArrayLike<number>) => {
   let minPixelValue = Number.POSITIVE_INFINITY;
@@ -173,16 +253,19 @@ const createLocalDicomImage = async (imageId: string): Promise<cornerstone.Types
     throw new Error(`Unsupported local DICOM transfer syntax: ${transferSyntaxUid}`);
   }
 
-  const rows = dataSet.uint16('x00280010');
-  const columns = dataSet.uint16('x00280011');
-  const samplesPerPixel = dataSet.uint16('x00280002') || 1;
-  const photometricInterpretation = dataSet.string('x00280004') || 'MONOCHROME2';
-  const bitsAllocated = dataSet.uint16('x00280100') || 16;
-  const bitsStored = dataSet.uint16('x00280101') || bitsAllocated;
-  const highBit = dataSet.uint16('x00280102') || bitsStored - 1;
-  const pixelRepresentation = dataSet.uint16('x00280103') || 0;
-  const modality = dataSet.string('x00080060') || 'OT';
-  const pixelSpacing = parseDicomNumberList(dataSet.string('x00280030'), [1, 1]);
+  const {
+    rows,
+    columns,
+    samplesPerPixel,
+    photometricInterpretation,
+    bitsAllocated,
+    bitsStored,
+    highBit,
+    pixelRepresentation,
+    modality,
+    rowPixelSpacing,
+    columnPixelSpacing,
+  } = parseDicomMetadataFromDataSet(dataSet);
   const pixelElement = dataSet.elements.x7fe00010;
 
   if (!rows || !columns || !pixelElement) {
@@ -226,8 +309,6 @@ const createLocalDicomImage = async (imageId: string): Promise<cornerstone.Types
   const derivedWindowCenter = minPixelValue + derivedWindowWidth / 2;
   const windowCenter = parseDicomNumber(dataSet.string('x00281050'), derivedWindowCenter);
   const windowWidth = parseDicomNumber(dataSet.string('x00281051'), derivedWindowWidth);
-  const rowPixelSpacing = pixelSpacing[0] || 1;
-  const columnPixelSpacing = pixelSpacing[1] || 1;
 
   localDicomMetadata.set(imageId, {
     modality,
@@ -370,15 +451,23 @@ export function initCornerstone(): Promise<void> {
         }
 
         if (type === 'imagePlaneModule') {
+          const imageOrientationPatient = localDicom.imageOrientationPatient?.length === 6
+            ? localDicom.imageOrientationPatient
+            : [1, 0, 0, 0, 1, 0];
           return {
-            columnCosines: [1, 0, 0],
-            rowCosines: [0, 1, 0],
-            imageOrientationPatient: [1, 0, 0, 0, 1, 0],
-            imagePositionPatient: [0, 0, 0],
+            rows: localDicom.rows,
+            columns: localDicom.columns,
+            rowCosines: imageOrientationPatient.slice(0, 3),
+            columnCosines: imageOrientationPatient.slice(3, 6),
+            imageOrientationPatient,
+            imagePositionPatient: localDicom.imagePositionPatient,
+            frameOfReferenceUID: localDicom.frameOfReferenceUID,
+            pixelSpacing: localDicom.pixelSpacing,
             columnPixelSpacing: localDicom.columnPixelSpacing,
             rowPixelSpacing: localDicom.rowPixelSpacing,
-            sliceThickness: 1,
-            sliceLocation: 0,
+            sliceThickness: localDicom.sliceThickness,
+            spacingBetweenSlices: localDicom.spacingBetweenSlices,
+            sliceLocation: localDicom.imagePositionPatient[2] || 0,
           };
         }
 
@@ -392,6 +481,7 @@ export function initCornerstone(): Promise<void> {
         if (type === 'generalSeriesModule') {
           return {
             modality: localDicom.modality,
+            seriesInstanceUID: localDicom.seriesInstanceUID,
           };
         }
 
