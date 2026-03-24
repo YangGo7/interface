@@ -16,6 +16,7 @@ import { TopHeader } from '../components/TopHeader';
 import { setActiveTool as setCornerstoneActiveTool, clearAllAnnotations } from '../viewer/cornerstone/tools';
 import { createWebReportFromChart } from '../lib/webReportApi';
 import { buildWebReportKeywords, countWebReportFindingTeeth } from '../lib/webReportKeywords';
+import type { FolderStudy } from '../features/upload/dicomFolderStudies';
 
 type ChartPageProps = {
   result?: any;
@@ -37,8 +38,15 @@ const mockFindings = [
 export function ChartPage(props?: ChartPageProps) {
   const location = useLocation();
   const locationState = (location.state as any) || {};
+  const originalFolderStudies = (locationState.originalFolderStudies as FolderStudy[] | undefined) || [];
+  const originalFolderMode = Boolean(locationState.originalFolderMode && originalFolderStudies.length > 0);
+  const initialFolderSeriesId =
+    locationState.folderSelectedSeriesId ||
+    originalFolderStudies.flatMap((study) => study.series)[0]?.id ||
+    null;
   const initialResult = props?.result ?? locationState?.result;
   const inferVolume = (res: any) => Boolean(
+    originalFolderMode ||
     res?.is_volume ||
     ((locationState.originalIsDicom || /\.dcm(?:$|[?#])/i.test(String(res?.image_url || ''))) && res?.preview_url)
   );
@@ -52,6 +60,23 @@ export function ChartPage(props?: ChartPageProps) {
   const [reportStartState, setReportStartState] = useState<'idle' | 'creating'>('idle');
   const [reportError, setReportError] = useState<string | null>(null);
   const [captureNotice, setCaptureNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [workspaceOpen, setWorkspaceOpen] = useState(true);
+  const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'captures'>('studies');
+  const [selectedFolderSeriesId, setSelectedFolderSeriesId] = useState<string | null>(initialFolderSeriesId);
+  const [captureGallery, setCaptureGallery] = useState<Array<{
+    id: string;
+    label: string;
+    dataUrl: string;
+    size: string;
+    createdAt: string;
+  }>>([]);
+  const [draggingCaptureId, setDraggingCaptureId] = useState<string | null>(null);
+  const [assignedCaptureSlots, setAssignedCaptureSlots] = useState<Record<string, {
+    id: string;
+    label: string;
+    dataUrl: string;
+    createdAt: string;
+  }>>({});
 
   const [selectedTooth, setSelectedTooth] = useState<number | undefined>(undefined);
   const [viewMode, setViewMode] = useState<'overlay' | 'original' | 'heatmap'>(initialIsVolume ? 'original' : 'overlay');
@@ -172,6 +197,23 @@ export function ChartPage(props?: ChartPageProps) {
   const hasData = !!result;
   const reportKeywords = buildWebReportKeywords(result);
   const reportFindingCount = countWebReportFindingTeeth(result);
+  const selectedFolderSeries = originalFolderStudies
+    .flatMap((study) => study.series)
+    .find((series) => series.id === selectedFolderSeriesId) || null;
+  const activeCaseName = (() => {
+    if (selectedFolderSeries?.label) {
+      return selectedFolderSeries.label;
+    }
+    const rawSource =
+      String(result?.image_url || locationState?.previewUrl || locationState?.imageUrl || locationState?.jobId || 'Current Analysis');
+    try {
+      const normalized = rawSource.split('?')[0].replace(/\\/g, '/');
+      const fileName = normalized.split('/').filter(Boolean).pop();
+      return decodeURIComponent(fileName || rawSource);
+    } catch {
+      return rawSource;
+    }
+  })();
 
   useEffect(() => {
     if (!inferVolume(result)) {
@@ -244,6 +286,66 @@ export function ChartPage(props?: ChartPageProps) {
     }, 2200);
   };
 
+  const rememberCapturePreview = (sourceCanvas: HTMLCanvasElement, label: string) => {
+    try {
+      const previewCanvas = document.createElement('canvas');
+      const maxWidth = 240;
+      const maxHeight = 148;
+      const scaleFactor = Math.min(maxWidth / sourceCanvas.width, maxHeight / sourceCanvas.height, 1);
+      previewCanvas.width = Math.max(1, Math.round(sourceCanvas.width * scaleFactor));
+      previewCanvas.height = Math.max(1, Math.round(sourceCanvas.height * scaleFactor));
+      const previewCtx = previewCanvas.getContext('2d');
+      if (!previewCtx) return;
+      previewCtx.drawImage(sourceCanvas, 0, 0, previewCanvas.width, previewCanvas.height);
+      const preview = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        label,
+        dataUrl: previewCanvas.toDataURL('image/png'),
+        size: `${sourceCanvas.width}x${sourceCanvas.height}`,
+        createdAt: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+      };
+      setCaptureGallery((prev) => [preview, ...prev].slice(0, 12));
+    } catch (error) {
+      console.error('Failed to store capture preview', error);
+    }
+  };
+
+  const moveCapturePreview = (fromId: string, toId: string) => {
+    if (!fromId || !toId || fromId === toId) return;
+    setCaptureGallery((prev) => {
+      const fromIndex = prev.findIndex((item) => item.id === fromId);
+      const toIndex = prev.findIndex((item) => item.id === toId);
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    });
+  };
+
+  const assignCaptureToViewport = (viewportId: string, captureId: string) => {
+    const capture = captureGallery.find((item) => item.id === captureId);
+    if (!capture) return;
+    setAssignedCaptureSlots((prev) => ({
+      ...prev,
+      [viewportId]: {
+        id: capture.id,
+        label: capture.label,
+        dataUrl: capture.dataUrl,
+        createdAt: capture.createdAt,
+      },
+    }));
+  };
+
+  const clearAssignedCapture = (viewportId: string) => {
+    setAssignedCaptureSlots((prev) => {
+      if (!prev[viewportId]) return prev;
+      const next = { ...prev };
+      delete next[viewportId];
+      return next;
+    });
+  };
+
   const getPrimaryCanvas = (root: ParentNode | null | undefined) => {
     const canvases = Array.from(root?.querySelectorAll?.('canvas') || []) as HTMLCanvasElement[];
     if (canvases.length === 0) return null;
@@ -313,6 +415,7 @@ export function ChartPage(props?: ChartPageProps) {
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      rememberCapturePreview(exportCanvas, fileName);
       notifyCapture('success', `Saved ${fileName}`);
     }, 'image/png');
   };
@@ -331,6 +434,7 @@ export function ChartPage(props?: ChartPageProps) {
       }
 
       await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      rememberCapturePreview(sourceCanvas, successText);
       notifyCapture('success', successText);
       return true;
     } catch (error) {
@@ -648,6 +752,7 @@ export function ChartPage(props?: ChartPageProps) {
 
   const originalFile = locationState.originalFile as File | undefined;
   const originalIsDicom = Boolean(
+    originalFolderMode ||
     locationState.originalIsDicom ||
     (originalFile && isDicomPath(originalFile.name)) ||
     isDicomPath(result?.image_url)
@@ -672,7 +777,15 @@ export function ChartPage(props?: ChartPageProps) {
   const cornerstoneSources = shouldUseCornerstone
     ? [
       viewMode === 'original'
-        ? originalFile && originalIsDicom
+        ? originalFolderMode && selectedFolderSeries
+          ? {
+            id: `chart-original-dicom-folder-${selectedFolderSeries.id}`,
+            label: selectedFolderSeries.label,
+            url: '',
+            files: selectedFolderSeries.files,
+            scheme: 'dicomfolder' as const,
+          }
+          : originalFile && originalIsDicom
           ? {
             id: 'chart-original-dicom-local',
             label: 'Original',
@@ -1941,6 +2054,188 @@ export function ChartPage(props?: ChartPageProps) {
       )}
       {hasViewerShell && (
         <div className="flex flex-1 relative overflow-y-auto">
+          <aside
+            className={`flex-shrink-0 overflow-hidden border-r border-gray-800/80 transition-all duration-300 ${workspaceOpen ? 'w-[10vw] min-w-[96px] max-w-[160px]' : 'w-[68px] min-w-[68px]'}`}
+            style={{ backgroundColor: '#050816' }}
+          >
+            <div className="flex h-full flex-col px-3 py-4">
+              <div className={`flex items-center ${workspaceOpen ? 'justify-between' : 'justify-center'} gap-2`}>
+                {workspaceOpen && (
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-[0.32em] text-cyan-300/80">Workspace</p>
+                  </div>
+                )}
+                <button
+                  onClick={() => setWorkspaceOpen((prev) => !prev)}
+                  className="flex h-10 w-10 items-center justify-center rounded-2xl border border-cyan-300/20 bg-cyan-400/10 text-cyan-100 transition hover:border-cyan-300/40 hover:bg-cyan-400/20"
+                  title={workspaceOpen ? 'Collapse workspace' : 'Expand workspace'}
+                >
+                  <span className="text-lg font-bold leading-none">{workspaceOpen ? '‹' : '›'}</span>
+                </button>
+              </div>
+
+              {workspaceOpen ? (
+                <div className="mt-4 flex min-h-0 flex-1 flex-col gap-3">
+                  <div className="space-y-2 rounded-[24px] border border-white/8 bg-black/35 p-2">
+                    {[
+                      { id: 'studies' as const, label: 'Studies', icon: ClipboardList },
+                      { id: 'captures' as const, label: 'Captures', icon: Camera },
+                    ].map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => setWorkspaceSection(item.id)}
+                        className={`flex w-full items-center gap-2 rounded-2xl px-3 py-3 text-left text-sm font-semibold transition ${
+                          workspaceSection === item.id
+                            ? 'bg-cyan-400 text-slate-950 shadow-[0_12px_24px_rgba(34,211,238,0.18)]'
+                            : 'bg-transparent text-slate-300 hover:bg-white/8 hover:text-white'
+                        }`}
+                      >
+                        <item.icon className="h-4 w-4" />
+                        <span>{item.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="min-h-0 flex-1 overflow-hidden rounded-[28px] border border-dashed border-white/8 bg-[linear-gradient(180deg,rgba(15,23,42,0.55),rgba(8,12,28,0.82))]">
+                    {workspaceSection === 'captures' ? (
+                      <div className="flex h-full flex-col p-2">
+                        {captureGallery.length === 0 ? (
+                          <div className="flex h-full items-center justify-center px-2 text-center text-[11px] leading-5 text-slate-500">
+                  
+                          </div>
+                        ) : (
+                          <div
+                            className="overflow-y-auto pr-1"
+                            style={{
+                              display: 'grid',
+                              gridTemplateColumns: 'repeat(auto-fit, minmax(42px, 1fr))',
+                              gap: 6,
+                            }}
+                          >
+                            {captureGallery.map((capture) => (
+                              <button
+                                key={capture.id}
+                                type="button"
+                                draggable
+                                onClick={() => {}}
+                                onDragStart={(event) => {
+                                  setDraggingCaptureId(capture.id);
+                                  event.dataTransfer.effectAllowed = 'copyMove';
+                                  event.dataTransfer.setData('application/x-capture-id', capture.id);
+                                }}
+                                onDragEnd={() => setDraggingCaptureId(null)}
+                                onDragOver={(event) => {
+                                  event.preventDefault();
+                                  if (draggingCaptureId && draggingCaptureId !== capture.id) {
+                                    event.dataTransfer.dropEffect = 'move';
+                                  }
+                                }}
+                                onDrop={(event) => {
+                                  event.preventDefault();
+                                  if (draggingCaptureId) {
+                                    moveCapturePreview(draggingCaptureId, capture.id);
+                                  }
+                                  setDraggingCaptureId(null);
+                                }}
+                                className={`flex min-w-0 flex-col items-center rounded-[12px] border p-1 text-left transition ${
+                                  draggingCaptureId === capture.id
+                                    ? 'border-cyan-300/50 bg-cyan-400/12 opacity-70'
+                                    : 'border-white/8 bg-black/20 hover:border-cyan-300/30 hover:bg-white/8'
+                                }`}
+                                title={capture.label}
+                              >
+                                <img
+                                  src={capture.dataUrl}
+                                  alt={capture.label}
+                                  className="h-[42px] w-[42px] rounded-[10px] border border-white/8 bg-black object-cover"
+                                />
+                                <div className="mt-1 text-center">
+                                  <p className="text-[9px] text-slate-400">{capture.createdAt}</p>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="flex h-full flex-col overflow-y-auto p-2">
+                        {originalFolderStudies.length === 0 ? (
+                          <div className="flex h-full items-center justify-center px-2 text-center text-[11px] leading-5 text-slate-500">
+                            No local study list is loaded.
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {originalFolderStudies.map((study) => (
+                              <section key={study.id} className="rounded-[16px] border border-white/8 bg-black/20 p-2">
+                                <div className="mb-2">
+                                  <p className="truncate text-[10px] font-black uppercase tracking-[0.14em] text-cyan-300/80">
+                                    {study.label || 'Study'}
+                                  </p>
+                                  {study.description && (
+                                    <p className="mt-1 line-clamp-2 text-[10px] text-slate-500">{study.description}</p>
+                                  )}
+                                </div>
+                                <div className="space-y-1.5">
+                                  {study.series.map((series) => {
+                                    const isActive = selectedFolderSeriesId === series.id;
+                                    return (
+                                      <button
+                                        key={series.id}
+                                        type="button"
+                                        onClick={() => {
+                                          setSelectedFolderSeriesId(series.id);
+                                          setViewMode('original');
+                                          setViewerMode('grid');
+                                        }}
+                                        className={`w-full rounded-[14px] border px-2 py-2 text-left transition ${
+                                          isActive
+                                            ? 'border-cyan-300/40 bg-cyan-400/14 text-white'
+                                            : 'border-white/8 bg-white/5 text-slate-300 hover:border-cyan-300/20 hover:bg-white/8 hover:text-white'
+                                        }`}
+                                        title={series.label}
+                                      >
+                                        <div className="truncate text-[11px] font-semibold">{series.label || 'Unnamed Series'}</div>
+                                        <div className="mt-1 flex items-center justify-between gap-2 text-[9px] uppercase tracking-[0.12em] text-slate-500">
+                                          <span>{series.modality || 'OT'}</span>
+                                          <span>{series.files.length} files</span>
+                                        </div>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </section>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="rounded-[20px] border border-white/8 bg-black/15 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                    {workspaceSection === 'studies' ? 'Study Dock' : 'Capture Dock'}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-4 flex flex-1 flex-col items-center gap-2">
+                  {[
+                    { id: 'studies' as const, icon: ClipboardList, label: 'Studies' },
+                    { id: 'captures' as const, icon: Camera, label: 'Captures' },
+                  ].map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => {
+                        setWorkspaceSection(item.id);
+                        setWorkspaceOpen(true);
+                      }}
+                      className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/8 bg-white/5 text-slate-300 transition hover:border-cyan-300/30 hover:bg-white/8 hover:text-white"
+                      title={item.label}
+                    >
+                      <item.icon className="h-4 w-4" />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </aside>
+
           {/* Left Toolbar: 2-column vertical layout */}
           <aside className="w-36 min-w-36 flex-shrink-0 border-r border-gray-800 flex flex-col py-4 px-3 gap-3 z-50" style={{ backgroundColor: '#0A0B22' }}>
             <div className="space-y-2">
@@ -2044,7 +2339,7 @@ export function ChartPage(props?: ChartPageProps) {
           </aside>
 
           {/* Center: report-style stacked layout on dark background */}
-          <div className="flex-1 overflow-visible text-gray-100" style={{ backgroundColor: '#06071A' }}>
+          <div className="min-w-0 flex-1 overflow-visible text-gray-100" style={{ backgroundColor: '#06071A' }}>
             <div className="max-w-7xl mx-auto py-6 px-4 lg:px-8 space-y-6">
               {/* Hero card mimicking report_v2 */}
               <div className="bg-[#0f0f0f] border border-white/5 rounded-3xl shadow-2xl overflow-hidden">
@@ -2166,6 +2461,9 @@ export function ChartPage(props?: ChartPageProps) {
                           contrast={contrast}
                           rotation={rotation}
                           flipped={flipped}
+                          assignedCaptureSlots={assignedCaptureSlots}
+                          onAssignCaptureToViewport={assignCaptureToViewport}
+                          onClearAssignedCapture={clearAssignedCapture}
                         />
                       ) : shouldUseCornerstone ? (
                         <div className="w-full h-full relative flex flex-col">
@@ -2184,6 +2482,9 @@ export function ChartPage(props?: ChartPageProps) {
                             contrast={contrast}
                             rotation={rotation}
                             flipped={flipped}
+                            assignedCaptureSlots={assignedCaptureSlots}
+                            onAssignCaptureToViewport={assignCaptureToViewport}
+                            onClearAssignedCapture={clearAssignedCapture}
                           />
                           {/* Test path: single CT view renders as 1x1 axial MPR instead of stack viewer. */}
                           {/* <CornerstoneViewer

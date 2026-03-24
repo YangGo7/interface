@@ -21,7 +21,8 @@ export type ViewerSource = {
     label: string;
     url: string;
     file?: File;
-    scheme?: 'web' | 'wadouri' | 'dicomlocal' | 'dicomfile';
+    files?: File[];
+    scheme?: 'web' | 'wadouri' | 'dicomlocal' | 'dicomfile' | 'dicomfolder';
 };
 
 type CornerstoneViewerProps = {

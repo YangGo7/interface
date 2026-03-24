@@ -30,6 +30,8 @@ export interface MultiframeDicomRegistration {
     rescaleIntercept: number;
     windowCenter: number;
     windowWidth: number;
+    defaultWindowCenter: number;
+    defaultWindowWidth: number;
     pixelSpacing: number[];
     imageOrientationPatient: number[];
     imagePositionPatient: number[];
@@ -37,9 +39,225 @@ export interface MultiframeDicomRegistration {
     frameOfReferenceUID: string;
     modality: string;
     seriesInstanceUID: string;
+    perFramePixelSpacing: number[][];
+    perFrameImageOrientationPatient: number[][];
+    perFrameImagePositionPatient: number[][];
+    perFrameSliceThickness: number[];
 }
 
 const registrations = new Map<string, MultiframeDicomRegistration>();
+
+const parseNum = (v: string | undefined, def: number) => {
+    if (!v) return def;
+    const n = Number(v.split('\\')[0]);
+    return Number.isFinite(n) ? n : def;
+};
+
+const parseNumList = (v: string | undefined, def: number[]) => {
+    if (!v) return def;
+    const nums = v.split('\\').map(Number).filter(Number.isFinite);
+    return nums.length > 0 ? nums : def;
+};
+
+const getSequenceItemDataSet = (dataSet: dicomParser.DataSet | undefined, sequenceTag: string, itemIndex = 0) => {
+    const sequence = dataSet?.elements?.[sequenceTag as keyof typeof dataSet.elements] as any;
+    const item = sequence?.items?.[itemIndex];
+    return item?.dataSet as dicomParser.DataSet | undefined;
+};
+
+const computeFallbackFramePosition = (
+    imageOrientationPatient: number[],
+    imagePositionPatient: number[],
+    sliceThickness: number,
+    frame: number
+) => {
+    const scanAxisNormal = [
+        imageOrientationPatient[1] * imageOrientationPatient[5] - imageOrientationPatient[2] * imageOrientationPatient[4],
+        imageOrientationPatient[2] * imageOrientationPatient[3] - imageOrientationPatient[0] * imageOrientationPatient[5],
+        imageOrientationPatient[0] * imageOrientationPatient[4] - imageOrientationPatient[1] * imageOrientationPatient[3],
+    ];
+
+    return [
+        imagePositionPatient[0] + scanAxisNormal[0] * sliceThickness * frame,
+        imagePositionPatient[1] + scanAxisNormal[1] * sliceThickness * frame,
+        imagePositionPatient[2] + scanAxisNormal[2] * sliceThickness * frame,
+    ];
+};
+
+const buildPerFrameGeometry = (
+    dataSet: dicomParser.DataSet,
+    numberOfFrames: number,
+    pixelSpacing: number[],
+    imageOrientationPatient: number[],
+    imagePositionPatient: number[],
+    sliceThickness: number
+) => {
+    const sharedFunctionalGroups = getSequenceItemDataSet(dataSet, 'x52009229');
+    const perFrameSequence = (dataSet.elements.x52009230 as any)?.items || [];
+
+    const sharedPixelMeasures = getSequenceItemDataSet(sharedFunctionalGroups, 'x00289110');
+    const sharedPlaneOrientation = getSequenceItemDataSet(sharedFunctionalGroups, 'x00209116');
+    const sharedPlanePosition = getSequenceItemDataSet(sharedFunctionalGroups, 'x00209113');
+
+    const sharedPixelSpacing = parseNumList(sharedPixelMeasures?.string('x00280030'), pixelSpacing);
+    const sharedSliceThickness = parseNum(
+        sharedPixelMeasures?.string('x00180088') || sharedPixelMeasures?.string('x00180050'),
+        sliceThickness
+    );
+    const sharedImageOrientationPatient = parseNumList(
+        sharedPlaneOrientation?.string('x00200037'),
+        imageOrientationPatient
+    );
+    const sharedImagePositionPatient = parseNumList(
+        sharedPlanePosition?.string('x00200032'),
+        imagePositionPatient
+    );
+
+    const perFramePixelSpacing: number[][] = [];
+    const perFrameImageOrientationPatient: number[][] = [];
+    const perFrameImagePositionPatient: number[][] = [];
+    const perFrameSliceThickness: number[] = [];
+
+    for (let frame = 0; frame < numberOfFrames; frame += 1) {
+        const frameDataSet = perFrameSequence[frame]?.dataSet as dicomParser.DataSet | undefined;
+        const framePixelMeasures = getSequenceItemDataSet(frameDataSet, 'x00289110');
+        const framePlaneOrientation = getSequenceItemDataSet(frameDataSet, 'x00209116');
+        const framePlanePosition = getSequenceItemDataSet(frameDataSet, 'x00209113');
+
+        const framePixelSpacing = parseNumList(
+            framePixelMeasures?.string('x00280030'),
+            sharedPixelSpacing
+        );
+        const frameSliceThickness = parseNum(
+            framePixelMeasures?.string('x00180088') || framePixelMeasures?.string('x00180050'),
+            sharedSliceThickness
+        );
+        const frameImageOrientationPatient = parseNumList(
+            framePlaneOrientation?.string('x00200037'),
+            sharedImageOrientationPatient
+        );
+        const explicitFramePosition = parseNumList(
+            framePlanePosition?.string('x00200032'),
+            []
+        );
+        const frameImagePositionPatient = explicitFramePosition.length === 3
+            ? explicitFramePosition
+            : computeFallbackFramePosition(
+                frameImageOrientationPatient,
+                sharedImagePositionPatient,
+                frameSliceThickness,
+                frame
+            );
+
+        perFramePixelSpacing.push(framePixelSpacing);
+        perFrameSliceThickness.push(frameSliceThickness);
+        perFrameImageOrientationPatient.push(frameImageOrientationPatient);
+        perFrameImagePositionPatient.push(frameImagePositionPatient);
+    }
+
+    return {
+        perFramePixelSpacing,
+        perFrameImageOrientationPatient,
+        perFrameImagePositionPatient,
+        perFrameSliceThickness,
+    };
+};
+
+const roundForLog = (value: number) => Math.round(value * 1000) / 1000;
+
+const summarizeFrameGeometryForLog = (registration: MultiframeDicomRegistration) => {
+    const sampleCount = Math.min(registration.numberOfFrames, 3);
+    const firstFrames = Array.from({ length: sampleCount }, (_, frame) => ({
+        frame,
+        ipp: (registration.perFrameImagePositionPatient[frame] || registration.imagePositionPatient).map(roundForLog),
+        iop: (registration.perFrameImageOrientationPatient[frame] || registration.imageOrientationPatient).map(roundForLog),
+        spacing: (registration.perFramePixelSpacing[frame] || registration.pixelSpacing).map(roundForLog),
+        thickness: roundForLog(registration.perFrameSliceThickness[frame] || registration.sliceThickness),
+    }));
+    const lastFrame = Math.max(0, registration.numberOfFrames - 1);
+
+    return {
+        frames: registration.numberOfFrames,
+        dicomWindowCenter: roundForLog(registration.windowCenter),
+        dicomWindowWidth: roundForLog(registration.windowWidth),
+        defaultWindowCenter: roundForLog(registration.defaultWindowCenter),
+        defaultWindowWidth: roundForLog(registration.defaultWindowWidth),
+        sharedSpacing: registration.pixelSpacing.map(roundForLog),
+        sharedThickness: roundForLog(registration.sliceThickness),
+        sharedIOP: registration.imageOrientationPatient.map(roundForLog),
+        firstFrames,
+        lastFrame: {
+            frame: lastFrame,
+            ipp: (registration.perFrameImagePositionPatient[lastFrame] || registration.imagePositionPatient).map(roundForLog),
+        },
+    };
+};
+
+const extractFrameScalarData = (
+    dataSet: dicomParser.DataSet,
+    frameOffset: number,
+    singleFrameBytes: number,
+    bitsAllocated: number,
+    pixelRepresentation: number
+) => {
+    if (bitsAllocated === 16) {
+        const rawBytes = dataSet.byteArray.buffer.slice(frameOffset, frameOffset + singleFrameBytes);
+        return pixelRepresentation === 1
+            ? new Int16Array(rawBytes)
+            : new Uint16Array(rawBytes);
+    }
+
+    if (bitsAllocated === 8) {
+        return new Uint8Array(dataSet.byteArray.buffer.slice(frameOffset, frameOffset + singleFrameBytes));
+    }
+
+    if (bitsAllocated === 32) {
+        const rawBytes = dataSet.byteArray.buffer.slice(frameOffset, frameOffset + singleFrameBytes);
+        return new Float32Array(rawBytes);
+    }
+
+    throw new Error(`Unsupported bitsAllocated: ${bitsAllocated}`);
+};
+
+const computeRobustWindowFromFrame = (
+    dataSet: dicomParser.DataSet,
+    frameOffset: number,
+    singleFrameBytes: number,
+    bitsAllocated: number,
+    pixelRepresentation: number,
+    slope: number,
+    intercept: number
+) => {
+    const scalarData = extractFrameScalarData(
+        dataSet,
+        frameOffset,
+        singleFrameBytes,
+        bitsAllocated,
+        pixelRepresentation
+    );
+
+    const values = new Float64Array(scalarData.length);
+    for (let index = 0; index < scalarData.length; index += 1) {
+        values[index] = Number(scalarData[index]) * slope + intercept;
+    }
+
+    const sorted = Array.from(values).sort((a, b) => a - b);
+    const percentile = (ratio: number) => {
+        const clamped = Math.min(1, Math.max(0, ratio));
+        const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(clamped * (sorted.length - 1))));
+        return sorted[idx];
+    };
+
+    const low = percentile(0.05);
+    const high = percentile(0.995);
+    const width = Math.max(1, high - low);
+    const center = low + width / 2;
+
+    return {
+        defaultWindowCenter: center,
+        defaultWindowWidth: width,
+    };
+};
 
 /**
  * Parse a raw DICOM file, detect multi-frame layout, and register for use with
@@ -78,17 +296,6 @@ export async function registerMultiframeDicomFile(
     }
 
     // Parse spacing and orientation
-    const parseNum = (v: string | undefined, def: number) => {
-        if (!v) return def;
-        const n = Number(v.split('\\')[0]);
-        return Number.isFinite(n) ? n : def;
-    };
-    const parseNumList = (v: string | undefined, def: number[]) => {
-        if (!v) return def;
-        const nums = v.split('\\').map(Number).filter(Number.isFinite);
-        return nums.length > 0 ? nums : def;
-    };
-
     const pixelSpacing = parseNumList(dataSet.string('x00280030'), [1, 1]);
     const imageOrientationPatient = parseNumList(dataSet.string('x00200037'), [1, 0, 0, 0, 1, 0]);
     const imagePositionPatient = parseNumList(dataSet.string('x00200032'), [0, 0, 0]);
@@ -99,9 +306,33 @@ export async function registerMultiframeDicomFile(
     const rescaleIntercept = parseNum(dataSet.string('x00281052'), 0);
     const windowCenter = parseNum(dataSet.string('x00281050'), 0);
     const windowWidth = parseNum(dataSet.string('x00281051'), 0);
+    const middleFrame = Math.max(0, Math.floor(numberOfFrames / 2));
+    const middleFrameOffset = (pixelElement?.dataOffset || 0) + middleFrame * singleFrameBytes;
+    const { defaultWindowCenter, defaultWindowWidth } = computeRobustWindowFromFrame(
+        dataSet,
+        middleFrameOffset,
+        singleFrameBytes,
+        bitsAllocated,
+        pixelRepresentation,
+        rescaleSlope,
+        rescaleIntercept
+    );
     const frameOfReferenceUID = dataSet.string('x00200052') || `generated.${key}`;
     const modality = dataSet.string('x00080060') || 'CT';
     const seriesInstanceUID = dataSet.string('x0020000e') || `generated.series.${key}`;
+    const {
+        perFramePixelSpacing,
+        perFrameImageOrientationPatient,
+        perFrameImagePositionPatient,
+        perFrameSliceThickness,
+    } = buildPerFrameGeometry(
+        dataSet,
+        numberOfFrames,
+        pixelSpacing,
+        imageOrientationPatient,
+        imagePositionPatient,
+        sliceThickness
+    );
 
     const registration: MultiframeDicomRegistration = {
         key,
@@ -121,6 +352,8 @@ export async function registerMultiframeDicomFile(
         rescaleIntercept,
         windowCenter,
         windowWidth,
+        defaultWindowCenter,
+        defaultWindowWidth,
         pixelSpacing,
         imageOrientationPatient,
         imagePositionPatient,
@@ -128,9 +361,14 @@ export async function registerMultiframeDicomFile(
         frameOfReferenceUID,
         modality,
         seriesInstanceUID,
+        perFramePixelSpacing,
+        perFrameImageOrientationPatient,
+        perFrameImagePositionPatient,
+        perFrameSliceThickness,
     };
 
     registrations.set(key, registration);
+    console.log('[MultiframeLoader] Geometry summary', summarizeFrameGeometryForLog(registration));
 
     console.log(`[MultiframeLoader] Registered "${file.name}": ${numberOfFrames} frames, ${rows}×${columns}, ${bitsAllocated}-bit`);
     return registration;
@@ -169,8 +407,9 @@ function multiframeImageLoader(
 
             const { dataSet, rows, columns, bitsAllocated, pixelRepresentation, samplesPerPixel,
                 singleFrameBytes, bytesPerPixel, rescaleSlope, rescaleIntercept,
-                windowCenter, windowWidth, photometricInterpretation, sliceThickness,
-                pixelSpacing, imageOrientationPatient, imagePositionPatient } = reg;
+                windowCenter, windowWidth, defaultWindowCenter, defaultWindowWidth, photometricInterpretation,
+                perFrameSliceThickness, perFramePixelSpacing,
+                perFrameImageOrientationPatient, perFrameImagePositionPatient } = reg;
 
             // Extract pixel data for this frame
             const pixelElement = dataSet.elements.x7fe00010;
@@ -205,17 +444,10 @@ function multiframeImageLoader(
                 if (pixelData[i] > maxPixelValue) maxPixelValue = pixelData[i];
             }
 
-            // Compute image position for this frame (shift along Z axis)
-            const scanAxisNormal = [
-                imageOrientationPatient[1] * imageOrientationPatient[5] - imageOrientationPatient[2] * imageOrientationPatient[4],
-                imageOrientationPatient[2] * imageOrientationPatient[3] - imageOrientationPatient[0] * imageOrientationPatient[5],
-                imageOrientationPatient[0] * imageOrientationPatient[4] - imageOrientationPatient[1] * imageOrientationPatient[3],
-            ];
-            const frameImagePositionPatient = [
-                imagePositionPatient[0] + scanAxisNormal[0] * sliceThickness * frame,
-                imagePositionPatient[1] + scanAxisNormal[1] * sliceThickness * frame,
-                imagePositionPatient[2] + scanAxisNormal[2] * sliceThickness * frame,
-            ];
+            const framePixelSpacing = perFramePixelSpacing[frame] || reg.pixelSpacing;
+            const frameImageOrientationPatient = perFrameImageOrientationPatient[frame] || reg.imageOrientationPatient;
+            const frameImagePositionPatient = perFrameImagePositionPatient[frame] || reg.imagePositionPatient;
+            const frameSliceThickness = perFrameSliceThickness[frame] || reg.sliceThickness;
 
             const image: cornerstone.Types.IImage = {
                 imageId,
@@ -223,8 +455,8 @@ function multiframeImageLoader(
                 maxPixelValue,
                 slope: rescaleSlope,
                 intercept: rescaleIntercept,
-                windowCenter: windowCenter || (minPixelValue + maxPixelValue) / 2,
-                windowWidth: windowWidth || (maxPixelValue - minPixelValue),
+                windowCenter: defaultWindowCenter,
+                windowWidth: defaultWindowWidth,
                 getPixelData: () => pixelData,
                 getCanvas: undefined,
                 rows,
@@ -234,9 +466,9 @@ function multiframeImageLoader(
                 color: samplesPerPixel > 1,
                 rgba: false,
                 numComps: samplesPerPixel,
-                columnPixelSpacing: pixelSpacing[1],
-                rowPixelSpacing: pixelSpacing[0],
-                sliceThickness,
+                columnPixelSpacing: framePixelSpacing[1],
+                rowPixelSpacing: framePixelSpacing[0],
+                sliceThickness: frameSliceThickness,
                 invert: photometricInterpretation === 'MONOCHROME1',
                 sizeInBytes: singleFrameBytes,
                 dataType: pixelRepresentation === 1 ? 'Int16Array' : (bitsAllocated === 8 ? 'Uint8Array' : 'Uint16Array'),
@@ -268,16 +500,21 @@ export function registerMultiframeMetadataProvider() {
         const reg = registrations.get(key);
         if (!reg) return undefined;
 
+        const frameIPP = reg.perFrameImagePositionPatient[frame] || reg.imagePositionPatient;
+        const frameIOP = reg.perFrameImageOrientationPatient[frame] || reg.imageOrientationPatient;
+        const framePixelSpacing = reg.perFramePixelSpacing[frame] || reg.pixelSpacing;
+        const frameSliceThickness = reg.perFrameSliceThickness[frame] || reg.sliceThickness;
+        const rowCosines = frameIOP.slice(0, 3);
+        const columnCosines = frameIOP.slice(3, 6);
         const scanAxisNormal = [
-            reg.imageOrientationPatient[1] * reg.imageOrientationPatient[5] - reg.imageOrientationPatient[2] * reg.imageOrientationPatient[4],
-            reg.imageOrientationPatient[2] * reg.imageOrientationPatient[3] - reg.imageOrientationPatient[0] * reg.imageOrientationPatient[5],
-            reg.imageOrientationPatient[0] * reg.imageOrientationPatient[4] - reg.imageOrientationPatient[1] * reg.imageOrientationPatient[3],
+            rowCosines[1] * columnCosines[2] - rowCosines[2] * columnCosines[1],
+            rowCosines[2] * columnCosines[0] - rowCosines[0] * columnCosines[2],
+            rowCosines[0] * columnCosines[1] - rowCosines[1] * columnCosines[0],
         ];
-        const frameIPP = [
-            reg.imagePositionPatient[0] + scanAxisNormal[0] * reg.sliceThickness * frame,
-            reg.imagePositionPatient[1] + scanAxisNormal[1] * reg.sliceThickness * frame,
-            reg.imagePositionPatient[2] + scanAxisNormal[2] * reg.sliceThickness * frame,
-        ];
+        const sliceLocation =
+            frameIPP[0] * scanAxisNormal[0] +
+            frameIPP[1] * scanAxisNormal[1] +
+            frameIPP[2] * scanAxisNormal[2];
 
         if (type === 'imagePixelModule') {
             return {
@@ -296,22 +533,22 @@ export function registerMultiframeMetadataProvider() {
                 frameOfReferenceUID: reg.frameOfReferenceUID,
                 rows: reg.rows,
                 columns: reg.columns,
-                imageOrientationPatient: reg.imageOrientationPatient,
-                rowCosines: reg.imageOrientationPatient.slice(0, 3),
-                columnCosines: reg.imageOrientationPatient.slice(3, 6),
+                imageOrientationPatient: frameIOP,
+                rowCosines,
+                columnCosines,
                 imagePositionPatient: frameIPP,
-                sliceThickness: reg.sliceThickness,
-                sliceLocation: frameIPP[2],
-                pixelSpacing: reg.pixelSpacing,
-                rowPixelSpacing: reg.pixelSpacing[0],
-                columnPixelSpacing: reg.pixelSpacing[1],
+                sliceThickness: frameSliceThickness,
+                sliceLocation,
+                pixelSpacing: framePixelSpacing,
+                rowPixelSpacing: framePixelSpacing[0],
+                columnPixelSpacing: framePixelSpacing[1],
             };
         }
 
         if (type === 'voiLutModule') {
             return {
-                windowWidth: reg.windowWidth ? [reg.windowWidth] : undefined,
-                windowCenter: reg.windowCenter ? [reg.windowCenter] : undefined,
+                windowWidth: [reg.defaultWindowWidth],
+                windowCenter: [reg.defaultWindowCenter],
             };
         }
 

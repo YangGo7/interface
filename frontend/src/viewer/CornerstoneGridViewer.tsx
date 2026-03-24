@@ -15,7 +15,7 @@ import { addAndGroupTools, createOrGetToolGroup, createOrGet3DToolGroup, setActi
 import { ViewerSource } from './CornerstoneViewer';
 
 type ToolMode = 'pan' | 'length' | 'arrow' | 'rect' | 'ellipse' | 'wl' | 'rotate' | 'erase' | 'scroll';
-type ViewportOrientation = 'axial' | 'sagittal' | 'coronal' | 'acquisition' | 'volume3d';
+type ViewportOrientation = 'empty' | 'axial' | 'sagittal' | 'coronal' | 'acquisition' | 'volume3d';
 
 type GridControl = {
     id: string;
@@ -41,6 +41,13 @@ type VolumePresetOption = {
     preset: VolumePresetDefinition;
 };
 
+type AssignedCapturePreview = {
+    id: string;
+    dataUrl: string;
+    label?: string;
+    createdAt?: string;
+};
+
 type CornerstoneGridViewerProps = {
     sources: ViewerSource[];
     title?: string;
@@ -58,6 +65,9 @@ type CornerstoneGridViewerProps = {
     contrast?: number;
     rotation?: number;
     flipped?: boolean;
+    assignedCaptureSlots?: Record<string, AssignedCapturePreview>;
+    onAssignCaptureToViewport?: (viewportId: string, captureId: string) => void;
+    onClearAssignedCapture?: (viewportId: string) => void;
 };
 
 export function CornerstoneGridViewer({
@@ -77,6 +87,9 @@ export function CornerstoneGridViewer({
     contrast = 100,
     rotation = 0,
     flipped = false,
+    assignedCaptureSlots = {},
+    onAssignCaptureToViewport,
+    onClearAssignedCapture,
 }: CornerstoneGridViewerProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewportRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -100,6 +113,7 @@ export function CornerstoneGridViewer({
         x: 0,
         y: 0,
     });
+    const [dropTargetViewportId, setDropTargetViewportId] = useState<string | null>(null);
 
     const [viewportsConfig, setViewportsConfig] = useState<GridControl[]>([]);
     const [preset3D, setPreset3D] = useState<Record<string, string>>({});
@@ -112,11 +126,11 @@ export function CornerstoneGridViewer({
                 name: 'Dental Bone',
                 gradientOpacity: '4 0 1 255 1',
                 specularPower: '10',
-                scalarOpacity: '8 -3024 0 -16.4458 0 641.385 0.715686 3071 0.705882',
+                scalarOpacity: '10 -3024 0 150 0 320 0.05 641.385 0.72 3071 0.74',
                 specular: '0.2',
                 shade: '1',
                 ambient: '0.1',
-                colorTransfer: '16 -3024 0 0 0 -16.4458 0.729412 0.254902 0.301961 641.385 0.905882 0.815686 0.552941 3071 1 1 1',
+                colorTransfer: '20 -3024 0 0 0 150 0 0 0 320 0.62 0.54 0.35 641.385 0.91 0.82 0.56 3071 1 1 1',
                 diffuse: '0.9',
                 interpolation: '1',
             },
@@ -128,11 +142,11 @@ export function CornerstoneGridViewer({
                 name: 'Dental Surface',
                 gradientOpacity: '4 0 1 255 1',
                 specularPower: '1',
-                scalarOpacity: '10 -2048 0 -451 0 -450 1 1050 1 3661 1',
+                scalarOpacity: '10 -2048 0 120 0 260 0.08 780 1 3661 1',
                 specular: '0',
                 shade: '0',
                 ambient: '0.2',
-                colorTransfer: '20 -2048 0 0 0 -451 0 0 0 -450 0.0556356 0.0556356 0.0556356 1050 1 1 1 3661 1 1 1',
+                colorTransfer: '20 -2048 0 0 0 120 0 0 0 260 0.18 0.18 0.18 780 1 1 1 3661 1 1 1',
                 diffuse: '1',
                 interpolation: '1',
             },
@@ -144,11 +158,11 @@ export function CornerstoneGridViewer({
                 name: 'Dental Soft Tissue',
                 gradientOpacity: '4 0 1 255 1',
                 specularPower: '1',
-                scalarOpacity: '10 -2048 0 -167.01 0 -160 1 240 1 3661 1',
+                scalarOpacity: '10 -2048 0 80 0 140 0.05 260 0.75 3661 0.9',
                 specular: '0',
                 shade: '0',
                 ambient: '0.2',
-                colorTransfer: '20 -2048 0 0 0 -167.01 0 0 0 -160 0.0556356 0.0556356 0.0556356 240 1 1 1 3661 1 1 1',
+                colorTransfer: '20 -2048 0 0 0 80 0 0 0 140 0.44 0.34 0.33 260 0.86 0.71 0.66 3661 1 0.92 0.88',
                 diffuse: '1',
                 interpolation: '1',
             },
@@ -160,11 +174,11 @@ export function CornerstoneGridViewer({
                 name: 'Dental MIP',
                 gradientOpacity: '4 0 1 255 1',
                 specularPower: '10',
-                scalarOpacity: '8 -3024 0 -637.62 0 700 1 3071 1',
+                scalarOpacity: '8 -3024 0 180 0 480 1 3071 1',
                 specular: '0.2',
                 shade: '1',
                 ambient: '0.1',
-                colorTransfer: '16 -3024 0 0 0 -637.62 1 1 1 700 1 1 1 3071 1 1 1',
+                colorTransfer: '16 -3024 0 0 0 180 0 0 0 480 1 1 1 3071 1 1 1',
                 diffuse: '0.9',
                 interpolation: '1',
             },
@@ -217,7 +231,7 @@ export function CornerstoneGridViewer({
 
         props.invert = Boolean(image.invert);
         viewportsConfig.forEach(config => {
-            if (config.orientation === 'volume3d') return;
+            if (config.orientation === 'volume3d' || config.orientation === 'empty') return;
             const vp = renderingEngine.getViewport(config.id) as any;
             if (vp?.setProperties) {
                 vp.setProperties(props);
@@ -246,14 +260,26 @@ export function CornerstoneGridViewer({
     useEffect(() => {
         const numViewports = layout.rows * layout.cols;
         const initialOrientations: ViewportOrientation[] = ['axial', 'sagittal', 'coronal', 'volume3d'];
-        const newConfigs: GridControl[] = [];
-        for (let i = 0; i < numViewports; i++) {
-            newConfigs.push({
-                id: 'viewport-' + i,
-                orientation: initialOrientations[i % initialOrientations.length]
-            });
-        }
-        setViewportsConfig(newConfigs);
+        setViewportsConfig((prev) => {
+            const newConfigs: GridControl[] = [];
+            for (let i = 0; i < numViewports; i++) {
+                const existing = prev[i];
+                if (existing) {
+                    newConfigs.push({
+                        id: 'viewport-' + i,
+                        orientation: existing.orientation,
+                    });
+                    continue;
+                }
+                newConfigs.push({
+                    id: 'viewport-' + i,
+                    orientation: prev.length === 0
+                        ? initialOrientations[i % initialOrientations.length]
+                        : 'empty',
+                });
+            }
+            return newConfigs;
+        });
     }, [layout]);
 
     useEffect(() => {
@@ -264,7 +290,9 @@ export function CornerstoneGridViewer({
             ? (registerNativeDicomFile(activeSource.file))
             : scheme === 'dicomlocal' && activeSource.file
                 ? (registerLocalDicomFile(activeSource.id, activeSource.file))
-                : scheme + ':' + activeSource.url;
+                : scheme === 'dicomfolder'
+                    ? ''
+                    : scheme + ':' + activeSource.url;
         setCurrentImageId(imageId);
 
         const renderingEngineId = renderingEngineIdRef.current;
@@ -280,14 +308,18 @@ export function CornerstoneGridViewer({
 
         const isVolume = scheme !== 'web';
 
-        const viewportInputs = viewportsConfig.map((config, i) => {
+        const activeViewportEntries = viewportsConfig
+            .map((config, i) => ({ config, index: i }))
+            .filter(({ config }) => config.orientation !== 'empty');
+
+        const viewportInputs = activeViewportEntries.map(({ config, index }) => {
             const is3D = config.orientation === 'volume3d';
             return {
                 viewportId: config.id,
                 type: isVolume
                     ? (is3D ? cornerstone.Enums.ViewportType.VOLUME_3D : cornerstone.Enums.ViewportType.ORTHOGRAPHIC)
                     : cornerstone.Enums.ViewportType.STACK,
-                element: validRefs[i] as HTMLDivElement,
+                element: validRefs[index] as HTMLDivElement,
                 defaultOptions: {
                     orientation: (isVolume && !is3D)
                         ? cornerstone.Enums.OrientationAxis[config.orientation.toUpperCase() as keyof typeof cornerstone.Enums.OrientationAxis]
@@ -306,6 +338,9 @@ export function CornerstoneGridViewer({
         const toolGroup = createOrGetToolGroup();
         const toolGroup3D = createOrGet3DToolGroup();
         viewportsConfig.forEach(config => {
+            if (config.orientation === 'empty') {
+                return;
+            }
             if (config.orientation === 'volume3d') {
                 if (toolGroup3D && !toolGroup3D.getViewportIds().includes(config.id)) {
                     toolGroup3D.addViewport(config.id, renderingEngineId);
@@ -325,19 +360,28 @@ export function CornerstoneGridViewer({
             try {
                 if (isVolume) {
                     let allImageIds: string[] = [];
-                    if (activeSource.file) {
+                    if (activeSource.scheme === 'dicomfolder' && activeSource.files?.length) {
+                        allImageIds = activeSource.files.map((file) => registerNativeDicomFile(file));
+                    } else if (activeSource.file) {
                         const reg = await registerMultiframeDicomFile(activeSource.file);
                         if (isCancelled) return;
                         if (reg.numberOfFrames > 1) { allImageIds = generateMultiframeImageIds(reg); }
                         else { await cornerstone.imageLoader.loadAndCacheImage(imageId); if (isCancelled) return; allImageIds = [imageId]; }
                     } else { await cornerstone.imageLoader.loadAndCacheImage(imageId); if (isCancelled) return; allImageIds = [imageId]; }
+                    if (allImageIds.length > 0) {
+                        setCurrentImageId(allImageIds[0]);
+                    }
                     const volume = await cornerstone.volumeLoader.createAndCacheVolume(volumeId, { imageIds: allImageIds });
                     if (isCancelled) return;
                     await volume.load();
                     if (isCancelled) return;
-                    await cornerstone.setVolumesForViewports(renderingEngine, [{ volumeId }], viewportsConfig.map(v => v.id));
+                    await cornerstone.setVolumesForViewports(
+                        renderingEngine,
+                        [{ volumeId }],
+                        viewportsConfig.filter((v) => v.orientation !== 'empty').map(v => v.id)
+                    );
                 } else {
-                    for (const config of viewportsConfig) {
+                    for (const config of viewportsConfig.filter((v) => v.orientation !== 'empty')) {
                         const vp = renderingEngine.getViewport(config.id) as cornerstone.Types.IStackViewport;
                         await vp.setStack([imageId]);
                     }
@@ -346,6 +390,7 @@ export function CornerstoneGridViewer({
                 applyViewportDisplayState(renderingEngine, imageId);
                 // Post-load: Restore presets and reset cameras
                 viewportsConfig.forEach(config => {
+                    if (config.orientation === 'empty') return;
                     const vp = renderingEngine.getViewport(config.id) as any;
                     if (!vp) return;
 
@@ -462,7 +507,7 @@ export function CornerstoneGridViewer({
     };
 
     const handleMagnifierMove = (viewportId: string, orientation: ViewportOrientation, event: React.MouseEvent<HTMLDivElement>) => {
-        if (interactionMode !== 'magnifier' || orientation === 'volume3d') return;
+        if (interactionMode !== 'magnifier' || orientation === 'volume3d' || orientation === 'empty') return;
         const host = viewportRefs.current[viewportsConfig.findIndex((c) => c.id === viewportId)];
         if (!host) return;
         const rect = host.getBoundingClientRect();
@@ -477,7 +522,7 @@ export function CornerstoneGridViewer({
     };
 
     const handleViewportCaptureClick = (viewportId: string, orientation: ViewportOrientation, idx: number, event: React.MouseEvent<HTMLElement>) => {
-        if (interactionMode !== 'capture-area' || orientation === 'volume3d') return;
+        if (interactionMode !== 'capture-area' || orientation === 'volume3d' || orientation === 'empty') return;
         event.preventDefault();
         event.stopPropagation();
         const host = viewportRefs.current[idx];
@@ -626,6 +671,7 @@ export function CornerstoneGridViewer({
                                     value={viewportsConfig[0].orientation}
                                     onChange={(e) => handleOrientationChange(viewportsConfig[0].id, e.target.value as ViewportOrientation)}
                                 >
+                                    <option value="empty">Empty</option>
                                     <option value="axial">Axial</option>
                                     <option value="sagittal">Sagittal</option>
                                     <option value="coronal">Coronal</option>
@@ -661,23 +707,78 @@ export function CornerstoneGridViewer({
                 {!isInit && <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', backgroundColor: '#111827', zIndex: 50 }}>Initializing...</div>}
                 <div style={{ position: 'absolute', inset: 0, display: 'grid', gap: '2px', backgroundColor: '#4b5563', gridTemplateColumns: 'repeat(' + layout.cols + ', 1fr)', gridTemplateRows: 'repeat(' + layout.rows + ', 1fr)' }}>
                     {viewportsConfig.map((config, idx) => (
+                        (() => {
+                            const assignedCapture = assignedCaptureSlots[config.id];
+                            const isEmptySlot = config.orientation === 'empty';
+                            const isDropTarget = dropTargetViewportId === config.id;
+                            return (
                         <div
                             key={config.id}
                             data-grid-capture-cell="true"
-                            style={{ position: 'relative', backgroundColor: '#000', width: '100%', height: '100%', overflow: 'hidden', cursor: interactionMode === 'magnifier' && config.orientation !== 'volume3d' ? 'zoom-in' : interactionMode === 'capture-area' && config.orientation !== 'volume3d' ? 'crosshair' : 'default' }}
+                            style={{
+                                position: 'relative',
+                                backgroundColor: '#000',
+                                width: '100%',
+                                height: '100%',
+                                overflow: 'hidden',
+                                cursor: isEmptySlot
+                                    ? assignedCapture
+                                        ? 'pointer'
+                                        : 'copy'
+                                    : interactionMode === 'magnifier' && config.orientation !== 'volume3d' && config.orientation !== 'empty'
+                                        ? 'zoom-in'
+                                        : interactionMode === 'capture-area' && config.orientation !== 'volume3d' && config.orientation !== 'empty'
+                                            ? 'crosshair'
+                                            : 'default'
+                            }}
                             onMouseDown={(event) => {
-                                if (interactionMode !== 'capture-area' || config.orientation === 'volume3d') return;
+                                if (assignedCapture && isEmptySlot) return;
+                                if (interactionMode !== 'capture-area' || config.orientation === 'volume3d' || config.orientation === 'empty') return;
                                 event.preventDefault();
                                 event.stopPropagation();
                             }}
                             onClick={(event) => {
-                                if (interactionMode !== 'capture-area' || config.orientation === 'volume3d') return;
+                                if (assignedCapture && isEmptySlot) {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    onClearAssignedCapture?.(config.id);
+                                    return;
+                                }
+                                if (interactionMode !== 'capture-area' || config.orientation === 'volume3d' || config.orientation === 'empty') return;
                                 handleViewportCaptureClick(config.id, config.orientation, idx, event);
+                            }}
+                            onDragOver={(event) => {
+                                if (!isEmptySlot) return;
+                                event.preventDefault();
+                                event.dataTransfer.dropEffect = 'copy';
+                                setDropTargetViewportId(config.id);
+                            }}
+                            onDragLeave={() => {
+                                if (isDropTarget) {
+                                    setDropTargetViewportId((prev) => (prev === config.id ? null : prev));
+                                }
+                            }}
+                            onDrop={(event) => {
+                                if (!isEmptySlot) return;
+                                const captureId = event.dataTransfer.getData('application/x-capture-id');
+                                event.preventDefault();
+                                setDropTargetViewportId(null);
+                                if (!captureId) return;
+                                onAssignCaptureToViewport?.(config.id, captureId);
                             }}
                             onMouseMove={(event) => handleMagnifierMove(config.id, config.orientation, event)}
                             onMouseLeave={() => setMagnifier((prev) => (prev.visible && prev.viewportId === config.id ? { ...prev, visible: false } : prev))}
                         >
                             <div ref={(el) => { viewportRefs.current[idx] = el; }} style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, width: '100%', height: '100%' }} />
+                            {assignedCapture && isEmptySlot && (
+                                <div className="pointer-events-none absolute inset-0 z-[4] flex items-center justify-center bg-black">
+                                    <img
+                                        src={assignedCapture.dataUrl}
+                                        alt={assignedCapture.label || 'Assigned capture'}
+                                        className="h-full w-full object-contain"
+                                    />
+                                </div>
+                            )}
                             <div
                                 style={{
                                     position: 'absolute', top: 8, right: 8, zIndex: 10,
@@ -688,7 +789,7 @@ export function CornerstoneGridViewer({
                                 onMouseLeave={(e) => { if (viewportsConfig.length > 1) e.currentTarget.style.opacity = '0'; }}
                             >
                                 <select style={{ backgroundColor: 'rgba(0,0,0,0.6)', color: '#fff', fontSize: '12px', padding: '2px 8px', borderRadius: '4px', border: '1px solid #4b5563', outline: 'none' }} value={config.orientation} onChange={(e) => handleOrientationChange(config.id, e.target.value as ViewportOrientation)}>
-                                    <option value="axial">Axial</option><option value="sagittal">Sagittal</option><option value="coronal">Coronal</option><option value="acquisition">Original</option><option value="volume3d">3D Volume</option>
+                                    <option value="empty">Empty</option><option value="axial">Axial</option><option value="sagittal">Sagittal</option><option value="coronal">Coronal</option><option value="acquisition">Original</option><option value="volume3d">3D Volume</option>
                                 </select>
                                 {config.orientation === 'volume3d' && (
                                     <select style={{ backgroundColor: 'rgba(0,0,0,0.6)', color: '#60a5fa', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', border: '1px solid #3b82f6', outline: 'none', marginLeft: '4px' }} value={preset3D[config.id] || DEFAULT_3D_PRESET} onChange={(e) => handlePresetChange(config.id, e.target.value)}>
@@ -696,7 +797,14 @@ export function CornerstoneGridViewer({
                                     </select>
                                 )}
                             </div>
-                            {interactionMode === 'capture-area' && config.orientation !== 'volume3d' && (
+                            {config.orientation === 'empty' && !assignedCapture && (
+                                <div className={`pointer-events-none absolute inset-0 z-[5] flex items-center justify-center ${isDropTarget ? 'bg-cyan-400/12' : 'bg-slate-950/55'}`}>
+                                    <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                                        {isDropTarget ? 'Drop Capture' : 'Empty Slot'}
+                                    </span>
+                                </div>
+                            )}
+                            {interactionMode === 'capture-area' && config.orientation !== 'volume3d' && config.orientation !== 'empty' && (
                                 <div
                                     className="pointer-events-none absolute inset-0 z-[11] border border-cyan-300/70 bg-cyan-400/5 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.35)] transition-colors"
                                     aria-hidden="true"
@@ -706,7 +814,7 @@ export function CornerstoneGridViewer({
                                     </span>
                                 </div>
                             )}
-                            {interactionMode === 'magnifier' && config.orientation !== 'volume3d' && magnifier.visible && magnifier.viewportId === config.id && (
+                            {interactionMode === 'magnifier' && config.orientation !== 'volume3d' && config.orientation !== 'empty' && magnifier.visible && magnifier.viewportId === config.id && (
                                 <div
                                     className="pointer-events-none absolute z-20 overflow-hidden rounded-full border border-cyan-200/80 shadow-[0_14px_40px_rgba(0,0,0,0.38)]"
                                     style={{
@@ -723,6 +831,8 @@ export function CornerstoneGridViewer({
                                 </div>
                             )}
                         </div>
+                            );
+                        })()
                     ))}
                 </div>
             </div>
