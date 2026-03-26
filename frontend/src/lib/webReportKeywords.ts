@@ -1,5 +1,13 @@
+function normalizeToothValue(value: any) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') {
+    return String(value.tooth_label || value.tooth || value.label || '').trim();
+  }
+  return String(value).trim();
+}
+
 function uniqueSortedTeeth(values: Array<string | number>) {
-  return [...new Set(values.map((value) => String(value)).filter(Boolean))]
+  return [...new Set(values.map((value) => normalizeToothValue(value)).filter(Boolean))]
     .sort((a, b) => Number(a) - Number(b));
 }
 
@@ -8,17 +16,26 @@ function teethFromMap(map?: Record<string, any>) {
 }
 
 function teethFromList(list?: Array<string | number>) {
-  return uniqueSortedTeeth(Array.isArray(list) ? list : []);
+  return uniqueSortedTeeth(Array.isArray(list) ? (list as any[]) : []);
+}
+
+function formatGroupedFinding(label: string, teeth: string[]) {
+  if (!teeth.length) return '';
+  const lines = [ `${label}:`, ...teeth.map((tooth) => `#${tooth}`) ];
+  return lines.join('\n');
 }
 
 function boneLossKeywords(result: any) {
   const pbl = result?.pbl || {};
-  return Object.entries(pbl)
+  const entries = Object.entries(pbl)
     .map(([tooth, value]) => ({ tooth: String(tooth), pct: Number(value || 0) }))
     .filter((entry) => entry.pct > 0)
     .sort((a, b) => b.pct - a.pct)
-    .slice(0, 3)
-    .map((entry) => `Bone loss #${entry.tooth} ${entry.pct.toFixed(1)}%`);
+    .slice(0, 3);
+
+  if (!entries.length) return [];
+
+  return [formatGroupedFinding('Bone loss', entries.map((entry) => entry.tooth))];
 }
 
 export function buildWebReportKeywords(result: any): string[] {
@@ -36,9 +53,7 @@ export function buildWebReportKeywords(result: any): string[] {
 
   groups.forEach(([label, teeth]) => {
     if (!teeth.length) return;
-    const display = teeth.slice(0, 5).map((tooth) => `#${tooth}`).join(', ');
-    const suffix = teeth.length > 5 ? ` +${teeth.length - 5}` : '';
-    keywords.push(`${label}: ${display}${suffix}`);
+    keywords.push(formatGroupedFinding(label, teeth.slice(0, 5)));
   });
 
   keywords.push(...boneLossKeywords(result));

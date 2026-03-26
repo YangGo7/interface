@@ -1,11 +1,31 @@
 import { isDicomFile } from './uploadSelection';
 
+async function readJsonOrThrow<T>(response: Response): Promise<T> {
+  const contentType = response.headers.get('content-type') || '';
+  const raw = await response.text();
+  const trimmed = raw.trim();
+
+  if (!contentType.includes('application/json') && trimmed.startsWith('<')) {
+    throw new Error(
+      `Expected JSON but received HTML from ${response.url || 'request'}. Check the API route/proxy.`
+    );
+  }
+
+  try {
+    return (raw ? JSON.parse(raw) : {}) as T;
+  } catch {
+    throw new Error(
+      `Failed to parse JSON from ${response.url || 'request'} (${contentType || 'unknown content-type'}).`
+    );
+  }
+}
+
 export async function requestAsyncDetection(primaryFile: File, folderFiles: File[]) {
   const form = new FormData();
   form.append('image', primaryFile);
 
   const res = await fetch('/api/detect_async', { method: 'POST', body: form });
-  const data = await res.json();
+  const data = await readJsonOrThrow<{ success?: boolean; job_id?: string; preview_url?: string; message?: string }>(res);
 
   if (!res.ok || !data.success || !data.job_id) {
     throw new Error(data.message || 'Detection request failed');
@@ -30,7 +50,7 @@ export async function requestPatientReport(primaryFile: File, userName: string, 
   form.append('language', language);
 
   const res = await fetch('/api/v2/analyze', { method: 'POST', body: form });
-  const data = await res.json();
+  const data = await readJsonOrThrow<{ report_url?: string; error?: string } & Record<string, unknown>>(res);
 
   if (!data.report_url) {
     throw new Error(data.error || 'Report generation failed');

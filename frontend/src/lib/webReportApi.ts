@@ -26,16 +26,54 @@ export type WebReportSessionResponse = {
   error?: string;
 };
 
+const WEB_REPORT_DIRECT_API_BASE = 'http://localhost:5000';
+
 async function readJson<T>(response: Response): Promise<T> {
-  const data = await response.json();
+  const contentType = response.headers.get('content-type') || '';
+  const raw = await response.text();
+  const trimmed = raw.trim();
+
+  if (!contentType.includes('application/json') && trimmed.startsWith('<')) {
+    throw new Error(
+      `Expected JSON but received HTML from ${response.url || 'request'}. Check the API route/proxy.`
+    );
+  }
+
+  let data: unknown;
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(
+      `Failed to parse JSON from ${response.url || 'request'} (${contentType || 'unknown content-type'}).`
+    );
+  }
+
   if (!response.ok) {
     throw new Error((data as { error?: string }).error || 'Request failed');
   }
   return data as T;
 }
 
+function withDirectApiBase(path: string) {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${WEB_REPORT_DIRECT_API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+async function fetchWebReportApi(input: string, init?: RequestInit) {
+  const response = await fetch(input, init);
+  const contentType = response.headers.get('content-type') || '';
+  const looksLikeHtml = !contentType.includes('application/json');
+  const requestedRelativeApi = !/^https?:\/\//i.test(input) && input.startsWith('/api/web_report/');
+
+  if (requestedRelativeApi && response.ok && looksLikeHtml && response.url.includes('localhost:5173')) {
+    return fetch(withDirectApiBase(input), init);
+  }
+
+  return response;
+}
+
 export async function createWebReportSession(language: string) {
-  const response = await fetch('/api/web_report/session', {
+  const response = await fetchWebReportApi('/api/web_report/session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ language }),
@@ -46,7 +84,7 @@ export async function createWebReportSession(language: string) {
 export async function uploadWebReportSession(sessionId: string, file: File) {
   const form = new FormData();
   form.append('image', file);
-  const response = await fetch(`/api/web_report/session/${sessionId}/upload`, {
+  const response = await fetchWebReportApi(`/api/web_report/session/${sessionId}/upload`, {
     method: 'POST',
     body: form,
   });
@@ -59,7 +97,7 @@ export async function createWebReportFromChart(payload: {
   overlay_url?: string | null;
   language?: string;
 }) {
-  const response = await fetch('/api/web_report/from-chart', {
+  const response = await fetchWebReportApi('/api/web_report/from-chart', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -68,7 +106,7 @@ export async function createWebReportFromChart(payload: {
 }
 
 export async function fetchWebReportSession(sessionId: string) {
-  const response = await fetch(`/api/web_report/session/${sessionId}`);
+  const response = await fetchWebReportApi(`/api/web_report/session/${sessionId}`);
   return readJson<WebReportSessionResponse>(response);
 }
 
@@ -77,10 +115,11 @@ export async function patchWebReportOverrides(
   payload: {
     tooth_overrides?: Record<string, Record<string, unknown>>;
     report_note?: string;
+    attached_captures?: Array<Record<string, unknown>>;
     reset_tooth_ids?: string[];
   }
 ) {
-  const response = await fetch(`/api/web_report/session/${sessionId}/overrides`, {
+  const response = await fetchWebReportApi(`/api/web_report/session/${sessionId}/overrides`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -89,15 +128,43 @@ export async function patchWebReportOverrides(
 }
 
 export async function regenerateWebReport(sessionId: string) {
-  const response = await fetch(`/api/web_report/session/${sessionId}/report/regenerate`, {
+  const response = await fetchWebReportApi(`/api/web_report/session/${sessionId}/report/regenerate`, {
     method: 'POST',
   });
   return readJson<{ success: boolean; version: number; report_url: string; page_url: string }>(response);
 }
 
 export async function finalizeWebReport(sessionId: string) {
-  const response = await fetch(`/api/web_report/session/${sessionId}/report/finalize`, {
+  const response = await fetchWebReportApi(`/api/web_report/session/${sessionId}/report/finalize`, {
     method: 'POST',
   });
   return readJson<{ success: boolean; version: number; report_url: string; pdf_url: string }>(response);
+}
+
+export async function transcribeWebReportDictation(
+  sessionId: string,
+  audioBlob: Blob,
+  mimeType: string
+) {
+  const form = new FormData();
+  const extension = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'm4a' : 'webm';
+  form.append('audio', audioBlob, `dictation.${extension}`);
+
+  const response = await fetchWebReportApi(`/api/web_report/session/${sessionId}/dictation`, {
+    method: 'POST',
+    body: form,
+  });
+  return readJson<{
+    success: boolean;
+    transcript: string;
+    soap_note: {
+      subjective: string;
+      objective: string;
+      assessment: string;
+      plan: string;
+    };
+    tooth_findings: Array<{ tooth: string; keywords: string[] }>;
+    keywords: string[];
+    report_note_text: string;
+  }>(response);
 }

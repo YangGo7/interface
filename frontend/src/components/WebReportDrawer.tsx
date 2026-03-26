@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Mic, Square } from 'lucide-react';
 import {
   fetchWebReportSession,
   finalizeWebReport,
   patchWebReportOverrides,
   regenerateWebReport,
+  transcribeWebReportDictation,
   type WebReportSessionResponse,
 } from '../lib/webReportApi';
 import { buildWebReportKeywords } from '../lib/webReportKeywords';
@@ -20,6 +22,15 @@ type ToothReviewForm = {
   note: string;
 };
 
+type ReportCaptureItem = {
+  id: string;
+  label: string;
+  dataUrl: string;
+  reportDataUrl?: string;
+  size?: string;
+  createdAt: string;
+};
+
 const emptyForm: ToothReviewForm = {
   caries: false,
   periapical: false,
@@ -32,15 +43,112 @@ const emptyForm: ToothReviewForm = {
   note: '',
 };
 
+type DictationState = 'idle' | 'recording' | 'processing';
+
+function getPreferredAudioMimeType() {
+  if (typeof MediaRecorder === 'undefined') return '';
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || '';
+}
+
+function mergeReportNote(current: string, incoming: string) {
+  const trimmedCurrent = current.trim();
+  const trimmedIncoming = incoming.trim();
+  if (!trimmedIncoming) return trimmedCurrent;
+  if (!trimmedCurrent) return trimmedIncoming;
+  return `${trimmedCurrent}\n\n${trimmedIncoming}`;
+}
+
+function roundToTwoDecimals(value: number) {
+  return Number(Number(value || 0).toFixed(2));
+}
+
+function buildCaptureReferenceLine(capture: ReportCaptureItem) {
+  return `Capture reference: ${capture.createdAt}${capture.size ? ` (${capture.size})` : ''}`;
+}
+
+function buildToothNoteSuggestions(toothId: string, form: ToothReviewForm) {
+  if (!toothId) return [];
+
+  const suggestions: string[] = [];
+
+  if (form.caries) suggestions.push('Caries');
+  if (form.periapical) suggestions.push('Periapical');
+  if (form.missing) suggestions.push('Missing');
+  if (form.implant) suggestions.push('Implant');
+  if (form.crown) suggestions.push('Crown');
+  if (form.filling) suggestions.push('Filling');
+  if (form.bone_loss_level >= 3) suggestions.push('Bone loss');
+
+  return suggestions;
+}
+
+function buildToothNoteAutocompletePhrases(form: ToothReviewForm) {
+  const phrases = [
+    'periapical lesion',
+    'periodontal bone loss',
+    'caries lesion',
+    'missing tooth',
+    'implant fixture',
+    'crown restoration',
+    'filling restoration',
+    'bone loss',
+    'furcation involvement',
+    'widened periodontal ligament space',
+    'lamina dura disruption',
+    'pericoronal radiolucency',
+    'root canal treated tooth',
+    'calculus deposition',
+    'alveolar bone resorption',
+    'radiolucent lesion',
+    'radiopaque lesion',
+  ];
+
+  if (form.periapical) phrases.unshift('periapical lesion');
+  if (form.caries) phrases.unshift('caries lesion');
+  if (form.missing) phrases.unshift('missing tooth');
+  if (form.implant) phrases.unshift('implant fixture');
+  if (form.crown) phrases.unshift('crown restoration');
+  if (form.filling) phrases.unshift('filling restoration');
+  if (form.bone_loss_level > 0 || form.bone_loss_pct > 0) phrases.unshift('bone loss');
+
+  return [...new Set(phrases)];
+}
+
+function getInlinePhraseAutocomplete(current: string, suggestions: string[], caretPosition: number) {
+  const beforeCaret = current.slice(0, caretPosition);
+  const afterCaret = current.slice(caretPosition);
+  const currentLine = beforeCaret.split('\n').pop() || '';
+  const trailingOnLine = afterCaret.split('\n')[0] || '';
+  if (trailingOnLine.length > 0) return null;
+  const fragmentMatch = currentLine.match(/([a-zA-Z][a-zA-Z ]*)$/);
+  const fragment = fragmentMatch?.[1]?.trimStart() || '';
+  if (fragment.length < 2) return null;
+
+  const match = suggestions.find((suggestion) => {
+    const lowerSuggestion = suggestion.toLowerCase();
+    const lowerFragment = fragment.toLowerCase();
+    return lowerSuggestion.startsWith(lowerFragment) && lowerSuggestion !== lowerFragment;
+  });
+  if (!match) return null;
+
+  const remainder = match.slice(fragment.length);
+  if (!remainder) return null;
+
+  return { ghostText: remainder, applyText: remainder, prefixText: beforeCaret, fullText: match };
+}
+
 export function WebReportDrawer({
   sessionId,
   selectedToothId: linkedToothId,
+  availableCaptures = [],
   onClose,
   open = true,
   layout = 'modal',
 }: {
   sessionId: string;
   selectedToothId?: string | null;
+  availableCaptures?: ReportCaptureItem[];
   onClose: () => void;
   open?: boolean;
   layout?: 'modal' | 'dock';
@@ -53,8 +161,17 @@ export function WebReportDrawer({
   const [selectedToothId, setSelectedToothId] = useState('');
   const [reviewForm, setReviewForm] = useState<ToothReviewForm>(emptyForm);
   const [reportNoteDraft, setReportNoteDraft] = useState('');
+  const [attachedCapturesDraft, setAttachedCapturesDraft] = useState<ReportCaptureItem[]>([]);
   const [editorDirty, setEditorDirty] = useState(false);
   const lastSavedPayloadRef = useRef('');
+  const toothNoteTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [toothNoteCaret, setToothNoteCaret] = useState(0);
+  const [dictationState, setDictationState] = useState<DictationState>('idle');
+  const [dictationError, setDictationError] = useState<string | null>(null);
+  const [dictationTranscript, setDictationTranscript] = useState('');
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<BlobPart[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -121,8 +238,7 @@ export function WebReportDrawer({
     if (!session || !selectedTooth || editorDirty) return;
     const toothOverride = session.doctor_overrides?.teeth?.[selectedToothId] || {};
     const hasOverrideField = (field: string) => Object.prototype.hasOwnProperty.call(toothOverride, field);
-    const note = (toothOverride.note as string | undefined) ?? selectedTooth.note ?? '';
-    setReviewForm({
+    const baseForm = {
       caries: hasOverrideField('caries') ? Boolean(toothOverride.caries) : Boolean(selectedTooth.caries),
       periapical: hasOverrideField('periapical') ? Boolean(toothOverride.periapical) : Boolean(selectedTooth.periapical),
       missing: hasOverrideField('missing') ? Boolean(toothOverride.missing) : Boolean(selectedTooth.missing),
@@ -133,19 +249,95 @@ export function WebReportDrawer({
         ? Number(toothOverride.bone_loss_level || 0)
         : Number(selectedTooth.bone_loss_level || 0),
       bone_loss_pct: hasOverrideField('bone_loss_pct')
-        ? Number(toothOverride.bone_loss_pct || 0)
-        : Number(selectedTooth.bone_loss_pct || 0),
-      note,
-    });
+        ? roundToTwoDecimals(Number(toothOverride.bone_loss_pct || 0))
+        : roundToTwoDecimals(Number(selectedTooth.bone_loss_pct || 0)),
+      note: '',
+    };
+    const note = (toothOverride.note as string | undefined) ?? selectedTooth.note ?? '';
+    const suggestion = buildToothNoteSuggestions(selectedToothId, baseForm)[0] || '';
+    const nextNote = note || suggestion;
+    setReviewForm({ ...baseForm, note: nextNote });
+    setToothNoteCaret(nextNote.length);
     setReportNoteDraft((session.doctor_overrides?.report_note as string | undefined) || '');
+    setAttachedCapturesDraft((session.doctor_overrides?.attached_captures as ReportCaptureItem[] | undefined) || []);
   }, [session, selectedTooth, selectedToothId, editorDirty]);
 
   const currentPayload = useMemo(() => {
     return JSON.stringify({
       tooth_overrides: selectedToothId ? { [selectedToothId]: reviewForm } : {},
       report_note: reportNoteDraft,
+      attached_captures: attachedCapturesDraft,
     });
-  }, [selectedToothId, reviewForm, reportNoteDraft]);
+  }, [selectedToothId, reviewForm, reportNoteDraft, attachedCapturesDraft]);
+
+  const updateReportNoteDraft = (value: string) => {
+    setReportNoteDraft(value);
+    setEditorDirty(true);
+    setSaveState('idle');
+  };
+
+  const attachCaptureToReport = (capture: ReportCaptureItem) => {
+    setAttachedCapturesDraft((prev) => {
+      if (prev.some((item) => item.id === capture.id)) return prev;
+      return [
+        ...prev,
+        {
+          ...capture,
+          dataUrl: capture.reportDataUrl || capture.dataUrl,
+        },
+      ];
+    });
+    const referenceLine = buildCaptureReferenceLine(capture);
+    setReportNoteDraft((prev) => {
+      if (prev.includes(referenceLine)) return prev;
+      return mergeReportNote(prev, referenceLine);
+    });
+    setEditorDirty(true);
+    setSaveState('idle');
+  };
+
+  const removeAttachedCapture = (captureId: string) => {
+    setAttachedCapturesDraft((prev) => prev.filter((item) => item.id !== captureId));
+    setEditorDirty(true);
+    setSaveState('idle');
+  };
+
+  const updateToothNoteDraft = (value: string) => {
+    setReviewForm((prev) => ({ ...prev, note: value }));
+    setEditorDirty(true);
+    setSaveState('idle');
+  };
+
+  const toothNoteAutocomplete = useMemo(
+    () => getInlinePhraseAutocomplete(reviewForm.note, buildToothNoteAutocompletePhrases(reviewForm), toothNoteCaret),
+    [
+      reviewForm.note,
+      toothNoteCaret,
+      reviewForm.caries,
+      reviewForm.periapical,
+      reviewForm.missing,
+      reviewForm.implant,
+      reviewForm.crown,
+      reviewForm.filling,
+      reviewForm.bone_loss_level,
+      reviewForm.bone_loss_pct,
+    ]
+  );
+
+  const acceptToothNoteAutocomplete = () => {
+    if (!toothNoteAutocomplete) return;
+    const nextValue =
+      reviewForm.note.slice(0, toothNoteCaret) +
+      toothNoteAutocomplete.applyText +
+      reviewForm.note.slice(toothNoteCaret);
+    const nextCaret = toothNoteCaret + toothNoteAutocomplete.applyText.length;
+    updateToothNoteDraft(nextValue);
+    setToothNoteCaret(nextCaret);
+    requestAnimationFrame(() => {
+      toothNoteTextareaRef.current?.focus();
+      toothNoteTextareaRef.current?.setSelectionRange(nextCaret, nextCaret);
+    });
+  };
 
   const persistOverrides = async () => {
     if (!sessionId || !session || session.is_finalized) return true;
@@ -160,6 +352,7 @@ export function WebReportDrawer({
       const response = await patchWebReportOverrides(sessionId, {
         tooth_overrides: selectedToothId ? { [selectedToothId]: reviewForm } : {},
         report_note: reportNoteDraft,
+        attached_captures: attachedCapturesDraft,
       });
       setSession((prev) =>
         prev
@@ -197,7 +390,7 @@ export function WebReportDrawer({
     return () => {
       window.clearTimeout(timer);
     };
-  }, [currentPayload, editorDirty, selectedToothId, session, sessionId]);
+  }, [attachedCapturesDraft, currentPayload, editorDirty, selectedToothId, session, sessionId]);
 
   const handleRegenerate = async () => {
     setActionState('regenerating');
@@ -277,6 +470,105 @@ export function WebReportDrawer({
     await handleRegenerate();
   };
 
+  const stopActiveStream = () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  };
+
+  useEffect(() => stopActiveStream, []);
+
+  const handleStartDictation = async () => {
+    if (dictationState !== 'idle' || session?.is_finalized) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setDictationError('Microphone recording is not available in this browser.');
+      return;
+    }
+
+    try {
+      setDictationError(null);
+      setDictationTranscript('');
+      recordedChunksRef.current = [];
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mimeType = getPreferredAudioMimeType();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+      recorder.addEventListener('dataavailable', (event) => {
+        if (event.data && event.data.size > 0) {
+          recordedChunksRef.current.push(event.data);
+        }
+      });
+
+      recorder.addEventListener('stop', async () => {
+        const blobType = recorder.mimeType || mimeType || 'audio/webm';
+        const audioBlob = new Blob(recordedChunksRef.current, { type: blobType });
+        stopActiveStream();
+
+        if (!audioBlob.size) {
+          setDictationState('idle');
+          setDictationError('No audio was recorded.');
+          return;
+        }
+
+        setDictationState('processing');
+        try {
+          const response = await transcribeWebReportDictation(sessionId, audioBlob, blobType);
+          setDictationTranscript(response.transcript || '');
+          setReportNoteDraft((prev) => mergeReportNote(prev, response.report_note_text || ''));
+          setEditorDirty(true);
+          setSaveState('idle');
+          setActiveTab('review');
+        } catch (err: any) {
+          setDictationError(err?.message || 'Dictation processing failed.');
+        } finally {
+          setDictationState('idle');
+          mediaRecorderRef.current = null;
+          recordedChunksRef.current = [];
+        }
+      });
+
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setDictationState('recording');
+    } catch (err: any) {
+      stopActiveStream();
+      setDictationState('idle');
+      setDictationError(err?.message || 'Microphone permission failed.');
+    }
+  };
+
+  const handleStopDictation = () => {
+    if (dictationState !== 'recording') return;
+    mediaRecorderRef.current?.stop();
+  };
+
+  const renderDictationControl = () => (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={dictationState === 'recording' ? handleStopDictation : handleStartDictation}
+        disabled={dictationState === 'processing' || Boolean(session?.is_finalized)}
+        title={dictationState === 'recording' ? 'Stop dictation' : 'Start dictation'}
+        aria-label={dictationState === 'recording' ? 'Stop dictation' : 'Start dictation'}
+        className={`inline-flex h-8 w-8 items-center justify-center rounded-full border transition disabled:opacity-50 ${
+          dictationState === 'recording'
+            ? 'border-red-400/60 bg-red-500/20 text-red-100 hover:bg-red-500/25'
+            : 'border-cyan-300/35 bg-cyan-400/15 text-cyan-100 hover:bg-cyan-400/20'
+        }`}
+      >
+        {dictationState === 'recording' ? <Square className="h-3.5 w-3.5 fill-current" /> : <Mic className="h-3.5 w-3.5" />}
+      </button>
+      <span className="whitespace-nowrap text-[9px] leading-none text-slate-500">
+        {dictationState === 'recording'
+          ? 'Recording...'
+          : dictationState === 'processing'
+            ? 'Processing...'
+            : 'Voice to SOAP'}
+      </span>
+    </div>
+  );
+
   const reportUrl = `/api/web_report/session/${sessionId}/report`;
   const reportPageUrl = reportUrl;
   const hasPdf = Boolean(session?.report?.pdf_path);
@@ -301,7 +593,7 @@ export function WebReportDrawer({
         color: '#E2E8F0',
         opacity: open ? 1 : 0,
         transform: open ? 'translateY(0) scale(1)' : 'translateY(12px) scale(0.95)',
-        pointerEvents: open ? 'auto' : 'none',
+        pointerEvents: open ? ('auto' as const) : ('none' as const),
         transition: 'opacity 200ms ease, transform 200ms ease',
         colorScheme: 'dark' as const,
       }
@@ -321,6 +613,26 @@ export function WebReportDrawer({
       <div className="absolute left-5 top-5 rounded-full border border-cyan-300/30 bg-[#09172f] px-4 py-1 text-[10px] font-semibold uppercase tracking-[0.28em] text-cyan-200 shadow-[0_10px_30px_rgba(34,211,238,0.22)]">
         Report Panel
       </div>
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute right-5 top-5 inline-flex h-8 w-auto shrink-0 items-center justify-center rounded-full border-2 border-white/90 bg-cyan-400 px-3 py-1.5 text-[13px] font-semibold leading-none text-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.22)] hover:bg-cyan-300"
+        style={{
+          position: 'absolute',
+          top: 20,
+          right: 20,
+          width: 'fit-content',
+          minWidth: 0,
+          margin: 0,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          whiteSpace: 'nowrap',
+          zIndex: 2,
+        }}
+      >
+        Hide
+      </button>
       <div className="hidden" />
 
       <div className={`flex items-center justify-between border-b border-cyan-300/15 bg-[linear-gradient(180deg,rgba(27,78,113,0.34),rgba(7,16,31,0.12))] ${isDock ? 'px-4 pb-3 pt-12' : 'px-5 pb-4 pt-14 md:px-6'}`}>
@@ -330,10 +642,11 @@ export function WebReportDrawer({
           </div>
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-[0.26em] text-cyan-300">AI Note</p>
-            <p className="mt-1 truncate text-sm text-slate-200">Session {sessionId.slice(0, 8)} - {statusLabel}</p>
-            <p className="mt-1 text-xs text-slate-400">
+            <p className="mt-1 truncate text-[15px] text-slate-200">Session {sessionId.slice(0, 8)} - {statusLabel}</p>
+            <p className="mt-1 text-[13px] text-slate-400">
               {isDock ? 'Write notes here and keep the draft pinned to this view.' : 'Floating workspace for report actions, notes, and clinical review.'}
             </p>
+            <br/>
           </div>
         </div>
         <div className="ml-3 flex items-center gap-2">
@@ -341,16 +654,10 @@ export function WebReportDrawer({
             href={reportPageUrl}
             target="_blank"
             rel="noreferrer"
-            className="rounded-full border border-slate-700 bg-white/5 px-3 py-1.5 text-xs text-slate-100 hover:bg-white/10"
+            className="rounded-full border border-slate-700 bg-white/5 px-3 py-1.5 text-[13px] text-slate-100 hover:bg-white/10"
           >
             Open Full
           </a>
-          <button
-            onClick={onClose}
-            className="rounded-full border-2 border-white/90 bg-cyan-400 px-3 py-1.5 text-xs font-semibold text-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.22)] hover:bg-cyan-300"
-          >
-            Hide
-          </button>
         </div>
       </div>
 
@@ -359,7 +666,7 @@ export function WebReportDrawer({
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
-            className={`rounded-full px-4 py-2 text-xs font-medium transition ${
+            className={`rounded-full px-4 py-2 text-[13px] font-medium transition ${
               activeTab === tab
                 ? 'bg-cyan-400 text-slate-950 shadow-[0_10px_25px_rgba(34,211,238,0.22)]'
                 : 'bg-white/5 text-slate-200 hover:bg-white/10'
@@ -371,143 +678,245 @@ export function WebReportDrawer({
       </div>
 
       {error && (
-        <div className={`${isDock ? 'mx-4 mt-3' : 'mx-6 mt-4'} rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200`}>
+        <div className={`${isDock ? 'mx-4 mt-3' : 'mx-6 mt-4'} rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[15px] text-red-200`}>
           {error}
         </div>
       )}
 
+      {dictationError && (
+        <div className={`${isDock ? 'mx-4 mt-3' : 'mx-6 mt-4'} rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[15px] text-amber-100`}>
+          {dictationError}
+        </div>
+      )}
+
       {activeTab === 'report' ? (
-        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
           <div className="rounded-[28px] border border-cyan-400/15 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(14,165,233,0.04))] p-5">
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Report Workspace</p>
-            <p className="mt-2 text-sm leading-6 text-slate-200">
+            <p className="mt-2 text-[15px] leading-6 text-slate-200">
               Review findings in this floating panel, then open the full HTML document in its own page when you need the final layout.
             </p>
+            <br />
           </div>
 
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Current Version</p>
               <div className="mt-3 flex items-end gap-3">
-                <span className="text-4xl font-semibold tracking-[-0.04em] text-white">{session?.report?.version ?? 1}</span>
+                <span className="text=[2rem] font-semibold tracking-[-0.04em] text-white">{session?.report?.version ?? 1}</span>
                 <span className="mb-1 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200">
                   {statusLabel}
                 </span>
+                <br/>
               </div>
-              <p className="mt-3 text-sm text-slate-300">
+              <p className="mt-3 text-[13px] text-slate-300">
+                <br/>
                 Regenerate after review changes, then open the full report page to inspect the actual document layout.
               </p>
+              <br/>
             </div>
 
             <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Open Document</p>
+              <br/>
               <div className="mt-4 flex flex-wrap gap-2">
+                <br/>
                 <a
                   href={reportPageUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="rounded-full bg-cyan-400 px-4 py-2 text-xs font-semibold text-slate-950 shadow-[0_10px_25px_rgba(34,211,238,0.22)]"
+                  className="rounded-full bg-cyan-400 px-3 py-1.5 text-[8px] font-semibold text-slate-950 shadow-[0_10px_25px_rgba(34,211,238,0.22)]"
                 >
-                  Open HTML Report
+                  Open Report
                 </a>
                 <a
                   href={reportUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="rounded-full border border-slate-700 bg-white/5 px-4 py-2 text-xs text-slate-100 hover:bg-white/10"
+                  className="rounded-full border border-slate-700 bg-white/5 px-3 py-1.5 text-[8px] text-slate-100 hover:bg-white/10"
                 >
-                  Raw HTML
+                  HTML
                 </a>
                 {hasPdf ? (
                   <a
                     href={pdfUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="rounded-full border border-slate-700 bg-white/5 px-4 py-2 text-xs text-slate-100 hover:bg-white/10"
+                    className="rounded-full border border-slate-700 bg-white/5 px-3 py-1.5 text-[8px] text-slate-100 hover:bg-white/10"
                   >
-                    Open PDF
+                    PDF
                   </a>
-                ) : (
-                  <span className="rounded-full border border-slate-800 bg-black/20 px-4 py-2 text-xs text-slate-500">
-                    PDF unavailable
-                  </span>
-                )}
+                ) : null}
               </div>
+              <br/>
             </div>
           </div>
 
-          <div className="mt-4 flex items-center justify-between rounded-[24px] border border-white/10 bg-white/5 p-5">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Actions</p>
-              <p className="mt-1 text-xs text-slate-400">Finalize only after the regenerated report looks correct.</p>
-            </div>
-            <button
-              onClick={handleFinalize}
-              disabled={actionState !== 'idle' || Boolean(session?.is_finalized)}
-              className="rounded-full bg-emerald-500 px-4 py-2 text-xs font-semibold text-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.22)] disabled:opacity-100"
-              style={{ border: '2px solid rgba(255,255,255,0.95)' }}
-            >
-              {session?.is_finalized ? 'Finalized' : actionState === 'finalizing' ? 'Finalizing...' : 'Finalize'}
-            </button>
+          <div className="mt-4 rounded-[24px] border border-white/10 bg-white/5 p-5">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Attached Captures</p>
+            {attachedCapturesDraft.length ? (
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {attachedCapturesDraft.map((capture) => (
+                  <div key={capture.id} className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                    <img
+                      src={capture.dataUrl}
+                      alt={capture.label}
+                      className="h-[110px] w-full rounded-xl border border-white/10 bg-black object-contain"
+                    />
+                    <div className="mt-2 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-[13px] font-medium text-slate-100">{capture.createdAt}</p>
+                        <p className="text-[11px] text-slate-500">{capture.size || capture.label}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachedCapture(capture.id)}
+                        className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-3 text-[13px] text-slate-500">No captures attached to this report yet.</p>
+            )}
           </div>
 
+          <div className="mt-4 rounded-[24px] border border-white/10 bg-white/5 p-5">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Available Captures</p>
+            {availableCaptures.length ? (
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {availableCaptures.map((capture) => {
+                  const alreadyAttached = attachedCapturesDraft.some((item) => item.id === capture.id);
+                  return (
+                    <div key={capture.id} className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                      <img
+                        src={capture.dataUrl}
+                        alt={capture.label}
+                        className="h-[96px] w-full rounded-xl border border-white/10 bg-black object-contain"
+                      />
+                      <div className="mt-2 flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-[13px] font-medium text-slate-100">{capture.createdAt}</p>
+                          <p className="text-[11px] text-slate-500">{capture.size || capture.label}</p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={alreadyAttached}
+                          onClick={() => attachCaptureToReport(capture)}
+                          className="rounded-full border border-white/10 bg-cyan-400 px-2.5 py-1 text-[11px] font-semibold text-slate-950 disabled:bg-white/5 disabled:text-slate-500"
+                        >
+                          {alreadyAttached ? 'Added' : 'Add'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="mt-3 text-[13px] text-slate-500">No captures available from the current chart.</p>
+            )}
+          </div>
+          </div>
+          <div className={`border-t border-white/10 bg-black/10 ${isDock ? 'px-4 py-2' : 'px-5 py-2.5 md:px-6'}`}>
+            <div className="flex items-center justify-between gap-3 rounded-[18px] border border-white/10 bg-white/5 px-4 py-2.5">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Actions</p>
+                <p className="mt-0.5 text-[11px] leading-4 text-slate-400">Finalize after report check.</p>
+              </div>
+              <button
+                onClick={handleFinalize}
+                disabled={actionState !== 'idle' || Boolean(session?.is_finalized)}
+                className="rounded-full bg-emerald-500 px-4 py-1.5 text-[13px] font-semibold text-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.22)] disabled:opacity-100"
+                style={{ border: '2px solid rgba(255,255,255,0.95)' }}
+              >
+                {session?.is_finalized ? 'Finalized' : actionState === 'finalizing' ? 'Finalizing...' : 'Finalize'}
+              </button>
+            </div>
+          </div>
         </div>
       ) : activeTab === 'keywords' ? (
         <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
           <div className="rounded-[26px] border border-cyan-400/15 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(14,165,233,0.04))] p-5">
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Model Findings</p>
             <p className="mt-2 text-sm leading-6 text-slate-300">
-              Use these quick keywords to review findings before regenerating and opening the full report page.
+            
+             
             </p>
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
-            {keywords.map((keyword) => (
-              <span
-                key={keyword}
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
-              >
-                {keyword}
-              </span>
-            ))}
+            {keywords.map((keyword) => {
+              const normalizedKeyword = String(keyword || '').replace(/\r\n/g, '\n');
+              const newlineParts = normalizedKeyword.split('\n').filter(Boolean);
+              const colonIndex = normalizedKeyword.indexOf(':');
+              const extractedLabel = colonIndex >= 0 ? normalizedKeyword.slice(0, colonIndex + 1).trim() : newlineParts[0] || normalizedKeyword.trim();
+              const extractedValues = colonIndex >= 0
+                ? (normalizedKeyword.slice(colonIndex + 1).match(/#\d+/g) || [])
+                : newlineParts.slice(1).flatMap((line) => line.match(/#\d+/g) || []);
+              const lines = [extractedLabel, ...extractedValues].filter(Boolean);
+
+              return (
+                <div
+                  key={keyword}
+                  className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[13px] font-medium text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] text-center"
+                >
+                  <div className="flex flex-col items-center">
+                    {lines.map((line, index) => (
+                      <div key={`${keyword}-${line}-${index}`} className={index === 0 ? 'block' : 'mt-0.5 block'}>
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           <div className="mt-5 rounded-[24px] border border-white/10 bg-white/5 p-4">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Note</p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Note</p>
+              {renderDictationControl()}
+            </div>
             <textarea
               rows={4}
               value={reportNoteDraft}
               disabled={session?.is_finalized}
-              onChange={(event) => {
-                setReportNoteDraft(event.target.value);
-                setEditorDirty(true);
-                setSaveState('idle');
-              }}
-              className="mt-3 w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-cyan-400"
+              onChange={(event) => updateReportNoteDraft(event.target.value)}
+              className="mt-3 w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] text-slate-100 outline-none"
+              style={{ border: '1px solid #ffffff' }}
               placeholder="Add a clinician note for the report draft"
             />
+            {dictationTranscript && (
+               <p className="mt-2 text-[12px] leading-5 text-slate-500">
+                Transcript captured and summarized into SOAP format.
+              </p>
+            )}
           </div>
         </div>
       ) : activeTab === 'review' ? (
-        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
-          <div className="mb-4 flex items-center justify-between">
-            <span
-              className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
-                saveState === 'saving'
-                  ? 'bg-amber-500/15 text-amber-200'
-                  : saveState === 'saved'
-                    ? 'bg-emerald-500/15 text-emerald-200'
-                    : saveState === 'error'
-                      ? 'bg-red-500/15 text-red-200'
-                      : 'bg-slate-800 text-slate-300'
-              }`}
-            >
-              {saveState === 'saving' ? 'Saving' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Error' : 'Idle'}
-            </span>
-            <div className="text-xs text-slate-400">Review edits are autosaved for the next report generation.</div>
-          </div>
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
+            <div className="mb-4 flex items-center justify-between">
+              <span
+                className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                  saveState === 'saving'
+                    ? 'bg-amber-500/15 text-amber-200'
+                    : saveState === 'saved'
+                      ? 'bg-emerald-500/15 text-emerald-200'
+                      : saveState === 'error'
+                        ? 'bg-red-500/15 text-red-200'
+                        : 'bg-slate-800 text-slate-300'
+                }`}
+              >
+                {/* {saveState === 'saving' ? 'Saving' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Error' : 'Idle'} */}
+              </span>
+            </div>
 
-          <div className="space-y-4">
+            <div className="space-y-4">
             <div>
               <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tooth</label>
               <select
@@ -517,8 +926,8 @@ export function WebReportDrawer({
                   setEditorDirty(false);
                   setSaveState('idle');
                 }}
-                className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-cyan-400"
-                style={{ backgroundColor: '#0f172a', color: '#e2e8f0', colorScheme: 'dark' }}
+              className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] outline-none"
+              style={{ backgroundColor: '#0f172a', color: '#e2e8f0', colorScheme: 'dark', border: '1px solid #ffffff' }}
               >
                 {teeth.map((tooth) => (
                   <option
@@ -530,33 +939,6 @@ export function WebReportDrawer({
                   </option>
                 ))}
               </select>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              {(
-                [
-                  ['caries', 'Caries'],
-                  ['periapical', 'Periapical'],
-                  ['missing', 'Missing'],
-                  ['implant', 'Implant'],
-                  ['crown', 'Crown'],
-                  ['filling', 'Filling'],
-                ] as const
-              ).map(([field, label]) => (
-                <label key={field} className="flex items-center gap-2 rounded-2xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={reviewForm[field]}
-                    disabled={session?.is_finalized}
-                    onChange={(event) => {
-                      setReviewForm((prev) => ({ ...prev, [field]: event.target.checked }));
-                      setEditorDirty(true);
-                      setSaveState('idle');
-                    }}
-                  />
-                  <span>{label}</span>
-                </label>
-              ))}
             </div>
 
             <div className="grid grid-cols-2 gap-2">
@@ -573,7 +955,8 @@ export function WebReportDrawer({
                     setEditorDirty(true);
                     setSaveState('idle');
                   }}
-                  className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-cyan-400"
+                  className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] outline-none"
+                  style={{ border: '1px solid #ffffff' }}
                 />
               </label>
               <label className="block">
@@ -582,15 +965,17 @@ export function WebReportDrawer({
                   type="number"
                   min={0}
                   max={100}
-                  step={0.1}
+                  step={0.01}
                   value={reviewForm.bone_loss_pct}
                   disabled={session?.is_finalized}
                   onChange={(event) => {
-                    setReviewForm((prev) => ({ ...prev, bone_loss_pct: Number(event.target.value || 0) }));
+                    const roundedValue = roundToTwoDecimals(Number(event.target.value || 0));
+                    setReviewForm((prev) => ({ ...prev, bone_loss_pct: roundedValue }));
                     setEditorDirty(true);
                     setSaveState('idle');
                   }}
-                  className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-cyan-400"
+                  className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] outline-none"
+                  style={{ border: '1px solid #ffffff' }}
                 />
               </label>
             </div>
@@ -598,45 +983,69 @@ export function WebReportDrawer({
             <label className="block">
               <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tooth Note</span>
               <textarea
+                ref={toothNoteTextareaRef}
                 rows={3}
                 value={reviewForm.note}
                 disabled={session?.is_finalized}
                 onChange={(event) => {
-                  setReviewForm((prev) => ({ ...prev, note: event.target.value }));
-                  setEditorDirty(true);
-                  setSaveState('idle');
+                  updateToothNoteDraft(event.target.value);
+                  setToothNoteCaret(event.target.selectionStart ?? event.target.value.length);
                 }}
-                className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-cyan-400"
+                onClick={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
+                onKeyUp={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
+                onSelect={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Tab' && toothNoteAutocomplete?.ghostText) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    acceptToothNoteAutocomplete();
+                  }
+                }}
+                className="mt-3 w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] text-slate-100 outline-none"
+                style={{ border: '1px solid #ffffff' }}
+                placeholder="Add a note for the selected tooth"
               />
+              {toothNoteAutocomplete?.ghostText ? (
+                <button
+                  type="button"
+                  onClick={acceptToothNoteAutocomplete}
+                  className="mt-2 block text-left text-[13px] text-slate-500 transition-colors hover:text-slate-300"
+                >
+                  Suggestion: <span className="text-slate-400">{toothNoteAutocomplete.fullText}</span>
+                </button>
+              ) : null}
             </label>
 
             <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Note</span>
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-3">
+                <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Note</span>
+                {renderDictationControl()}
+              </div>
               <textarea
                 rows={3}
                 value={reportNoteDraft}
                 disabled={session?.is_finalized}
-                onChange={(event) => {
-                  setReportNoteDraft(event.target.value);
-                  setEditorDirty(true);
-                  setSaveState('idle');
-                }}
-                className="w-full rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-cyan-400"
+                onChange={(event) => updateReportNoteDraft(event.target.value)}
+                className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] text-slate-100 outline-none"
+                style={{ border: '1px solid #ffffff' }}
+                placeholder="Add a clinician note for the report draft"
               />
             </label>
-
+            </div>
+          </div>
+          <div className={`border-t border-white/10 bg-black/10 ${isDock ? 'px-4 py-3' : 'px-5 py-4 md:px-6'}`}>
             <div className="flex gap-2">
               <button
                 onClick={handleResetToAi}
                 disabled={!selectedToothId || Boolean(session?.is_finalized)}
-                className="flex-1 rounded-2xl border border-slate-700 px-3 py-2 text-sm font-medium text-slate-100 disabled:opacity-50"
+                className="flex-1 rounded-2xl border border-slate-700 px-3 py-2 text-[15px] font-medium text-slate-100 disabled:opacity-50"
               >
                 Reset Tooth
               </button>
               <button
                 onClick={handleOpenReportActions}
                 disabled={actionState !== 'idle'}
-                className="flex-1 rounded-2xl bg-cyan-500 px-3 py-2 text-sm font-medium text-slate-950 disabled:opacity-50"
+                className="flex-1 rounded-2xl bg-cyan-500 px-3 py-2 text-[15px] font-medium text-slate-950 disabled:opacity-50"
               >
                 {actionState === 'regenerating' ? 'Generating...' : 'Open Report Actions'}
               </button>
@@ -648,7 +1057,7 @@ export function WebReportDrawer({
           <div className="grid gap-4 md:grid-cols-2">
             <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Session Info</p>
-              <div className="mt-4 space-y-3 text-sm text-slate-200">
+              <div className="mt-4 space-y-3 text-[15px] text-slate-200">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-slate-400">Session</span>
                   <span className="font-medium text-white">{sessionId.slice(0, 8)}</span>
@@ -670,7 +1079,7 @@ export function WebReportDrawer({
 
             <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Document Info</p>
-              <div className="mt-4 space-y-3 text-sm text-slate-200">
+              <div className="mt-4 space-y-3 text-[15px] text-slate-200">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-slate-400">Version</span>
                   <span>{session?.report?.version ?? 1}</span>
@@ -701,7 +1110,7 @@ export function WebReportDrawer({
                 '3. Generate the report from Review.',
                 '4. Inspect the result in Report and finalize.',
               ].map((step) => (
-                <div key={step} className="rounded-2xl border border-white/10 bg-black/10 px-4 py-4 text-sm text-slate-200">
+                <div key={step} className="rounded-2xl border border-white/10 bg-black/10 px-4 py-4 text-[15px] text-slate-200">
                   {step}
                 </div>
               ))}

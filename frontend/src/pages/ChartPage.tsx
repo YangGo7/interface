@@ -8,7 +8,7 @@ import {
   AlertTriangle, Activity, Zap, Layers, Image as ImageIcon,
   MousePointer, Hand, ZoomIn, RotateCw, FlipHorizontal,
   Ruler, PenLine, Loader2, RotateCcw, AlertCircle, Skull,
-  ClipboardList, Quote, Sparkles, Grid, MousePointer2, Eraser, Rotate3d,
+  ClipboardList, Quote, Sparkles, MousePointer2, Eraser, Rotate3d,
   Trash2, Monitor, ChevronsUpDown, Camera, Crop, Search
 } from 'lucide-react';
 import { TopHeader } from '../components/TopHeader';
@@ -48,6 +48,8 @@ const formatCaptureFileTimestamp = (date: Date) => {
   return `${formatCaptureTimeline(date)}-${second}`;
 };
 
+const ODONTOGRAM_TEETH = [18, 17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27, 28, 48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38];
+
 export function ChartPage(props?: ChartPageProps) {
   const location = useLocation();
   const locationState = (location.state as any) || {};
@@ -80,6 +82,7 @@ export function ChartPage(props?: ChartPageProps) {
     id: string;
     label: string;
     dataUrl: string;
+    reportDataUrl: string;
     size: string;
     createdAt: string;
   }>>([]);
@@ -92,6 +95,7 @@ export function ChartPage(props?: ChartPageProps) {
   }>>({});
 
   const [selectedTooth, setSelectedTooth] = useState<number | undefined>(undefined);
+  const [activeLegendFilter, setActiveLegendFilter] = useState<'triage-3' | 'triage-2' | 'triage-1' | 'implant' | 'missing' | null>(null);
   const [viewMode, setViewMode] = useState<'overlay' | 'original' | 'heatmap'>(initialIsVolume ? 'original' : 'overlay');
   const [containerHeight] = useState(560);
   const [numberingSystem, setNumberingSystem] = useState<'fdi' | 'univ'>('fdi'); // [NEW]
@@ -127,6 +131,25 @@ export function ChartPage(props?: ChartPageProps) {
   useEffect(() => {
     let timer: any;
     const jobId = locationState?.jobId;
+    const readJsonOrThrow = async <T,>(response: Response): Promise<T> => {
+      const contentType = response.headers.get('content-type') || '';
+      const raw = await response.text();
+      const trimmed = raw.trim();
+
+      if (!contentType.includes('application/json') && trimmed.startsWith('<')) {
+        throw new Error(
+          `Expected JSON but received HTML from ${response.url || 'request'}. Check the API route/proxy.`
+        );
+      }
+
+      try {
+        return (raw ? JSON.parse(raw) : {}) as T;
+      } catch {
+        throw new Error(
+          `Failed to parse JSON from ${response.url || 'request'} (${contentType || 'unknown content-type'}).`
+        );
+      }
+    };
 
     if (jobId && !result) {
       setIsProcessing(true);
@@ -144,7 +167,7 @@ export function ChartPage(props?: ChartPageProps) {
             }
             return;
           }
-          const data = await res.json();
+          const data = await readJsonOrThrow<any>(res);
           if (data.success && data.status === 'done' && data.result) {
             clearInterval(timer);
             setResult(data.result);
@@ -316,6 +339,7 @@ export function ChartPage(props?: ChartPageProps) {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         label,
         dataUrl: previewCanvas.toDataURL('image/png'),
+        reportDataUrl: sourceCanvas.toDataURL('image/png'),
         size: `${sourceCanvas.width}x${sourceCanvas.height}`,
         createdAt: formatCaptureTimeline(capturedAt),
       };
@@ -607,8 +631,14 @@ export function ChartPage(props?: ChartPageProps) {
     const sources = [
       Array.isArray(result?.data) ? result.data : [],
       Array.isArray(result?.teeth) ? result.teeth : Object.values(result?.teeth || {}),
+      Array.isArray(result?.missing_teeth) ? result.missing_teeth : [],
+      Array.isArray(result?.implant_site_candidates) ? result.implant_site_candidates : [],
+      Array.isArray(result?.implant_candidates) ? result.implant_candidates : [],
       Array.isArray(result?.analysis_result?.data) ? result.analysis_result.data : [],
       Array.isArray(result?.analysis_result?.teeth) ? result.analysis_result.teeth : Object.values(result?.analysis_result?.teeth || {}),
+      Array.isArray(result?.analysis_result?.missing_teeth) ? result.analysis_result.missing_teeth : [],
+      Array.isArray(result?.analysis_result?.implant_site_candidates) ? result.analysis_result.implant_site_candidates : [],
+      Array.isArray(result?.analysis_result?.implant_candidates) ? result.analysis_result.implant_candidates : [],
     ];
 
     sources.forEach((items: any[]) => {
@@ -708,6 +738,27 @@ export function ChartPage(props?: ChartPageProps) {
     statuses[key] = { ...st, triage };
   });
 
+  const getLegendCategory = (toothKey: string) => {
+    const st = statuses[toothKey] || {};
+    if (st.missing) return 'missing';
+    if (st.implant) return 'implant';
+    return st.triage || 'triage-3';
+  };
+
+  const legendCounts = ODONTOGRAM_TEETH.reduce((acc, tooth) => {
+    const category = getLegendCategory(String(tooth));
+    acc[category] = (acc[category] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+
+  const dentalLegendItems = [
+    { key: 'triage-3', label: 'Routine Checkup (Triage 3)', color: '#16A34A', dashed: false, gap: 18, count: legendCounts['triage-3'] || 0 },
+    { key: 'triage-2', label: 'Treatment Required (Triage 2)', color: '#D4A106', dashed: false, gap: 24, count: legendCounts['triage-2'] || 0 },
+    { key: 'triage-1', label: 'Urgent Priority (Triage 1)', color: '#DC2626', dashed: false, gap: 18, count: legendCounts['triage-1'] || 0 },
+    { key: 'implant', label: 'Implant', color: '#2563EB', dashed: false, gap: 18, count: legendCounts['implant'] || 0 },
+    { key: 'missing', label: 'Missing Tooth', color: '#94A3B8', dashed: true, gap: 0, count: legendCounts['missing'] || 0 },
+  ].filter((item) => item.count > 0);
+
   const baseStatuses = (() => {
     const map: Record<string, string> = {};
     const teethSeq = [18, 17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27, 28, 48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38];
@@ -755,31 +806,124 @@ export function ChartPage(props?: ChartPageProps) {
     });
     return map;
   })();
+  const estimateImplantMetricsFromContour = (contour: any, mmPerPx: number) => {
+    if (!Array.isArray(contour) || contour.length < 3 || !Number.isFinite(mmPerPx) || mmPerPx <= 0) {
+      return { diameterMm: null, lengthMm: null };
+    }
+
+    const points = contour
+      .map((pt: any) => Array.isArray(pt) && pt.length >= 2 ? [Number(pt[0]), Number(pt[1])] : null)
+      .filter((pt: number[] | null): pt is number[] => {
+        if (!pt) return false;
+        return Number.isFinite(pt[0]) && Number.isFinite(pt[1]);
+      });
+
+    if (points.length < 3) {
+      return { diameterMm: null, lengthMm: null };
+    }
+
+    const meanX = points.reduce((sum, [x]) => sum + x, 0) / points.length;
+    const meanY = points.reduce((sum, [, y]) => sum + y, 0) / points.length;
+    let xx = 0;
+    let xy = 0;
+    let yy = 0;
+    points.forEach(([x, y]) => {
+      const dx = x - meanX;
+      const dy = y - meanY;
+      xx += dx * dx;
+      xy += dx * dy;
+      yy += dy * dy;
+    });
+
+    const trace = xx + yy;
+    const det = xx * yy - xy * xy;
+    const eigen = trace / 2 + Math.sqrt(Math.max(0, (trace * trace) / 4 - det));
+    let axisX = xy;
+    let axisY = eigen - xx;
+    if (Math.abs(axisX) < 1e-6 && Math.abs(axisY) < 1e-6) {
+      axisX = xx >= yy ? 1 : 0;
+      axisY = xx >= yy ? 0 : 1;
+    }
+    const axisNorm = Math.hypot(axisX, axisY) || 1;
+    const ux = axisX / axisNorm;
+    const uy = axisY / axisNorm;
+    const vx = -uy;
+    const vy = ux;
+
+    const axisProjections = points.map(([x, y]) => x * ux + y * uy);
+    const perpProjections = points.map(([x, y]) => x * vx + y * vy);
+    const lengthPx = Math.max(...axisProjections) - Math.min(...axisProjections);
+    const diameterPx = Math.max(...perpProjections) - Math.min(...perpProjections);
+
+    if (lengthPx <= 0 || diameterPx <= 0) {
+      return { diameterMm: null, lengthMm: null };
+    }
+
+    return {
+      diameterMm: diameterPx * mmPerPx,
+      lengthMm: lengthPx * mmPerPx,
+    };
+  };
+  const getBestConfidence = (bestMap: any, rawMap: any, key: string) => {
+    const item = bestMap?.[key] || rawMap?.[key];
+    const conf = Number(item?.conf);
+    return Number.isFinite(conf) ? conf : null;
+  };
   const odontogramTooltipData = Object.keys(statuses).reduce((acc, key) => {
     const tooth = toothRecords[key] || {};
     const status = statuses[key] || {};
-    const gapMm = Number(
-      tooth?.mesiodistal_gap_mm ??
-      tooth?.implant_guide?.mesiodistal_gap_mm ??
-      implantMetricsByTooth[key]?.mesiodistal_gap_mm ??
+    const implantMetric = implantMetricsByTooth[key] || {};
+    const implantGuide = tooth?.implant_guide || {};
+    const mmPerPx = Number(result?.mm_per_px || 0.1);
+    const contourMetrics = estimateImplantMetricsFromContour(tooth?.contour, mmPerPx);
+    const diameterMm = Number(
+      implantMetric?.diameter_mm ??
+      implantMetric?.diameter ??
+      tooth?.implant_meta?.diameter ??
+      contourMetrics.diameterMm ??
       0
     );
-    const nerveDistMm = Number(tooth?.nerve_dist_mm ?? status?.nerve_dist_mm ?? 0);
-    const isImplantLike = Boolean(status?.implant || gapMm > 0);
+    const lengthMm = Number(
+      implantMetric?.length_mm ??
+      implantMetric?.length ??
+      tooth?.implant_meta?.length ??
+      contourMetrics.lengthMm ??
+      0
+    );
+    const gapMm = Number(
+      tooth?.mesiodistal_gap_mm ??
+      implantGuide?.mesiodistal_gap_mm ??
+      implantMetric?.mesiodistal_gap_mm ??
+      0
+    );
+    const centerToNerveMm = Number(
+      implantGuide?.dist_mm ??
+      tooth?.center_to_nerve_dist_mm ??
+      implantMetric?.dist_mm ??
+      tooth?.nerve_dist_mm ??
+      status?.nerve_dist_mm ??
+      0
+    );
+    const cariesProb = getBestConfidence(result?.caries_by_tooth_best, result?.caries_by_tooth, key);
+    const periapicalProb = getBestConfidence(result?.periapical_by_tooth_best, result?.periapical_by_tooth, key);
+    const isExistingImplant = Boolean(status?.implant && (diameterMm > 0 || lengthMm > 0));
+    const isPlanningLike = Boolean(status?.missing || gapMm > 0 || centerToNerveMm > 0);
     let statusLabel = 'Healthy';
     if (status?.missing && !status?.implant) statusLabel = 'Missing';
-    else if (isImplantLike) statusLabel = 'Implant';
+    else if (status?.implant) statusLabel = 'Implant';
     else if (status?.caries || status?.peri || Number(status?.bone_loss_level || 0) >= 3) statusLabel = 'Requires Tx';
 
     acc[key] = {
-      kind: isImplantLike ? 'implant' : 'finding',
+      kind: isExistingImplant ? 'implant' : isPlanningLike ? 'planning' : 'finding',
       status: statusLabel,
       pblPct: Number.isFinite(Number(status?.bone_loss_pct)) ? Number(status?.bone_loss_pct) : null,
       level: status?.bone_loss_level ?? null,
-      caries: Boolean(status?.caries),
-      periapical: Boolean(status?.peri),
+      cariesProb,
+      periapicalProb,
+      diameterMm: diameterMm > 0 ? diameterMm : null,
+      lengthMm: lengthMm > 0 ? lengthMm : null,
       gapMm: gapMm > 0 ? gapMm : null,
-      nerveDistMm: nerveDistMm > 0 ? nerveDistMm : null,
+      centerToNerveMm: centerToNerveMm > 0 ? centerToNerveMm : null,
     };
     return acc;
   }, {} as Record<string, any>);
@@ -1736,7 +1880,7 @@ export function ChartPage(props?: ChartPageProps) {
     }
 
     const currentTransformScale = Math.max(scale * zoom, 0.001);
-    const lensRadius = 150 / currentTransformScale;
+    const lensRadius = 200 / currentTransformScale;
     const zoomFactor = 3.0;
     const focusImgX = magnifierState.imgX;
     const focusImgY = magnifierState.imgY;
@@ -2130,54 +2274,64 @@ export function ChartPage(props?: ChartPageProps) {
     return null;
   };
 
+  const toolbarPrimaryButtons = (
+    <>
+      <ToolBtn compact active={selectedToolbarButton === 'pointer'} onClick={() => { handleToolChange('pointer'); setSelectedToolbarButton('pointer'); }} icon={MousePointer} title="Select Tool" />
+      <ToolBtn compact active={selectedToolbarButton === 'pan'} onClick={() => toggleToolOrPointer('pan')} icon={Hand} title="Pan" />
+      <ToolBtn compact active={selectedToolbarButton === 'wlww'} onClick={() => toggleToolOrPointer('wlww')} icon={WindowLevelIcon} title="Window / Level" />
+      <ToolBtn compact active={selectedToolbarButton === 'invert'} onClick={() => { setInverted((value) => !value); setSelectedToolbarButton((value) => value === 'invert' ? 'pointer' : 'invert'); }} icon={InvertIcon} title="Invert" />
+      <ToolBtn compact active={selectedToolbarButton === 'flip'} onClick={() => { setFlipped((value) => !value); setSelectedToolbarButton((value) => value === 'flip' ? 'pointer' : 'flip'); }} icon={FlipHorizontal} title="Flip Horizontal" />
+      <ToolBtn compact active={false} onClick={() => setRotation((value) => value + 90)} icon={RotateCw} title="Rotate 90" />
+      {viewerMode === 'grid' && (
+        <>
+          <ToolBtn compact active={selectedToolbarButton === 'rotate'} onClick={() => toggleToolOrPointer('rotate')} icon={Rotate3d} title="3D Rotate" />
+          <ToolBtn compact active={selectedToolbarButton === 'scroll'} onClick={() => toggleToolOrPointer('scroll')} icon={ChevronsUpDown} title="Slice Scroll" />
+        </>
+      )}
+      <ToolBtn compact active={selectedToolbarButton === 'magnifier'} disabled={magnifierDisabled} onClick={() => toggleToolOrPointer('magnifier')} icon={Search} title={magnifierDisabled ? 'Magnifier disabled in Grid/MPR view' : 'Magnifier'} />
+      <ToolBtn compact active={selectedToolbarButton === 'measure'} onClick={(event: any) => toggleGroupedToolOrPointer(event, 'measure', selectedToolbarButton === 'measure')} icon={Ruler} title="Measure" />
+    </>
+  );
+
+  const toolbarSecondaryButtons = (
+    <>
+      <ToolBtn compact active={selectedToolbarButton === 'annotate'} onClick={(event: any) => toggleGroupedToolOrPointer(event, 'annotate', selectedToolbarButton === 'annotate')} icon={PenLine} title="Annotate" />
+      <ToolBtn compact active={selectedToolbarButton === 'erase'} onClick={() => toggleToolOrPointer('erase')} icon={Eraser} title="Eraser" />
+      <ToolBtn compact active={selectedToolbarButton === 'capture-area'} disabled={areaCaptureDisabled} onClick={() => {
+        toggleToolOrPointer('capture-area');
+      }} icon={Crop} title={areaCaptureDisabled ? 'Area Capture disabled in CT/DICOM view' : 'Area Capture'} />
+      <ToolBtn compact active={false} onClick={() => { void handleCapture(); }} icon={Camera} title="Full Capture" />
+      <ToolBtn compact active={false} onClick={() => { if (window.confirm('Clear all?')) clearAllAnnotations(); }} icon={Trash2} title="Clear All" />
+      <button
+        onClick={resetView}
+        className={getToolbarButtonClass({ compact: true })}
+        title="Reset All Views"
+      >
+        <RotateCcw className="h-5 w-5" />
+      </button>
+      <ToolBtn compact active={selectedToolbarButton === 'zoom'} onClick={() => toggleToolOrPointer('zoom')} icon={ZoomIn} title={zoomWheelActive ? 'Disable Wheel Zoom' : 'Enable Wheel Zoom'} />
+      <button
+        onClick={() => { setViewMode(viewMode === 'overlay' ? 'original' : 'overlay'); setSelectedToolbarButton('view-toggle'); }}
+        className={getToolbarButtonClass({ active: selectedToolbarButton === 'view-toggle', compact: true })}
+        title={viewMode === 'overlay' ? 'Switch to Original Source' : 'Switch to AI Analysis'}
+      >
+        {viewMode === 'overlay' ? <Layers className="h-5 w-5" /> : <ImageIcon className="h-5 w-5" />}
+      </button>
+      <button
+        onClick={() => { setViewMode('heatmap'); setSelectedToolbarButton('heatmap'); }}
+        className={getToolbarButtonClass({ active: selectedToolbarButton === 'heatmap', compact: true })}
+        title="Risk Overlay"
+      >
+        <Activity className="h-5 w-5" />
+      </button>
+    </>
+  );
+
   const toolbarActions = (
     <div className="flex flex-col items-start gap-2" style={{ marginLeft: 100 }}>
-      <div className="flex flex-wrap items-center gap-2">
-        <ToolBtn compact active={selectedToolbarButton === 'pointer'} onClick={() => { handleToolChange('pointer'); setSelectedToolbarButton('pointer'); }} icon={MousePointer} title="Select Tool" />
-        <ToolBtn compact active={selectedToolbarButton === 'pan'} onClick={() => toggleToolOrPointer('pan')} icon={Hand} title="Pan" />
-        <ToolBtn compact active={selectedToolbarButton === 'wlww'} onClick={() => toggleToolOrPointer('wlww')} icon={WindowLevelIcon} title="Window / Level" />
-        <ToolBtn compact active={selectedToolbarButton === 'invert'} onClick={() => { setInverted((value) => !value); setSelectedToolbarButton((value) => value === 'invert' ? 'pointer' : 'invert'); }} icon={InvertIcon} title="Invert" />
-        <ToolBtn compact active={selectedToolbarButton === 'flip'} onClick={() => { setFlipped((value) => !value); setSelectedToolbarButton((value) => value === 'flip' ? 'pointer' : 'flip'); }} icon={FlipHorizontal} title="Flip Horizontal" />
-        <ToolBtn compact active={false} onClick={() => setRotation((value) => value + 90)} icon={RotateCw} title="Rotate 90" />
-        {viewerMode === 'grid' && (
-          <>
-            <ToolBtn compact active={selectedToolbarButton === 'rotate'} onClick={() => toggleToolOrPointer('rotate')} icon={Rotate3d} title="3D Rotate" />
-            <ToolBtn compact active={selectedToolbarButton === 'scroll'} onClick={() => toggleToolOrPointer('scroll')} icon={ChevronsUpDown} title="Slice Scroll" />
-          </>
-        )}
-        <ToolBtn compact active={selectedToolbarButton === 'magnifier'} disabled={magnifierDisabled} onClick={() => toggleToolOrPointer('magnifier')} icon={Search} title={magnifierDisabled ? 'Magnifier disabled in Grid/MPR view' : 'Magnifier'} />
-        <ToolBtn compact active={selectedToolbarButton === 'measure'} onClick={(event: any) => toggleGroupedToolOrPointer(event, 'measure', selectedToolbarButton === 'measure')} icon={Ruler} title="Measure" />
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <ToolBtn compact active={selectedToolbarButton === 'annotate'} onClick={(event: any) => toggleGroupedToolOrPointer(event, 'annotate', selectedToolbarButton === 'annotate')} icon={PenLine} title="Annotate" />
-        <ToolBtn compact active={selectedToolbarButton === 'erase'} onClick={() => toggleToolOrPointer('erase')} icon={Eraser} title="Eraser" />
-        <ToolBtn compact active={selectedToolbarButton === 'capture-area'} disabled={areaCaptureDisabled} onClick={() => {
-          toggleToolOrPointer('capture-area');
-        }} icon={Crop} title={areaCaptureDisabled ? 'Area Capture disabled in CT/DICOM view' : 'Area Capture'} />
-        <ToolBtn compact active={false} onClick={() => { void handleCapture(); }} icon={Camera} title="Full Capture" />
-        <ToolBtn compact active={false} onClick={() => { if (window.confirm('Clear all?')) clearAllAnnotations(); }} icon={Trash2} title="Clear All" />
-        <button
-          onClick={resetView}
-          className={getToolbarButtonClass({ compact: true })}
-          title="Reset All Views"
-        >
-          <RotateCcw className="h-5 w-5" />
-        </button>
-        <ToolBtn compact active={selectedToolbarButton === 'zoom'} onClick={() => toggleToolOrPointer('zoom')} icon={ZoomIn} title={zoomWheelActive ? 'Disable Wheel Zoom' : 'Enable Wheel Zoom'} />
-        <button
-          onClick={() => { setViewMode(viewMode === 'overlay' ? 'original' : 'overlay'); setSelectedToolbarButton('view-toggle'); }}
-          className={getToolbarButtonClass({ active: selectedToolbarButton === 'view-toggle', compact: true })}
-          title={viewMode === 'overlay' ? 'Switch to Original Source' : 'Switch to AI Analysis'}
-        >
-          {viewMode === 'overlay' ? <Layers className="h-5 w-5" /> : <ImageIcon className="h-5 w-5" />}
-        </button>
-        <button
-          onClick={() => { setViewMode('heatmap'); setSelectedToolbarButton('heatmap'); }}
-          className={getToolbarButtonClass({ active: selectedToolbarButton === 'heatmap', compact: true })}
-          title="Risk Overlay"
-        >
-          <Activity className="h-5 w-5" />
-        </button>
+      <div className="flex flex-nowrap items-center gap-2">
+        {toolbarPrimaryButtons}
+        {toolbarSecondaryButtons}
       </div>
     </div>
   );
@@ -2196,10 +2350,10 @@ export function ChartPage(props?: ChartPageProps) {
       {hasViewerShell && (
         <div className="flex flex-1 relative overflow-y-auto">
           <aside
-            className={`flex-shrink-0 overflow-hidden border-r border-gray-800/80 transition-all duration-300 ${workspaceOpen ? 'w-[96px] min-w-[96px] max-w-[96px]' : 'w-[68px] min-w-[68px]'}`}
+            className={`flex-shrink-0 overflow-hidden border-r border-gray-800/80 transition-all duration-300 ${workspaceOpen ? 'w-[84px] min-w-[84px] max-w-[84px]' : 'w-[42px] min-w-[42px] max-w-[42px]'}`}
             style={{ backgroundColor: '#050816' }}
           >
-            <div className="flex h-full flex-col px-3 py-4">
+            <div className={`flex h-full flex-col py-4 ${workspaceOpen ? 'px-3' : 'px-1.5'}`}>
               <div className={`flex items-center ${workspaceOpen ? 'justify-between' : 'justify-center'} gap-2`}>
                 {workspaceOpen && (
                   <div>
@@ -2208,7 +2362,7 @@ export function ChartPage(props?: ChartPageProps) {
                 )}
                 <button
                   onClick={() => setWorkspaceOpen((prev) => !prev)}
-                  className="flex h-10 w-10 items-center justify-center rounded-2xl border border-cyan-300/20 bg-cyan-400/10 text-cyan-100 transition hover:border-cyan-300/40 hover:bg-cyan-400/20"
+                  className={`flex items-center justify-center border border-cyan-300/20 bg-cyan-400/10 text-cyan-100 transition hover:border-cyan-300/40 hover:bg-cyan-400/20 ${workspaceOpen ? 'h-10 w-10 rounded-2xl' : 'h-8 w-8 rounded-xl'}`}
                   title={workspaceOpen ? 'Collapse workspace' : 'Expand workspace'}
                 >
                   <span className="text-lg font-bold leading-none">{workspaceOpen ? '‹' : '›'}</span>
@@ -2385,27 +2539,11 @@ export function ChartPage(props?: ChartPageProps) {
                         {viewModeLabel}
                       </span>
                     </div>
-                    {viewMode === 'heatmap' && (
-                      <div className="absolute right-4 top-4 z-10 rounded-[20px] border border-white/10 bg-black/60 px-4 py-3 text-[11px] text-slate-200 shadow-2xl backdrop-blur-xl">
-                        <p className="font-semibold uppercase tracking-[0.18em] text-orange-300">Risk Overlay</p>
-                        <div className="mt-2 flex items-center gap-2">
-                          <span className="h-2.5 w-2.5 rounded-full bg-orange-400 shadow-[0_0_10px_rgba(251,146,60,0.9)]" />
-                          <span>Caries</span>
-                        </div>
-                        <div className="mt-1 flex items-center gap-2">
-                          <span className="h-2.5 w-2.5 rounded-full bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.9)]" />
-                          <span>Periapical</span>
-                        </div>
-                        <div className="mt-1 flex items-center gap-2">
-                          <span className="h-2.5 w-2.5 rounded-full bg-yellow-300 shadow-[0_0_10px_rgba(253,224,71,0.9)]" />
-                          <span>Bone loss severity</span>
-                        </div>
-                      </div>
-                    )}
+
                       {/* Magnifier debug panel kept for local troubleshooting; hidden in normal UI. */}
 
                     <div
-                      className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : activeTool === 'magnifier' || activeTool === 'zoom' ? 'cursor-zoom-in' : 'cursor-grab active:cursor-grabbing'}`}
+                              className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : activeTool === 'magnifier' ? 'cursor-none' : activeTool === 'zoom' ? 'cursor-zoom-in' : 'cursor-grab active:cursor-grabbing'}`}
                       style={{ minHeight: `${shouldUseCornerstone ? containerHeight : viewerHeight}px`, height: `${shouldUseCornerstone ? containerHeight : viewerHeight}px` }}
                       ref={viewerRef}
                       onMouseDown={handleMouseDown}
@@ -2508,7 +2646,7 @@ export function ChartPage(props?: ChartPageProps) {
                       ) : showSrc ? (
                         <div className="relative w-full h-full flex items-center justify-center overflow-hidden" ref={containerRef}>
                           <div
-                            className="relative cursor-crosshair transform-gpu will-change-transform shadow-2xl ring-1 ring-black/5 mx-auto"
+                            className={`relative transform-gpu will-change-transform shadow-2xl ring-1 ring-black/5 mx-auto ${activeTool === 'magnifier' ? 'cursor-none' : 'cursor-crosshair'}`}
                             style={{
                               width: displaySize.width,
                               height: displaySize.height,
@@ -2516,6 +2654,7 @@ export function ChartPage(props?: ChartPageProps) {
                               transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale * zoom}) rotate(${rotation}deg) scaleX(${flipped ? -1 : 1})`,
                               transition: activeTool === 'pan' ? 'none' : 'transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
                               transformOrigin: 'center',
+                              cursor: activeTool === 'magnifier' ? 'none' : 'crosshair',
                             }}
                           >
                             <img
@@ -2599,25 +2738,53 @@ export function ChartPage(props?: ChartPageProps) {
                   <div className="space-y-6">
                     <div className="relative flex flex-col items-center gap-4 xl:pt-1">
                       <div className="min-w-0 flex justify-center">
-                        <DentalChartLegend />
+                        <DentalChartLegend
+                          items={dentalLegendItems}
+                          activeKey={activeLegendFilter}
+                          onToggle={(key) => setActiveLegendFilter((prev) => (prev === key ? null : key))}
+                        />
                       </div>
                       <div className="flex justify-center">
-                        <span className="text-sm font-semibold tracking-[0.08em] text-[#CBD5E1]">
+                        {/* <span className="text-sm font-semibold tracking-[0.08em] text-[#CBD5E1]">
                           Odontogram
-                        </span>
+                        </span> */}
                       </div>
                     </div>
 
                     <section className="rounded-2xl border px-6 py-5 shadow-sm" style={{ backgroundColor: '#090B20', borderColor: 'rgba(255,255,255,0.10)' }}>
                       <div className="mb-5 flex items-start justify-between gap-4">
-                        <h3 className="text-[28px] font-bold tracking-[-0.03em] text-white">Dental Chart</h3>
+                        <h3 className="text-[30px] font-bold tracking-[-0.03em] text-white">Dental Chart</h3>
                         <button
                           onClick={() => setNumberingSystem(prev => prev === 'fdi' ? 'univ' : 'fdi')}
-                          className="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm transition-all"
-                          style={{ backgroundColor: '#10132F', borderColor: '#2A3166', color: '#E5E7EB' }}
+                          className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap px-1 py-1 text-xs font-semibold leading-none transition-opacity hover:opacity-80"
+                          style={{
+                            display: 'inline-flex',
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '10px',
+                            whiteSpace: 'nowrap',
+                          }}
+                          title="Toggle numbering system"
                         >
-                          <RotateCw size={12} className="text-[#2563EB]" />
-                          Notation: <span className="text-[#2563EB] whitespace-nowrap">{numberingSystem === 'fdi' ? 'FDI (11-48)' : 'Univ (1-32)'}</span>
+                          <div
+                            className="pointer-events-none whitespace-nowrap"
+                            style={{ color: numberingSystem === 'fdi' ? '#FFFFFF' : '#475569' }}
+                          >
+                            FDI
+                          </div>
+                          <div
+                            className="pointer-events-none whitespace-nowrap"
+                            style={{ color: '#64748B' }}
+                          >
+                            /
+                          </div>
+                          <div
+                            className="pointer-events-none whitespace-nowrap"
+                            style={{ color: numberingSystem === 'univ' ? '#FFFFFF' : '#475569' }}
+                          >
+                            Univ
+                          </div>
                         </button>
                       </div>
                       <div className="flex flex-col items-center">
@@ -2630,6 +2797,7 @@ export function ChartPage(props?: ChartPageProps) {
                           implantSites={implantSiteCandidates}
                           numberingSystem={numberingSystem}
                           tooltipData={odontogramTooltipData}
+                          activeLegendFilter={activeLegendFilter}
                         />
                       </div>
                     </section>
@@ -2743,6 +2911,7 @@ export function ChartPage(props?: ChartPageProps) {
         <WebReportDrawer
           sessionId={reportSessionId}
           selectedToothId={selectedTooth ? String(selectedTooth) : null}
+          availableCaptures={captureGallery}
           onClose={() => setReportDrawerOpen(false)}
           open={reportDrawerOpen}
           layout="dock"
@@ -2767,8 +2936,8 @@ export function ChartPage(props?: ChartPageProps) {
           zIndex: 2147483002,
           pointerEvents: 'auto',
           opacity: hasViewerShell ? 1 : 0.7,
-          width: 88,
-          height: 88,
+          width: 80,
+          height: 80,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -2792,8 +2961,7 @@ export function ChartPage(props?: ChartPageProps) {
         aria-label="Open AI note report panel"
         title={reportStartState === 'creating' ? 'Loading report workspace' : reportSessionId ? 'Open report draft' : 'Open report workspace'}
         >
-          <ClipboardList className="h-7 w-7" />
-          <span className="text-[11px] font-black uppercase tracking-[0.12em]">Report</span>
+          <ClipboardList size={34} />
           {reportStartState === 'creating' && (
             <span
               className="pointer-events-none absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full border border-white bg-cyan-400 px-1 text-[9px] font-bold text-slate-950 shadow-[0_6px_16px_rgba(34,211,238,0.28)]"
@@ -2868,22 +3036,29 @@ function CtxBtn({ onClick, label }: any) {
   );
 }
 
-function DentalChartLegend() {
-  const items = [
-    { label: 'Routine Checkup (Triage 3)', color: '#16A34A', dashed: false, gap: 18 },
-    { label: 'Treatment Required (Triage 2)', color: '#D4A106', dashed: false, gap: 24 },
-    { label: 'Urgent Priority (Triage 1)', color: '#DC2626', dashed: false, gap: 18 },
-    { label: 'Implant', color: '#2563EB', dashed: false, gap: 18 },
-    { label: 'Missing Tooth', color: '#94A3B8', dashed: true, gap: 0 },
-  ];
-
+function DentalChartLegend({
+  items,
+  activeKey,
+  onToggle,
+}: {
+  items: Array<{ key: string; label: string; color: string; dashed: boolean; gap: number }>;
+  activeKey: string | null;
+  onToggle: (key: 'triage-3' | 'triage-2' | 'triage-1' | 'implant' | 'missing') => void;
+}) {
   return (
     <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-center text-[14px] font-semibold xl:max-w-none">
       {items.map((item) => (
-        <div
+        <button
           key={item.label}
-          className="inline-flex items-center justify-center gap-3 whitespace-nowrap text-[#334155]"
-          style={{ marginRight: item.gap }}
+          type="button"
+          onClick={() => onToggle(item.key as 'triage-3' | 'triage-2' | 'triage-1' | 'implant' | 'missing')}
+          className="inline-flex items-center justify-center gap-3 whitespace-nowrap rounded-full px-2 py-1 transition-all"
+          style={{
+            marginRight: item.gap,
+            opacity: activeKey && activeKey !== item.key ? 0.35 : 1,
+            filter: activeKey && activeKey !== item.key ? 'saturate(0.35)' : 'none',
+            boxShadow: activeKey === item.key ? '0 0 0 1px rgba(255,255,255,0.2) inset, 0 8px 18px rgba(15,23,42,0.16)' : 'none',
+          }}
         >
           <span
             className="block w-7"
@@ -2892,7 +3067,7 @@ function DentalChartLegend() {
             }}
           />
           <span className="whitespace-nowrap" style={{ color: item.color }}>{item.label}</span>
-        </div>
+        </button>
       ))}
     </div>
   );

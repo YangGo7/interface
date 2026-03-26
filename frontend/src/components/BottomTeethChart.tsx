@@ -12,14 +12,16 @@ interface ToothStatus {
 }
 
 interface ToothTooltipData {
-  kind?: 'finding' | 'implant';
+  kind?: 'finding' | 'implant' | 'planning';
   status?: string;
   pblPct?: number | null;
   level?: number | string | null;
-  caries?: boolean;
-  periapical?: boolean;
+  cariesProb?: number | null;
+  periapicalProb?: number | null;
+  diameterMm?: number | null;
+  lengthMm?: number | null;
   gapMm?: number | null;
-  nerveDistMm?: number | null;
+  centerToNerveMm?: number | null;
 }
 
 interface BottomTeethChartProps {
@@ -31,6 +33,7 @@ interface BottomTeethChartProps {
   implantSites?: (number | string)[];
   numberingSystem?: 'fdi' | 'univ'; // [NEW]
   tooltipData?: Record<string, ToothTooltipData>;
+  activeLegendFilter?: 'triage-3' | 'triage-2' | 'triage-1' | 'implant' | 'missing' | null;
 }
 
 export function BottomTeethChart({
@@ -42,6 +45,7 @@ export function BottomTeethChart({
   implantSites = [],
   numberingSystem = 'fdi',
   tooltipData = {},
+  activeLegendFilter = null,
 }: BottomTeethChartProps) {
   const tileWidth = 52;
   const tileHeight = 117;
@@ -98,10 +102,24 @@ export function BottomTeethChart({
     return quadrant === 2 || quadrant === 3;
   };
 
+  const getLegendCategory = (tooth: number) => {
+    const st = statuses[String(tooth)] || {};
+    if (st.missing) return 'missing';
+    if (st.implant) return 'implant';
+    return st.triage || 'triage-3';
+  };
+
   const formatValue = (value?: number | string | null, suffix = '') => {
     if (value === null || value === undefined || value === '') return '-';
     if (typeof value === 'number') return `${value.toFixed(1)}${suffix}`;
     return `${value}${suffix}`;
+  };
+
+  const formatProbability = (value?: number | null) => {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+    const normalized = Number(value);
+    const percent = normalized <= 1 ? normalized * 100 : normalized;
+    return `${percent.toFixed(1)}%`;
   };
 
   const hoveredTooltip = hoveredTooth ? tooltipData[String(hoveredTooth)] : null;
@@ -118,6 +136,8 @@ export function BottomTeethChart({
         const { fill, border, dashed, ring } = getTileStyle(tooth);
         const numColor = dashed ? '#94A3B8' : border;
         const displayNum = numberingSystem === 'univ' ? toUniv(tooth) : tooth;
+        const legendCategory = getLegendCategory(tooth);
+        const dimmed = Boolean(activeLegendFilter && legendCategory !== activeLegendFilter);
 
         return (
           <div key={tooth} className="relative flex flex-col items-center gap-1.5 overflow-visible">
@@ -140,8 +160,14 @@ export function BottomTeethChart({
                 background: fill,
                 borderColor: border,
                 borderStyle: dashed ? 'dashed' : 'solid',
-                boxShadow: ring ? '0 0 0 1.5px #DC2626 inset, 0 4px 10px rgba(15,23,42,0.06)' : '0 4px 10px rgba(15,23,42,0.05)',
+                boxShadow: ring
+                  ? '0 0 0 1.5px #DC2626 inset, 0 4px 10px rgba(15,23,42,0.06)'
+                  : activeLegendFilter && !dimmed
+                    ? '0 0 0 1.5px rgba(255,255,255,0.22) inset, 0 10px 24px rgba(15,23,42,0.18)'
+                    : '0 4px 10px rgba(15,23,42,0.05)',
                 borderRadius: 18,
+                opacity: dimmed ? 0.22 : 1,
+                filter: dimmed ? 'saturate(0.45) brightness(0.65)' : 'none',
               }}
             >
               <img
@@ -163,7 +189,10 @@ export function BottomTeethChart({
                 }}
               />
             </button>
-            <span className="text-[25px] font-semibold leading-none" style={{ color: numColor }}>
+            <span
+              className="text-[25px] font-semibold leading-none"
+              style={{ color: numColor, opacity: dimmed ? 0.28 : 1 }}
+            >
               {displayNum}
             </span>
           </div>
@@ -176,7 +205,7 @@ export function BottomTeethChart({
   return (
     <div className="px-2 py-2">
       <div className="mx-auto flex w-fit max-w-full items-stretch gap-3">
-        <div className="flex w-[44px] shrink-0 items-center justify-center rounded-2xl border border-[#1E293B] bg-[#0B1220] shadow-[inset_0_0_0_1px_rgba(148,163,184,0.08)]">
+        <div className="flex w-[28px] shrink-0 items-center justify-center">
           <span className="text-center text-[27px] font-bold tracking-[0.2em] text-[#94A3B8]">
             R
           </span>
@@ -185,7 +214,7 @@ export function BottomTeethChart({
           {renderRow(upperTeeth)}
           {renderRow(lowerTeeth)}
         </div>
-        <div className="flex w-[44px] shrink-0 items-center justify-center rounded-2xl border border-[#1E293B] bg-[#0B1220] shadow-[inset_0_0_0_1px_rgba(148,163,184,0.08)]">
+        <div className="flex w-[28px] shrink-0 items-center justify-center">
           <span className="text-center text-[27px] font-bold tracking-[0.2em] text-[#94A3B8]">
             L
           </span>
@@ -223,24 +252,35 @@ export function BottomTeethChart({
           </div>
           <div className="space-y-1.5 text-[11px] text-slate-200">
             <div className="flex items-center justify-between gap-3">
-              <span className="text-slate-400">Status</span>
+              <span className="text-white">Status</span>
               <span className="font-semibold text-white">{hoveredTooltip.status || '-'}</span>
             </div>
             {hoveredTooltip.kind === 'implant' ? (
               <>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-400">Space X</span>
+                  <span className="text-white">Diameter</span>
+                  <span className="font-semibold text-white">{formatValue(hoveredTooltip.diameterMm, ' mm')}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-white">Length</span>
+                  <span className="font-semibold text-white">{formatValue(hoveredTooltip.lengthMm, ' mm')}</span>
+                </div>
+              </>
+            ) : hoveredTooltip.kind === 'planning' ? (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-white">Space Width</span>
                   <span className="font-semibold text-white">{formatValue(hoveredTooltip.gapMm, ' mm')}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-400">Axis To Nerve</span>
-                  <span className="font-semibold text-white">{formatValue(hoveredTooltip.nerveDistMm, ' mm')}</span>
+                  <span className="text-white">Center To Nerve</span>
+                  <span className="font-semibold text-white">{formatValue(hoveredTooltip.centerToNerveMm, ' mm')}</span>
                 </div>
               </>
             ) : (
               <>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-400">PBL / Level</span>
+                  <span className="text-white">PBL / Level</span>
                   <span className="font-semibold text-white">
                     {hoveredTooltip.pblPct !== null && hoveredTooltip.pblPct !== undefined
                       ? `${formatValue(hoveredTooltip.pblPct, '%')} / ${hoveredTooltip.level ?? '-'}`
@@ -248,12 +288,12 @@ export function BottomTeethChart({
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-400">Caries</span>
-                  <span className="font-semibold text-white">{hoveredTooltip.caries ? 'Yes' : 'No'}</span>
+                  <span className="text-white">Caries</span>
+                  <span className="font-semibold text-white">{formatProbability(hoveredTooltip.cariesProb)}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-400">Periapical</span>
-                  <span className="font-semibold text-white">{hoveredTooltip.periapical ? 'Yes' : 'No'}</span>
+                  <span className="text-white">Periapical</span>
+                  <span className="font-semibold text-white">{formatProbability(hoveredTooltip.periapicalProb)}</span>
                 </div>
               </>
             )}
