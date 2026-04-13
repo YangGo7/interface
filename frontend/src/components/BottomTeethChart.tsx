@@ -272,10 +272,12 @@ export function BottomTeethChart({
                   <span className="text-white">Space Width</span>
                   <span className="font-semibold text-white">{formatValue(hoveredTooltip.gapMm, ' mm')}</span>
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-white">Center To Nerve</span>
-                  <span className="font-semibold text-white">{formatValue(hoveredTooltip.centerToNerveMm, ' mm')}</span>
-                </div>
+                {hoveredTooltip.centerToNerveMm !== null && hoveredTooltip.centerToNerveMm !== undefined ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-white">Center To Nerve</span>
+                    <span className="font-semibold text-white">{formatValue(hoveredTooltip.centerToNerveMm, ' mm')}</span>
+                  </div>
+                ) : null}
               </>
             ) : (
               <>

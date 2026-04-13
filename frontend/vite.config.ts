@@ -4,6 +4,9 @@ import react from '@vitejs/plugin-react-swc';
 
 export default defineConfig({
   plugins: [react()],
+  worker: {
+    format: 'es',
+  },
   resolve: {
     alias: {
       '@cornerstonejs/codec-libjpeg-turbo-8bit/decodewasmjs': path.resolve(__dirname, 'node_modules/@cornerstonejs/codec-libjpeg-turbo-8bit/dist/libjpegturbowasm_decode.js'),
@@ -14,6 +17,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    allowedHosts: ['.ngrok-free.app', '.ngrok.app','oversized-ravage-spotter.ngrok-free.dev'],
     proxy: {
       // 백엔드가 5000에서 동작한다고 가정. 다르면 수정하세요.
       '/api': {

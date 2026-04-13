@@ -1,6 +1,6 @@
 import './index.css';
-import UploadPage from './pages/UploadPage';
+import FolderLeaderVer2Page from './pages/FolderLeaderVer2Page';
 
 export default function App() {
-  return <UploadPage />;
+  return <FolderLeaderVer2Page />;
 }

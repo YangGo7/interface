@@ -61,13 +61,10 @@ export function createOrGetToolGroup() {
                 bindings: [{ mouseButton: Enums.MouseBindings.Primary }],
             });
             toolGroup.setToolActive(ZoomTool.toolName, {
-                bindings: [{ mouseButton: Enums.MouseBindings.Secondary }],
+                bindings: [{ mouseButton: Enums.MouseBindings.Wheel }],
             });
             toolGroup.setToolActive(WindowLevelTool.toolName, {
                 bindings: [{ mouseButton: Enums.MouseBindings.Auxiliary }],
-            });
-            toolGroup.setToolActive(StackScrollTool.toolName, {
-                bindings: [{ mouseButton: Enums.MouseBindings.Wheel }],
             });
         }
     }
@@ -113,6 +110,7 @@ export function setActiveTool(toolName: string) {
 
     const toolsToReset = [
         PanTool.toolName,
+        ZoomTool.toolName,
         WindowLevelTool.toolName,
         LengthTool.toolName,
         ArrowAnnotateTool.toolName,
@@ -129,6 +127,18 @@ export function setActiveTool(toolName: string) {
                 group.setToolPassive(tool);
             }
         });
+
+        if (toolName === PanTool.toolName && group.hasTool(PanTool.toolName)) {
+            group.setToolActive(PanTool.toolName, {
+                bindings: [{ mouseButton: Enums.MouseBindings.Primary }],
+            });
+            if (group.hasTool(ZoomTool.toolName)) {
+                group.setToolActive(ZoomTool.toolName, {
+                    bindings: [{ mouseButton: Enums.MouseBindings.Wheel }],
+                });
+            }
+            return;
+        }
 
         group.setToolActive(toolName, {
             bindings: [{ mouseButton: Enums.MouseBindings.Primary }],

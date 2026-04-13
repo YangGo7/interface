@@ -9,10 +9,18 @@ import {
     Bug, Hand, RotateCcw, Ruler, Square, LayoutGrid,
     Rotate3d, Eraser, MousePointer2, Sliders, Trash2
 } from 'lucide-react';
-import { initCornerstone, registerNativeDicomFile, registerNativeDicomFileWithMetadata, registerLocalDicomFile } from './cornerstone/init';
-import { registerMultiframeDicomFile, generateMultiframeImageIds } from './cornerstone/multiframeLoader';
+import {
+    getRegisteredDicomMetadata,
+    initCornerstone,
+    registerLocalDicomFileWithMetadata,
+    registerNativeDicomFileWithMetadata,
+} from './cornerstone/init';
+import { getAutoWindowForCornerstoneImage } from './cornerstone/autoWindow';
+import { generateMultiframeImageIds, getMultiframeDicomMetadata, registerMultiframeDicomFile } from './cornerstone/multiframeLoader';
 import { addAndGroupTools, createOrGetToolGroup, createOrGet3DToolGroup, setActiveTool, clearAllAnnotations, initToolEventListeners } from './cornerstone/tools';
 import { ViewerSource } from './CornerstoneViewer';
+import type { DicomOverlayMetadata } from './cornerstone/dicomMetadata';
+import { DicomMetadataOverlay } from './DicomMetadataOverlay';
 
 type ToolMode = 'pan' | 'length' | 'arrow' | 'rect' | 'ellipse' | 'wl' | 'rotate' | 'erase' | 'scroll';
 type ViewportOrientation = 'empty' | 'axial' | 'sagittal' | 'coronal' | 'acquisition' | 'volume3d';
@@ -60,6 +68,7 @@ type CornerstoneGridViewerProps = {
     invert?: boolean;
     interactionMode?: string;
     resetToken?: number;
+    autoWindowToken?: number;
     onViewportCapture?: (canvas: HTMLCanvasElement, viewportLabel?: string) => void;
     brightness?: number;
     contrast?: number;
@@ -82,6 +91,7 @@ export function CornerstoneGridViewer({
     invert = false,
     interactionMode,
     resetToken = 0,
+    autoWindowToken = 0,
     onViewportCapture,
     brightness = 100,
     contrast = 100,
@@ -115,6 +125,7 @@ export function CornerstoneGridViewer({
         y: 0,
     });
     const [dropTargetViewportId, setDropTargetViewportId] = useState<string | null>(null);
+    const [overlayMetadata, setOverlayMetadata] = useState<DicomOverlayMetadata | null>(null);
 
     const [viewportsConfig, setViewportsConfig] = useState<GridControl[]>([]);
     const [preset3D, setPreset3D] = useState<Record<string, string>>({});
@@ -199,6 +210,55 @@ export function CornerstoneGridViewer({
         setDebugTrace((prev) => [...prev.slice(-11), line]);
     };
 
+    function syncOverlayWindow(windowCenter: number, windowWidth: number) {
+        setOverlayMetadata((prev) => prev
+            ? {
+                ...prev,
+                windowCenter,
+                windowWidth,
+            }
+            : prev);
+    }
+
+    const inspectVolumeMetadata = (imageIds: string[]) => {
+        const issues: string[] = [];
+        imageIds.forEach((candidateImageId, index) => {
+            const pixelModule = cornerstone.metaData.get('imagePixelModule', candidateImageId) as any;
+            const planeModule = cornerstone.metaData.get('imagePlaneModule', candidateImageId) as any;
+            const pixelSpacing = planeModule?.pixelSpacing || [planeModule?.rowPixelSpacing, planeModule?.columnPixelSpacing];
+            const orientation = planeModule?.imageOrientationPatient || [
+                ...(planeModule?.rowCosines || []),
+                ...(planeModule?.columnCosines || []),
+            ];
+            const position = planeModule?.imagePositionPatient;
+            const hasIssue =
+                !pixelModule ||
+                !planeModule ||
+                !Array.isArray(pixelSpacing) ||
+                pixelSpacing.length < 2 ||
+                pixelSpacing[0] == null ||
+                pixelSpacing[1] == null ||
+                !Array.isArray(orientation) ||
+                orientation.length < 6 ||
+                !Array.isArray(position) ||
+                position.length < 3;
+
+            if (hasIssue) {
+                issues.push(
+                    `#${index} pixel=${pixelModule ? 'ok' : 'missing'} plane=${planeModule ? 'ok' : 'missing'} spacing=${JSON.stringify(pixelSpacing)} orientation=${JSON.stringify(orientation)} position=${JSON.stringify(position)}`
+                );
+            }
+        });
+
+        if (issues.length > 0) {
+            pushDebugTrace(`volume metadata issues=${issues.length}/${imageIds.length}`);
+            issues.slice(0, 5).forEach((issue) => pushDebugTrace(issue));
+            console.warn('[CornerstoneGridViewer] volume metadata issues', issues);
+        } else {
+            pushDebugTrace(`volume metadata ok (${imageIds.length} slices)`);
+        }
+    };
+
     const getViewportCanvas = (viewportId: string, fallbackRoot?: ParentNode | null) => {
         const viewport = renderingEngineRef.current?.getViewport(viewportId) as any;
         const directCanvas = viewport?.getCanvas?.() || viewport?.canvas;
@@ -227,14 +287,14 @@ export function CornerstoneGridViewer({
         if (!image) return;
 
         const props: cornerstone.Types.ViewportProperties = {};
-        if (image.windowCenter != null && image.windowWidth != null) {
+        if (image.minPixelValue !== undefined && image.maxPixelValue !== undefined) {
+            props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
+        } else if (image.windowCenter != null && image.windowWidth != null) {
             const wc = Array.isArray(image.windowCenter) ? image.windowCenter[0] : image.windowCenter;
             const ww = Array.isArray(image.windowWidth) ? image.windowWidth[0] : image.windowWidth;
             if (typeof wc === 'number' && typeof ww === 'number' && ww > 0) {
                 props.voiRange = { lower: wc - ww / 2, upper: wc + ww / 2 };
             }
-        } else if (image.minPixelValue !== undefined && image.maxPixelValue !== undefined) {
-            props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
         }
 
         props.invert = Boolean(image.invert);
@@ -246,6 +306,30 @@ export function CornerstoneGridViewer({
                 vp.render();
             }
         });
+    }
+
+    function applyAutoWindow(renderingEngine: cornerstone.RenderingEngine | null, imageId?: string) {
+        if (!renderingEngine || !imageId) return;
+
+        const image = cornerstone.cache.getImage(imageId);
+        const autoWindow = getAutoWindowForCornerstoneImage(image as any);
+        if (!image || !autoWindow) return;
+
+        viewportsConfig.forEach(config => {
+            if (config.orientation === 'volume3d' || config.orientation === 'empty') return;
+            const vp = renderingEngine.getViewport(config.id) as any;
+            if (vp?.setProperties) {
+                vp.setProperties({
+                    voiRange: {
+                        lower: autoWindow.level - autoWindow.width / 2,
+                        upper: autoWindow.level + autoWindow.width / 2,
+                    },
+                    invert: Boolean(image.invert),
+                });
+                vp.render();
+            }
+        });
+        syncOverlayWindow(autoWindow.level, autoWindow.width);
     }
 
     useEffect(() => {
@@ -295,14 +379,13 @@ export function CornerstoneGridViewer({
         setDebugTrace([]);
 
         const scheme = activeSource.scheme || 'web';
-        let imageId = scheme === 'dicomfile' && activeSource.file
-            ? (registerNativeDicomFile(activeSource.file))
-            : scheme === 'dicomlocal' && activeSource.file
-                ? (registerLocalDicomFile(activeSource.id, activeSource.file))
-                : scheme === 'dicomfolder'
-                    ? ''
-                    : scheme + ':' + activeSource.url;
+        let imageId = activeSource.file
+            ? ''
+            : scheme === 'dicomfolder'
+            ? ''
+            : scheme + ':' + activeSource.url;
         setCurrentImageId(imageId);
+        setOverlayMetadata(null);
         pushDebugTrace(`source=${activeSource.label} scheme=${scheme} layout=${layout.rows}x${layout.cols}`);
 
         const renderingEngineId = renderingEngineIdRef.current;
@@ -377,6 +460,7 @@ export function CornerstoneGridViewer({
                             activeSource.files.map((file) => registerNativeDicomFileWithMetadata(file))
                         );
                         imageId = allImageIds[0] || imageId;
+                        setOverlayMetadata(getRegisteredDicomMetadata(imageId));
                         pushDebugTrace(`registered folder imageIds=${allImageIds.length}`);
                         if (allImageIds[0]) {
                             pushDebugTrace(`first imageId=${allImageIds[0]}`);
@@ -384,16 +468,29 @@ export function CornerstoneGridViewer({
                     } else if (activeSource.file) {
                         const reg = await registerMultiframeDicomFile(activeSource.file);
                         if (isCancelled) return;
+                        setOverlayMetadata(reg.metadata);
                         pushDebugTrace(`multiframe registered frames=${reg.numberOfFrames}`);
-                        if (reg.numberOfFrames > 1) { allImageIds = generateMultiframeImageIds(reg); }
-                        else { await cornerstone.imageLoader.loadAndCacheImage(imageId); if (isCancelled) return; allImageIds = [imageId]; }
+                        if (reg.numberOfFrames > 1) {
+                            allImageIds = generateMultiframeImageIds(reg);
+                            imageId = allImageIds[0] || imageId;
+                        } else {
+                            imageId = activeSource.scheme === 'dicomfile'
+                                ? await registerNativeDicomFileWithMetadata(activeSource.file)
+                                : await registerLocalDicomFileWithMetadata(activeSource.id, activeSource.file);
+                            await cornerstone.imageLoader.loadAndCacheImage(imageId);
+                            if (isCancelled) return;
+                            allImageIds = [imageId];
+                            setOverlayMetadata(getRegisteredDicomMetadata(imageId) || reg.metadata);
+                        }
                     } else { await cornerstone.imageLoader.loadAndCacheImage(imageId); if (isCancelled) return; allImageIds = [imageId]; }
                     if (allImageIds.length > 0) {
                         setCurrentImageId(allImageIds[0]);
+                        setOverlayMetadata(getRegisteredDicomMetadata(allImageIds[0]) || getMultiframeDicomMetadata(allImageIds[0]));
                     }
                     if (!allImageIds.length) {
                         throw new Error('No imageIds were generated for this volume source.');
                     }
+                    inspectVolumeMetadata(allImageIds);
                     try {
                         await cornerstone.imageLoader.loadAndCacheImage(allImageIds[0]);
                         pushDebugTrace('first imageId cache load ok');
@@ -438,6 +535,9 @@ export function CornerstoneGridViewer({
                     }
 
                     vp.resetCamera();
+                    if (imageId) {
+                        applyViewportDisplayState(renderingEngine, imageId);
+                    }
                     vp.render();
                 });
                 pushDebugTrace('viewport reset/render complete');
@@ -668,6 +768,12 @@ export function CornerstoneGridViewer({
         }
     }, [resetToken]);
 
+    useEffect(() => {
+        if (autoWindowToken > 0) {
+            applyAutoWindow(renderingEngineRef.current, currentImageId);
+        }
+    }, [autoWindowToken, currentImageId]);
+
     return (
         <div className="w-full h-full flex flex-col rounded-2xl border border-gray-200 bg-white overflow-hidden shadow-sm">
             {showToolbar && (
@@ -764,6 +870,11 @@ export function CornerstoneGridViewer({
                         )}
                     </div>
                 )}
+                <DicomMetadataOverlay
+                    metadata={overlayMetadata}
+                    compact={viewportsConfig.length > 1}
+                    top={shouldShowDiagnostics ? 132 : 12}
+                />
                 <div style={{ position: 'absolute', inset: 0, display: 'grid', gap: '2px', backgroundColor: '#4b5563', gridTemplateColumns: 'repeat(' + layout.cols + ', 1fr)', gridTemplateRows: 'repeat(' + layout.rows + ', 1fr)' }}>
                     {viewportsConfig.map((config, idx) => (
                         (() => {

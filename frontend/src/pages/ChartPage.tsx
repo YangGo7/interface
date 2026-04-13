@@ -1,12 +1,13 @@
-﻿import { useLocation } from 'react-router-dom';
-import { useState, useRef, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import dicomParser from 'dicom-parser';
 import { BottomTeethChart } from '../components/BottomTeethChart';
 import { WebReportDrawer } from '../components/WebReportDrawer';
-import { CornerstoneViewer, CornerstoneGridViewer } from '../viewer';
+import { CornerstoneViewer, CornerstoneGridViewer, MinimalCornerstoneDicomViewer } from '../viewer';
 import {
   AlertTriangle, Activity, Zap, Layers, Image as ImageIcon,
-  MousePointer, Hand, ZoomIn, RotateCw, FlipHorizontal,
+  MousePointer, Hand, RotateCw, FlipHorizontal, Sliders,
   Ruler, PenLine, Loader2, RotateCcw, AlertCircle, Skull,
   ClipboardList, Quote, Sparkles, MousePointer2, Eraser, Rotate3d,
   Trash2, Monitor, ChevronsUpDown, Camera, Crop, Search
@@ -14,9 +15,15 @@ import {
 import { TopHeader } from '../components/TopHeader';
 import { StudiesWorkspacePanel } from '../components/chart/StudiesWorkspacePanel';
 import { setActiveTool as setCornerstoneActiveTool, clearAllAnnotations } from '../viewer/cornerstone/tools';
+import { DicomMetadataOverlay } from '../viewer/DicomMetadataOverlay';
+import { parseDicomMetadataFromDataSet, type DicomOverlayMetadata } from '../viewer/cornerstone/dicomMetadata';
+import { estimateAutoWindowFromPixelData } from '../viewer/cornerstone/autoWindow';
+import { inspectLocalDicomFile } from '../viewer/cornerstone/dicomDebug';
 import { createWebReportFromChart } from '../lib/webReportApi';
 import { buildWebReportKeywords, countWebReportFindingTeeth } from '../lib/webReportKeywords';
 import type { FolderStudy } from '../features/upload/dicomFolderStudies';
+import { requestAsyncDetection } from '../features/upload/uploadApi';
+import { fetchServerFolderIndex, materializeServerStudy, resolveServerAssetUrl } from '../lib/folderLeaderApi';
 
 type ChartPageProps = {
   result?: any;
@@ -49,24 +56,223 @@ const formatCaptureFileTimestamp = (date: Date) => {
 };
 
 const ODONTOGRAM_TEETH = [18, 17, 16, 15, 14, 13, 12, 11, 21, 22, 23, 24, 25, 26, 27, 28, 48, 47, 46, 45, 44, 43, 42, 41, 31, 32, 33, 34, 35, 36, 37, 38];
+const MAGNIFIER_SIZE_PX = 200;
+const MAGNIFIER_ZOOM_FACTOR = 1.5;
+const MAGNIFIER_CURSOR_OFFSET_PX = 28;
+const MAGNIFIER_EDGE_PADDING_PX = 12;
+const DIRECT_API_BASE =
+  ((import.meta as any)?.env?.VITE_API_BASE_URL as string | undefined)?.trim() ||
+  'http://localhost:5000';
+
+const clampNumber = (value: number, min: number, max: number) =>
+  Math.max(min, Math.min(max, value));
+
+const clampByte = (value: number) => clampNumber(Math.round(value), 0, 255);
+
+const withDirectApiBase = (path: string) => {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${DIRECT_API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+};
+
+const applyRoiHistogramBoost = (
+  imageData: ImageData,
+  blend = 0.62,
+  clipFactor = 2.2
+) => {
+  const { data, width, height } = imageData;
+  const pixelCount = width * height;
+  if (!pixelCount) return imageData;
+
+  const histogram = new Uint32Array(256);
+  const luminance = new Uint8Array(pixelCount);
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    const idx = i * 4;
+    const lum = clampByte(data[idx] * 0.299 + data[idx + 1] * 0.587 + data[idx + 2] * 0.114);
+    luminance[i] = lum;
+    histogram[lum] += 1;
+  }
+
+  const clipLimit = Math.max(1, Math.floor((pixelCount / 256) * clipFactor));
+  let excess = 0;
+  for (let i = 0; i < 256; i += 1) {
+    if (histogram[i] > clipLimit) {
+      excess += histogram[i] - clipLimit;
+      histogram[i] = clipLimit;
+    }
+  }
+
+  const redistributed = Math.floor(excess / 256);
+  const remainder = excess - redistributed * 256;
+  for (let i = 0; i < 256; i += 1) {
+    histogram[i] += redistributed + (i < remainder ? 1 : 0);
+  }
+
+  const cdf = new Uint32Array(256);
+  let cumulative = 0;
+  for (let i = 0; i < 256; i += 1) {
+    cumulative += histogram[i];
+    cdf[i] = cumulative;
+  }
+
+  let cdfMin = 0;
+  for (let i = 0; i < 256; i += 1) {
+    if (cdf[i] > 0) {
+      cdfMin = cdf[i];
+      break;
+    }
+  }
+
+  const denominator = Math.max(1, pixelCount - cdfMin);
+  for (let i = 0; i < pixelCount; i += 1) {
+    const idx = i * 4;
+    const originalLum = luminance[i];
+    const equalizedLum = clampByte(((cdf[originalLum] - cdfMin) / denominator) * 255);
+    const targetLum = originalLum + (equalizedLum - originalLum) * blend;
+    const gain = originalLum > 0 ? targetLum / originalLum : targetLum / 255;
+
+    data[idx] = clampByte(data[idx] * gain);
+    data[idx + 1] = clampByte(data[idx + 1] * gain);
+    data[idx + 2] = clampByte(data[idx + 2] * gain);
+  }
+
+  return imageData;
+};
+
+const applyUnsharpMask = (imageData: ImageData, amount = 0.68) => {
+  const { data, width, height } = imageData;
+  if (!width || !height) return imageData;
+
+  const pixelCount = width * height;
+  const luminance = new Float32Array(pixelCount);
+  const blurred = new Float32Array(pixelCount);
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    const idx = i * 4;
+    luminance[i] = data[idx] * 0.299 + data[idx + 1] * 0.587 + data[idx + 2] * 0.114;
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0;
+      let weightSum = 0;
+      for (let ky = -1; ky <= 1; ky += 1) {
+        for (let kx = -1; kx <= 1; kx += 1) {
+          const sampleX = clampNumber(x + kx, 0, width - 1);
+          const sampleY = clampNumber(y + ky, 0, height - 1);
+          const weight = kx === 0 && ky === 0 ? 4 : kx === 0 || ky === 0 ? 2 : 1;
+          sum += luminance[sampleY * width + sampleX] * weight;
+          weightSum += weight;
+        }
+      }
+      blurred[y * width + x] = sum / Math.max(1, weightSum);
+    }
+  }
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    const idx = i * 4;
+    const originalLum = luminance[i];
+    const sharpenedLum = clampByte(originalLum + (originalLum - blurred[i]) * amount);
+    const gain = originalLum > 0 ? sharpenedLum / originalLum : sharpenedLum / 255;
+
+    data[idx] = clampByte(data[idx] * gain);
+    data[idx + 1] = clampByte(data[idx + 1] * gain);
+    data[idx + 2] = clampByte(data[idx + 2] * gain);
+  }
+
+  return imageData;
+};
+
+const applyEdgeAwareBoost = (imageData: ImageData, amount = 0.42) => {
+  const { data, width, height } = imageData;
+  if (width < 3 || height < 3) return imageData;
+
+  const pixelCount = width * height;
+  const luminance = new Float32Array(pixelCount);
+  const edges = new Float32Array(pixelCount);
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    const idx = i * 4;
+    luminance[i] = data[idx] * 0.299 + data[idx + 1] * 0.587 + data[idx + 2] * 0.114;
+  }
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const idx = y * width + x;
+      const gx =
+        -luminance[idx - width - 1] - 2 * luminance[idx - 1] - luminance[idx + width - 1] +
+        luminance[idx - width + 1] + 2 * luminance[idx + 1] + luminance[idx + width + 1];
+      const gy =
+        -luminance[idx - width - 1] - 2 * luminance[idx - width] - luminance[idx - width + 1] +
+        luminance[idx + width - 1] + 2 * luminance[idx + width] + luminance[idx + width + 1];
+      edges[idx] = Math.min(255, Math.sqrt(gx * gx + gy * gy));
+    }
+  }
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    const edgeWeight = (edges[i] / 255) * amount;
+    if (edgeWeight <= 0.02) continue;
+    const idx = i * 4;
+    const gain = 1 + edgeWeight;
+    data[idx] = clampByte(data[idx] * gain);
+    data[idx + 1] = clampByte(data[idx + 1] * gain);
+    data[idx + 2] = clampByte(data[idx + 2] * gain);
+  }
+
+  return imageData;
+};
+
+const enhanceMagnifierImage = (imageData: ImageData) => {
+  applyRoiHistogramBoost(imageData);
+  applyUnsharpMask(imageData);
+  applyEdgeAwareBoost(imageData);
+  return imageData;
+};
 
 export function ChartPage(props?: ChartPageProps) {
   const location = useLocation();
   const locationState = (location.state as any) || {};
-  const originalFolderStudies = (locationState.originalFolderStudies as FolderStudy[] | undefined) || [];
+  const [activeFolderStudies, setActiveFolderStudies] = useState<FolderStudy[]>((locationState.originalFolderStudies as FolderStudy[] | undefined) || []);
+  const [serverStudies, setServerStudies] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (locationState.folderSource === 'server') {
+      fetchServerFolderIndex().then(data => setServerStudies(data.studies || [])).catch(console.error);
+    }
+  }, [locationState.folderSource]);
+
+  const combinedStudies = useMemo(() => {
+    const activeIds = new Set(activeFolderStudies.map(s => s.id));
+    const additional = serverStudies.filter(s => !activeIds.has(s.id)).map(s => ({
+      ...s,
+      previewUrl: s.previewUrl ? resolveServerAssetUrl(s.previewUrl) : undefined
+    }));
+    return [...activeFolderStudies, ...additional];
+  }, [activeFolderStudies, serverStudies]);
+
+  const originalFolderStudies = activeFolderStudies;
   const originalFolderMode = Boolean(locationState.originalFolderMode && originalFolderStudies.length > 0);
+  const findFolderSeriesById = (seriesId: string | null) =>
+    originalFolderStudies
+      .flatMap((study) => study.series)
+      .find((series) => series.id === seriesId) || null;
   const initialFolderSeriesId =
     locationState.folderSelectedSeriesId ||
     originalFolderStudies.flatMap((study) => study.series)[0]?.id ||
     null;
+  const initialFolderSeries = findFolderSeriesById(initialFolderSeriesId);
   const initialResult = props?.result ?? locationState?.result;
-  const inferVolume = (res: any) => Boolean(
-    originalFolderMode ||
-    res?.is_volume ||
-    ((locationState.originalIsDicom || /\.dcm(?:$|[?#])/i.test(String(res?.image_url || ''))) && res?.preview_url)
-  );
-  const initialIsVolume = inferVolume(initialResult);
+  const inferVolume = (res: any, folderSeries?: { volumeEligible?: boolean } | null) =>
+    Boolean(res?.is_volume || folderSeries?.volumeEligible);
+  const initialIsVolume = inferVolume(initialResult, initialFolderSeries);
+  const initialViewMode =
+    originalFolderMode || locationState.originalIsDicom
+      ? 'original'
+      : initialIsVolume
+        ? 'original'
+        : 'overlay';
   const [result, setResult] = useState<any>(initialResult);
+  const [jobId, setJobId] = useState<string | null>(locationState?.jobId || null);
   const [isProcessing, setIsProcessing] = useState(!result && !!locationState?.jobId);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [timestamp, setTimestamp] = useState(Date.now());
@@ -96,7 +302,11 @@ export function ChartPage(props?: ChartPageProps) {
 
   const [selectedTooth, setSelectedTooth] = useState<number | undefined>(undefined);
   const [activeLegendFilter, setActiveLegendFilter] = useState<'triage-3' | 'triage-2' | 'triage-1' | 'implant' | 'missing' | null>(null);
-  const [viewMode, setViewMode] = useState<'overlay' | 'original' | 'heatmap'>(initialIsVolume ? 'original' : 'overlay');
+  const [viewMode, setViewMode] = useState<'overlay' | 'original' | 'heatmap'>(initialViewMode);
+  const [overlayPreset, setOverlayPreset] = useState<'all' | 'sinus' | 'nerve' | 'tooth' | 'sinus-upper-tooth' | 'nerve-lower-tooth'>('all');
+  const [dicomHudMetadata, setDicomHudMetadata] = useState<DicomOverlayMetadata | null>(null);
+  const [dicomPreviewDataUrl, setDicomPreviewDataUrl] = useState<string | null>(null);
+  const [dicomAutoWindow, setDicomAutoWindow] = useState<{ level: number; width: number } | null>(null);
   const [containerHeight] = useState(560);
   const [numberingSystem, setNumberingSystem] = useState<'fdi' | 'univ'>('fdi'); // [NEW]
 
@@ -117,6 +327,7 @@ export function ChartPage(props?: ChartPageProps) {
   const [gridLayout, setGridLayout] = useState({ rows: 2, cols: 2 });
   const [tempGridLayout, setTempGridLayout] = useState({ rows: 2, cols: 2 });
   const [cornerstoneResetToken, setCornerstoneResetToken] = useState(0);
+  const [cornerstoneAutoWindowToken, setCornerstoneAutoWindowToken] = useState(0);
   const [captureRect, setCaptureRect] = useState<{ x: number; y: number; w: number; h: number; active: boolean } | null>(null);
   const [magnifierState, setMagnifierState] = useState<{
     visible: boolean;
@@ -128,9 +339,15 @@ export function ChartPage(props?: ChartPageProps) {
     imgY: number;
   }>({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
 
+  const mmPerPixel = (result as any)?.mm_per_pixel || (result as any)?.mm_per_px || 0.1;
+  const hasData = !!result;
+  const reportKeywords = buildWebReportKeywords(result);
+  const reportFindingCount = countWebReportFindingTeeth(result);
+  const selectedFolderSeries = findFolderSeriesById(selectedFolderSeriesId);
+  const isVolumeCase = inferVolume(result, selectedFolderSeries);
+
   useEffect(() => {
     let timer: any;
-    const jobId = locationState?.jobId;
     const readJsonOrThrow = async <T,>(response: Response): Promise<T> => {
       const contentType = response.headers.get('content-type') || '';
       const raw = await response.text();
@@ -158,7 +375,11 @@ export function ChartPage(props?: ChartPageProps) {
           // Increment progress slightly while waiting
           setLoadingProgress(p => Math.min(p + 5, 95));
 
-          const res = await fetch(`/api/detect/status/${jobId}`);
+          let res = await fetch(`/api/detect/status/${jobId}`);
+          const contentType = res.headers.get('content-type') || '';
+          if (!contentType.includes('application/json')) {
+            res = await fetch(withDirectApiBase(`/api/detect/status/${jobId}`));
+          }
           if (!res.ok) {
             if (res.status === 404) {
               clearInterval(timer);
@@ -171,10 +392,11 @@ export function ChartPage(props?: ChartPageProps) {
           if (data.success && data.status === 'done' && data.result) {
             clearInterval(timer);
             setResult(data.result);
+            setJobId(null);
             setTimestamp(Date.now());
             setIsProcessing(false);
             setLoadingProgress(100);
-            if (inferVolume(data.result)) {
+            if (inferVolume(data.result, selectedFolderSeries)) {
               setViewMode('original');
               setViewerMode('grid');
               setGridLayout({ rows: 2, cols: 2 });
@@ -184,6 +406,7 @@ export function ChartPage(props?: ChartPageProps) {
             }
           } else if (data.status === 'failed') {
             clearInterval(timer);
+            setJobId(null);
             setIsProcessing(false);
             alert('Analysis failed: ' + (data.error || 'unknown'));
           }
@@ -196,13 +419,14 @@ export function ChartPage(props?: ChartPageProps) {
     return () => {
       if (timer) clearInterval(timer);
     };
-  }, [location.state, result]);
+  }, [jobId, result, selectedFolderSeries]);
   // Interaction State
   const dragRef = useRef<{ active: boolean; mode: 'pan' | 'wl'; startX: number; startY: number }>({
     active: false, mode: 'pan', startX: 0, startY: 0
   });
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const magnifierCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const edgeMapRef = useRef<Float32Array | null>(null);
   const [imgRect, setImgRect] = useState<DOMRect | null>(null);
   const [fitScale, setFitScale] = useState(1);
@@ -222,22 +446,51 @@ export function ChartPage(props?: ChartPageProps) {
   const [measurements, setMeasurements] = useState<any[]>([]);
   const [debugEvents, setDebugEvents] = useState<string[]>([]);
   const autoConfiguredCtRef = useRef(false);
+  const autoAnalyzeTriggeredRef = useRef(false);
 
   // -- Missing Vars defined here --
   const today = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   const handleZoom = (delta: number) => setZoom(z => Math.max(0.1, Math.min(5, z + delta)));
-  const zoomWheelActive = activeTool === 'zoom';
   const effectiveScale = Math.max(fitScale * scale * zoom, 0.001);
   // Alias for drawing:
   const currentMeasurement = pendingPoints.length > 0 ? { start: pendingPoints[0], current: tempPoint || pendingPoints[pendingPoints.length - 1] } : null;
 
-  const mmPerPixel = (result as any)?.mm_per_pixel || (result as any)?.mm_per_px || 0.1;
-  const hasData = !!result;
-  const reportKeywords = buildWebReportKeywords(result);
-  const reportFindingCount = countWebReportFindingTeeth(result);
-  const selectedFolderSeries = originalFolderStudies
-    .flatMap((study) => study.series)
-    .find((series) => series.id === selectedFolderSeriesId) || null;
+
+  const originalFile = locationState.originalFile as File | undefined;
+  const isDicomPath = (url?: string) => !!url && /\.(dcm|dicom)(?:$|[?#])/i.test(url);
+  const originalIsDicom = Boolean(
+    (originalFolderMode && selectedFolderSeries) ||
+    locationState.originalIsDicom ||
+    (originalFile && isDicomPath(originalFile.name)) ||
+    isDicomPath(result?.image_url)
+  );
+  useEffect(() => {
+    if (autoAnalyzeTriggeredRef.current) return;
+    if (result || jobId) return;
+
+    const autoAnalyzeFile =
+      originalFolderMode
+        ? (selectedFolderSeries?.files?.[0] || null)
+        : (locationState.originalIsDicom ? ((locationState.originalFile as File | undefined) || null) : null);
+
+    if (!autoAnalyzeFile) return;
+
+    autoAnalyzeTriggeredRef.current = true;
+    setIsProcessing(true);
+    setLoadingProgress(8);
+
+    void requestAsyncDetection(autoAnalyzeFile, [])
+      .then((state) => {
+        setJobId(state.jobId);
+        setLoadingProgress(12);
+      })
+      .catch((error) => {
+        console.error('Auto analysis request failed', error);
+        setIsProcessing(false);
+        setLoadingProgress(0);
+        autoAnalyzeTriggeredRef.current = false;
+      });
+  }, [jobId, locationState.originalFile, locationState.originalIsDicom, originalFolderMode, result, selectedFolderSeries]);
   const activeCaseName = (() => {
     if (selectedFolderSeries?.label) {
       return selectedFolderSeries.label;
@@ -252,9 +505,120 @@ export function ChartPage(props?: ChartPageProps) {
       return rawSource;
     }
   })();
+  const dicomHudFile =
+    originalFolderMode && selectedFolderSeries?.files?.length
+      ? selectedFolderSeries.files[0]
+      : originalFile && originalIsDicom
+        ? originalFile
+        : null;
+
+  const deriveDisplayWindowFromControls = (
+    baseCenter: number,
+    baseWidth: number,
+    brightnessPercent: number,
+    contrastPercent: number
+  ) => {
+    const safeBaseWidth = Math.max(1, baseWidth || 1);
+    const safeContrast = Math.max(1, contrastPercent || 100);
+    const windowWidth = Math.max(1, Math.round(safeBaseWidth * (100 / safeContrast)));
+    const windowCenter = Math.round(baseCenter + ((brightnessPercent - 100) / 100) * safeBaseWidth);
+    return { windowCenter, windowWidth };
+  };
+
+  const deriveControlsForWindow = (
+    baseCenter: number,
+    baseWidth: number,
+    targetCenter: number,
+    targetWidth: number
+  ) => {
+    const safeBaseWidth = Math.max(1, baseWidth || 1);
+    const safeTargetWidth = Math.max(1, targetWidth || 1);
+    const contrastPercent = Math.max(1, Math.min(300, Math.round((safeBaseWidth / safeTargetWidth) * 100)));
+    const brightnessPercent = Math.max(0, Math.min(300, Math.round(100 + ((targetCenter - baseCenter) / safeBaseWidth) * 100)));
+    return { brightnessPercent, contrastPercent };
+  };
 
   useEffect(() => {
-    if (!inferVolume(result)) {
+    let cancelled = false;
+
+    if (!originalIsDicom || !dicomHudFile) {
+      setDicomHudMetadata(null);
+      setDicomPreviewDataUrl(null);
+      setDicomAutoWindow(null);
+      return;
+    }
+
+    const loadHudMetadata = async () => {
+      try {
+        const [arrayBuffer, inspection] = await Promise.all([
+          dicomHudFile.arrayBuffer(),
+          inspectLocalDicomFile(dicomHudFile),
+        ]);
+        const byteArray = new Uint8Array(arrayBuffer);
+        const dataSet = dicomParser.parseDicom(byteArray, { untilTag: 'x7fe00010' });
+        const pixelElement = dataSet.elements.x7fe00010;
+        const rows = dataSet.uint16('x00280010') || 0;
+        const columns = dataSet.uint16('x00280011') || 0;
+        const samplesPerPixel = dataSet.uint16('x00280002') || 1;
+        const bitsAllocated = dataSet.uint16('x00280100') || 16;
+        const pixelRepresentation = dataSet.uint16('x00280103') || 0;
+        const rescaleSlope = Number(dataSet.string('x00281053') || '1') || 1;
+        const rescaleIntercept = Number(dataSet.string('x00281052') || '0') || 0;
+        let nextAutoWindow: { level: number; width: number } | null = null;
+
+        if (pixelElement && rows > 0 && columns > 0 && samplesPerPixel === 1 && (bitsAllocated === 8 || bitsAllocated === 16)) {
+          const bytesPerPixel = Math.max(1, bitsAllocated / 8);
+          const singleFrameBytes = rows * columns * samplesPerPixel * bytesPerPixel;
+          let frameOffset = pixelElement.dataOffset;
+          if (pixelElement.length > singleFrameBytes && singleFrameBytes > 0) {
+            const numberOfFrames = Math.floor(pixelElement.length / singleFrameBytes);
+            frameOffset += Math.floor(numberOfFrames / 2) * singleFrameBytes;
+          }
+
+          const pixelBytes = dataSet.byteArray.slice(frameOffset, frameOffset + singleFrameBytes);
+          let scalarData: Uint8Array | Int8Array | Uint16Array | Int16Array | null = null;
+          if (bitsAllocated === 8) {
+            scalarData = pixelRepresentation === 1
+              ? new Int8Array(pixelBytes.buffer, pixelBytes.byteOffset, pixelBytes.byteLength)
+              : pixelBytes;
+          } else if (bitsAllocated === 16) {
+            scalarData = pixelRepresentation === 1
+              ? new Int16Array(pixelBytes.buffer, pixelBytes.byteOffset, pixelBytes.byteLength / 2)
+              : new Uint16Array(pixelBytes.buffer, pixelBytes.byteOffset, pixelBytes.byteLength / 2);
+          }
+
+          const autoWindow = scalarData
+            ? estimateAutoWindowFromPixelData(scalarData, rescaleSlope, rescaleIntercept)
+            : null;
+          nextAutoWindow = autoWindow
+            ? { level: Math.round(autoWindow.level), width: Math.round(autoWindow.width) }
+            : null;
+        }
+
+        if (!cancelled) {
+          setDicomHudMetadata(parseDicomMetadataFromDataSet(dataSet, dicomHudFile.name));
+          setDicomPreviewDataUrl(inspection.previewDataUrl);
+          setDicomAutoWindow(nextAutoWindow);
+        }
+      } catch (error) {
+        console.warn('Failed to parse DICOM HUD metadata', error);
+        if (!cancelled) {
+          setDicomHudMetadata(null);
+          setDicomPreviewDataUrl(null);
+          setDicomAutoWindow(null);
+        }
+      }
+    };
+
+    void loadHudMetadata();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dicomHudFile, originalIsDicom]);
+
+  useEffect(() => {
+    if (!isVolumeCase) {
       autoConfiguredCtRef.current = false;
       return;
     }
@@ -266,7 +630,7 @@ export function ChartPage(props?: ChartPageProps) {
     setGridLayout({ rows: 2, cols: 2 });
     setTempGridLayout({ rows: 2, cols: 2 });
     autoConfiguredCtRef.current = true;
-  }, [result]);
+  }, [isVolumeCase]);
 
   const handleStartReport = async () => {
     if (reportStartState === 'creating') return;
@@ -896,7 +1260,8 @@ export function ChartPage(props?: ChartPageProps) {
       implantMetric?.mesiodistal_gap_mm ??
       0
     );
-    const centerToNerveMm = Number(
+    const isUpperTooth = key.startsWith('1') || key.startsWith('2');
+    const centerToNerveMmRaw = Number(
       implantGuide?.dist_mm ??
       tooth?.center_to_nerve_dist_mm ??
       implantMetric?.dist_mm ??
@@ -904,6 +1269,7 @@ export function ChartPage(props?: ChartPageProps) {
       status?.nerve_dist_mm ??
       0
     );
+    const centerToNerveMm = isUpperTooth ? 0 : centerToNerveMmRaw;
     const cariesProb = getBestConfidence(result?.caries_by_tooth_best, result?.caries_by_tooth, key);
     const periapicalProb = getBestConfidence(result?.periapical_by_tooth_best, result?.periapical_by_tooth, key);
     const isExistingImplant = Boolean(status?.implant && (diameterMm > 0 || lengthMm > 0));
@@ -928,41 +1294,68 @@ export function ChartPage(props?: ChartPageProps) {
     return acc;
   }, {} as Record<string, any>);
   // --- Image Source Logic ---
-  const isDicomPath = (url?: string) => !!url && /\.(dcm|dicom)(?:$|[?#])/i.test(url);
-
   const getUrlWithCacheBuster = (url?: string) => {
     if (!url) return undefined;
-    if (url.startsWith('blob:')) return url;
+    if (url.startsWith('blob:') || url.startsWith('data:')) return url;
     return `${url}${url.includes('?') ? '&' : '?'}t=${timestamp}`;
   };
 
   const originalUrl = getUrlWithCacheBuster(result?.image_url || result?.overlay_url);
   const overlayUrl = getUrlWithCacheBuster(result?.overlay_url || result?.image_url);
   const heatmapUrl = getUrlWithCacheBuster(result?.heatmap_overlay_url || result?.overlay_url || result?.image_url);
+  const originalRasterUrl = getUrlWithCacheBuster(dicomPreviewDataUrl || locationState.previewUrl || result?.preview_url || result?.image_url || result?.overlay_url);
   const hasHeatmapAsset = Boolean(result?.heatmap_overlay_url);
+  const hasStructuredOverlayData = Boolean(
+    (Array.isArray(result?.sinus_contours) && result.sinus_contours.length > 0) ||
+    (Array.isArray(result?.nerve_contours) && result.nerve_contours.length > 0) ||
+    (Array.isArray(result?.teeth) && result.teeth.length > 0) ||
+    (Array.isArray(result?.teeth_objects) && result.teeth_objects.length > 0)
+  );
+  const shouldUseStructuredAiOverlay = viewMode === 'overlay' && hasStructuredOverlayData;
   let showSrc =
     viewMode === 'original'
-      ? originalUrl
+      ? (originalIsDicom && !isVolumeCase ? (originalRasterUrl || originalUrl) : originalUrl)
       : viewMode === 'heatmap'
         ? (hasHeatmapAsset ? heatmapUrl : (originalUrl || overlayUrl))
-        : overlayUrl;
+        : (shouldUseStructuredAiOverlay
+            ? (originalRasterUrl || originalUrl || overlayUrl)
+            : (overlayUrl || originalRasterUrl || originalUrl));
 
   // If no result yet but we have a preview, show that
   // if (!showSrc && locationState.previewUrl) {
   //   showSrc = locationState.previewUrl;
   // }
 
-  const originalFile = locationState.originalFile as File | undefined;
-  const originalIsDicom = Boolean(
-    originalFolderMode ||
-    locationState.originalIsDicom ||
-    (originalFile && isDicomPath(originalFile.name)) ||
-    isDicomPath(result?.image_url)
-  );
   const overlayIsDicom = isDicomPath(result?.overlay_url);
-  const shouldUseCornerstone = viewMode === 'original' ? originalIsDicom : viewMode === 'overlay' ? overlayIsDicom : false;
+  const shouldUseCornerstone =
+    viewMode === 'original'
+      ? (originalIsDicom && isVolumeCase)
+      : viewMode === 'overlay'
+        ? (overlayIsDicom && isVolumeCase)
+        : false;
+  const displayDicomHudMetadata = (() => {
+    if (!dicomHudMetadata) return null;
+    if (shouldUseCornerstone) return dicomHudMetadata;
+    if (!originalIsDicom) return dicomHudMetadata;
+
+    const nextWindow = deriveDisplayWindowFromControls(
+      dicomHudMetadata.windowCenter,
+      dicomHudMetadata.windowWidth,
+      brightness,
+      contrast
+    );
+
+    return {
+      ...dicomHudMetadata,
+      windowCenter: nextWindow.windowCenter,
+      windowWidth: nextWindow.windowWidth,
+    };
+  })();
   const magnifierDisabled = shouldUseCornerstone && viewerMode === 'grid';
   const areaCaptureDisabled = false;
+  const shouldShowFloatingDicomHud = !shouldUseCornerstone && Boolean(dicomHudMetadata);
+  const shouldShowOverlayPresetSelector = viewMode === 'overlay' && hasStructuredOverlayData && !shouldUseCornerstone;
+  const shouldCenterModeBadge = shouldShowFloatingDicomHud || shouldShowOverlayPresetSelector;
   const viewModeLabel =
     viewMode === 'overlay'
       ? 'AI Analysis Mode'
@@ -984,8 +1377,15 @@ export function ChartPage(props?: ChartPageProps) {
             id: `chart-original-dicom-folder-${selectedFolderSeries.id}`,
             label: selectedFolderSeries.label,
             url: '',
-            files: selectedFolderSeries.files,
-            scheme: 'dicomfolder' as const,
+            ...(selectedFolderSeries.volumeEligible
+              ? {
+                files: selectedFolderSeries.files,
+                scheme: 'dicomfolder' as const,
+              }
+              : {
+                file: selectedFolderSeries.files[0],
+                scheme: 'dicomfile' as const,
+              }),
           }
           : originalFile && originalIsDicom
           ? {
@@ -993,7 +1393,7 @@ export function ChartPage(props?: ChartPageProps) {
             label: 'Original',
             url: locationState.previewUrl || '',
             file: originalFile,
-            scheme: 'dicomlocal' as const,
+            scheme: 'dicomfile' as const,
           }
           : {
             id: 'chart-original-dicom-remote',
@@ -1007,7 +1407,7 @@ export function ChartPage(props?: ChartPageProps) {
             label: 'Overlay',
             url: locationState.previewUrl || '',
             file: originalFile,
-            scheme: 'dicomlocal' as const,
+            scheme: 'dicomfile' as const,
           }
           : {
             id: 'chart-overlay-dicom',
@@ -1083,36 +1483,242 @@ export function ChartPage(props?: ChartPageProps) {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
+  const buildLowerContourRuns = (contour: any[], lowerRatio = 0.25) => {
+    if (!Array.isArray(contour) || contour.length < 3) return [];
+
+    const points = contour
+      .map((pt: any) => Array.isArray(pt) && pt.length >= 2
+        ? { x: Number(pt[0]), y: Number(pt[1]) }
+        : null)
+      .filter((pt): pt is { x: number; y: number } =>
+        Boolean(pt) && Number.isFinite(pt.x) && Number.isFinite(pt.y));
+
+    if (points.length < 3) return [];
+
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    points.forEach((pt) => {
+      if (pt.y < minY) minY = pt.y;
+      if (pt.y > maxY) maxY = pt.y;
+    });
+
+    const height = maxY - minY;
+    if (height <= 0) return [];
+
+    const cutoffY = maxY - height * lowerRatio;
+    const runs: Array<Array<{ x: number; y: number }>> = [];
+    let currentRun: Array<{ x: number; y: number }> = [];
+
+    points.forEach((pt) => {
+      if (pt.y >= cutoffY) {
+        currentRun.push(pt);
+        return;
+      }
+
+      if (currentRun.length >= 2) {
+        runs.push(currentRun);
+      }
+      currentRun = [];
+    });
+
+    if (currentRun.length >= 2) {
+      runs.push(currentRun);
+    }
+
+    if (runs.length > 1) {
+      const first = runs[0];
+      const last = runs[runs.length - 1];
+      const firstPoint = first[0];
+      const lastPoint = last[last.length - 1];
+      if (firstPoint && lastPoint && points[0].y >= cutoffY && points[points.length - 1].y >= cutoffY) {
+        runs[0] = [...last, ...first];
+        runs.pop();
+      }
+    }
+
+    return runs;
+  };
+
+  const selectedToothKey = selectedTooth ? String(selectedTooth) : null;
+
   // --- AI Overlay Rendering ---
-  const renderAIDetections = () => {
+  const renderAIDetections = (options?: { emphasize?: boolean }) => {
     if (viewMode !== 'overlay' || !result) return null;
 
+    const emphasize = Boolean(options?.emphasize);
+    const strokeBoost = emphasize ? 1.12 : 1;
+    const structureStroke = emphasize ? 'rgba(255, 78, 78, 0.96)' : 'rgba(255, 78, 78, 0.92)';
+    const structureFill = 'rgba(255, 78, 78, 0.40)';
     const items: React.ReactNode[] = [];
+    const shouldFocusSingleTooth = Boolean(selectedToothKey);
+    const shouldShowSinus = !shouldFocusSingleTooth && (overlayPreset === 'all' || overlayPreset === 'sinus' || overlayPreset === 'sinus-upper-tooth');
+    const shouldShowNerve = !shouldFocusSingleTooth && (overlayPreset === 'all' || overlayPreset === 'nerve' || overlayPreset === 'nerve-lower-tooth');
+    const shouldShowUpperTooth = overlayPreset === 'all' || overlayPreset === 'tooth' || overlayPreset === 'sinus-upper-tooth';
+    const shouldShowLowerTooth = overlayPreset === 'all' || overlayPreset === 'tooth' || overlayPreset === 'nerve-lower-tooth';
+    const warmPastelPalette = [
+      { fill: 'rgba(255, 216, 194, 0.26)', stroke: 'rgba(255, 182, 151, 0.94)' },
+      { fill: 'rgba(255, 226, 203, 0.26)', stroke: 'rgba(241, 174, 129, 0.94)' },
+      { fill: 'rgba(255, 212, 209, 0.26)', stroke: 'rgba(234, 153, 150, 0.94)' },
+      { fill: 'rgba(246, 224, 198, 0.26)', stroke: 'rgba(221, 171, 118, 0.94)' },
+      { fill: 'rgba(255, 229, 214, 0.26)', stroke: 'rgba(232, 163, 121, 0.94)' },
+      { fill: 'rgba(255, 239, 221, 0.26)', stroke: 'rgba(227, 180, 126, 0.94)' },
+    ];
+    const getToothOverlayStyle = (label: string) => {
+      const numericLabel = Number(label);
+      const paletteIndex = Number.isFinite(numericLabel)
+        ? Math.abs(numericLabel) % warmPastelPalette.length
+        : 0;
+      const palette = warmPastelPalette[paletteIndex];
+      if (!shouldFocusSingleTooth || label !== selectedToothKey) {
+        return palette;
+      }
+      return {
+        fill: palette.fill.replace('0.26', emphasize ? '0.40' : '0.34'),
+        stroke: palette.stroke.replace('0.94', '0.98'),
+      };
+    };
 
-    const addBoxes = (list: any[], color: string, label: string) => {
-      // Handle the fact that some lists might be empty or undefined
-      if (!list) return;
-      list.forEach((item, idx) => {
-        // Backend format: [tooth_number, confidence, [x1, y1, x2, y2]]
-        const [tooth, conf, box] = item;
-        if (!box || box.length < 4) return;
-        const [x1, y1, x2, y2] = box;
-
+    const addContourGroup = (
+      contours: any[],
+      color: string,
+      fill: string,
+      keyPrefix: string,
+      closed = true
+    ) => {
+      if (!Array.isArray(contours)) return;
+      contours.forEach((contour, idx) => {
+        if (!Array.isArray(contour) || contour.length < 2) return;
+        const points = contour
+          .map((pt: any) => Array.isArray(pt) && pt.length >= 2 ? `${pt[0]},${pt[1]}` : null)
+          .filter(Boolean)
+          .join(' ');
+        if (!points) return;
         items.push(
-          <g key={`${label}-${tooth}-${idx}`}>
-            <rect
-              x={x1} y={y1} width={x2 - x1} height={y2 - y1}
+          closed ? (
+            <polygon
+              key={`${keyPrefix}-${idx}`}
+              points={points}
+              fill={fill}
+              stroke={color}
+              strokeWidth={(1.05 * strokeBoost) / effectiveScale}
+              vectorEffect="non-scaling-stroke"
+            />
+          ) : (
+            <polyline
+              key={`${keyPrefix}-${idx}`}
+              points={points}
               fill="none"
               stroke={color}
-              strokeWidth={3 / effectiveScale}
-              className="transition-opacity duration-300"
+              strokeWidth={(1.35 * strokeBoost) / effectiveScale}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          )
+        );
+      });
+    };
+
+    const filteredTeeth = (Array.isArray(result?.teeth) ? result.teeth : (Array.isArray(result?.teeth_objects) ? result.teeth_objects : [])).filter((tooth: any) => {
+      const label = String(tooth?.tooth_label || tooth?.label || tooth?.tooth || '');
+      const isUnassignedNatural = !label && tooth?.status === 'unassigned' && tooth?.type === 'natural';
+      if (!label && !isUnassignedNatural) return false;
+      if (selectedToothKey && label !== selectedToothKey) return false;
+      if (isUnassignedNatural) {
+        return overlayPreset === 'all' || overlayPreset === 'tooth';
+      }
+      const isUpper = label.startsWith('1') || label.startsWith('2');
+      return isUpper ? shouldShowUpperTooth : shouldShowLowerTooth;
+    });
+
+    if (shouldShowSinus) {
+      addContourGroup(result?.sinus_contours || [], structureStroke, structureFill, 'sinus');
+    }
+
+    if (shouldShowNerve) {
+      addContourGroup(result?.nerve_contours || [], structureStroke, structureFill, 'nerve');
+    }
+
+    filteredTeeth.forEach((tooth: any, idx: number) => {
+      const contour = tooth?.contour;
+      if (!Array.isArray(contour) || contour.length < 3) return;
+      const label = String(tooth?.tooth_label || tooth?.label || tooth?.tooth || '');
+      const labelHint = String(tooth?.label_hint || '');
+      const isUnassignedNatural = !label && tooth?.status === 'unassigned' && tooth?.type === 'natural';
+      const toothStyle = isUnassignedNatural
+        ? {
+            fill: emphasize ? 'rgba(255, 244, 214, 0.32)' : 'rgba(255, 244, 214, 0.26)',
+            stroke: 'rgba(245, 158, 11, 0.96)',
+          }
+        : getToothOverlayStyle(label);
+      const points = contour
+        .map((pt: any) => Array.isArray(pt) && pt.length >= 2 ? `${pt[0]},${pt[1]}` : null)
+        .filter(Boolean)
+        .join(' ');
+      if (!points) return;
+      items.push(
+        <polygon
+          key={`tooth-${tooth?.tooth_label || idx}`}
+          points={points}
+          fill={toothStyle.fill}
+          stroke={toothStyle.stroke}
+          strokeWidth={(0.92 * strokeBoost) / effectiveScale}
+          strokeDasharray={isUnassignedNatural ? `${5 / effectiveScale} ${3 / effectiveScale}` : undefined}
+          strokeLinejoin="round"
+          vectorEffect="non-scaling-stroke"
+        />
+      );
+
+    });
+
+    const addPathologyBoxes = (entries: Array<[string, any]>, color: string, label: string) => {
+      entries.forEach(([tooth, data], idx) => {
+        if (selectedToothKey && String(tooth) !== selectedToothKey) return;
+        const box = data?.box;
+        if (!Array.isArray(box) || box.length < 4) return;
+        const [x1, y1, x2, y2] = box.map((value: any) => Number(value));
+        if (![x1, y1, x2, y2].every(Number.isFinite)) return;
+        const width = Math.max(0, x2 - x1);
+        const height = Math.max(0, y2 - y1);
+        if (!width || !height) return;
+
+        const strokeWidth = (1.15 * (emphasize ? 1.12 : 1)) / effectiveScale;
+        const fontSize = Math.max(7 / effectiveScale, 9 / effectiveScale);
+        const tagHeight = 12 / effectiveScale;
+        const tagWidth = Math.max((label.length + String(tooth).length + 1) * (fontSize * 0.58), 44 / effectiveScale);
+
+        items.push(
+          <g key={`pathology-${label}-${tooth}-${idx}`}>
+            <rect
+              x={x1}
+              y={y1}
+              width={width}
+              height={height}
+              rx={4 / effectiveScale}
+              ry={4 / effectiveScale}
+              fill="none"
+              stroke={color}
+              strokeWidth={strokeWidth}
+              strokeDasharray={`${5 / effectiveScale} ${3 / effectiveScale}`}
+              vectorEffect="non-scaling-stroke"
+            />
+            <rect
+              x={x1}
+              y={y1 - tagHeight - 3 / effectiveScale}
+              width={tagWidth}
+              height={tagHeight}
+              rx={3 / effectiveScale}
+              ry={3 / effectiveScale}
+              fill={color}
+              fillOpacity={emphasize ? 0.94 : 0.78}
             />
             <text
-              x={x1} y={y1 - (5 / effectiveScale)}
-              fill={color}
-              fontSize={12 / effectiveScale}
-              fontWeight="bold"
-              style={{ textShadow: '0 0 4px black' }}
+              x={x1 + 4 / effectiveScale}
+              y={y1 - 5 / effectiveScale}
+              fill="#ffffff"
+              fontSize={fontSize}
+              fontWeight="700"
+              style={{ textShadow: '0 0 4px rgba(0,0,0,0.95)' }}
             >
               {label} {tooth}
             </text>
@@ -1121,20 +1727,27 @@ export function ChartPage(props?: ChartPageProps) {
       });
     };
 
-    addBoxes(Object.entries(result.caries_by_tooth_best || {}).map(([t, d]: any) => [t, d.conf, d.box]), '#ef4444', 'Caries');
-    addBoxes(Object.entries(result.periapical_by_tooth_best || {}).map(([t, d]: any) => [t, d.conf, d.box]), '#f97316', 'Periapical');
-    addBoxes(Object.entries(result.filling_by_tooth_best || {}).map(([t, d]: any) => [t, d.conf, d.box]), '#3B82F6', 'Filling');
+    addPathologyBoxes(Object.entries(result?.caries_by_tooth_best || {}), 'rgba(239, 68, 68, 0.95)', 'Caries');
+    addPathologyBoxes(Object.entries(result?.periapical_by_tooth_best || {}), 'rgba(249, 115, 22, 0.95)', 'Periapical');
 
     return <g id="ai-overlay-layer">{items}</g>;
   };
 
-  const renderRiskDetections = () => {
+  const renderRiskDetections = (options?: { emphasize?: boolean }) => {
     if (viewMode !== 'heatmap' || !result || hasHeatmapAsset) return null;
 
+    const emphasize = Boolean(options?.emphasize);
+    const opacityBoost = emphasize ? 1.18 : 1;
     const items: React.ReactNode[] = [];
-    const cariesEntries = Object.entries(result.caries_by_tooth_best || {});
-    const periapicalEntries = Object.entries(result.periapical_by_tooth_best || {});
-    const teeth = Array.isArray(result.teeth) ? result.teeth : [];
+    const cariesEntries = Object.entries(result.caries_by_tooth_best || {}).filter(
+      ([tooth]) => !selectedToothKey || String(tooth) === selectedToothKey
+    );
+    const periapicalEntries = Object.entries(result.periapical_by_tooth_best || {}).filter(
+      ([tooth]) => !selectedToothKey || String(tooth) === selectedToothKey
+    );
+    const teeth = (Array.isArray(result.teeth) ? result.teeth : []).filter(
+      (tooth: any) => !selectedToothKey || String(tooth?.tooth_label || '') === selectedToothKey
+    );
 
     cariesEntries.forEach(([tooth, data]: any, idx) => {
       const box = data?.box;
@@ -1145,7 +1758,7 @@ export function ChartPage(props?: ChartPageProps) {
       const cy = (y1 + y2) / 2;
       const rx = Math.max((x2 - x1) * 0.85, 18);
       const ry = Math.max((y2 - y1) * 0.85, 18);
-      const opacity = Math.min(0.55, 0.22 + conf * 0.28);
+      const opacity = Math.min(0.7, (0.22 + conf * 0.28) * opacityBoost);
       items.push(
         <g key={`risk-caries-${tooth}-${idx}`} filter="url(#riskBlurStrong)">
           <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill={`rgba(251,146,60,${opacity})`} />
@@ -1162,7 +1775,7 @@ export function ChartPage(props?: ChartPageProps) {
       const cy = (y1 + y2) / 2;
       const rx = Math.max((x2 - x1) * 0.95, 22);
       const ry = Math.max((y2 - y1) * 0.95, 22);
-      const opacity = Math.min(0.6, 0.26 + conf * 0.3);
+      const opacity = Math.min(0.75, (0.26 + conf * 0.3) * opacityBoost);
       items.push(
         <g key={`risk-peri-${tooth}-${idx}`} filter="url(#riskBlurStrong)">
           <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill={`rgba(239,68,68,${opacity})`} />
@@ -1178,7 +1791,7 @@ export function ChartPage(props?: ChartPageProps) {
       );
       if (boneLossPct < 10) return;
       const severity = Math.min(1, Math.max(0, (boneLossPct - 10) / 35));
-      const opacity = 0.12 + severity * 0.24;
+      const opacity = Math.min(0.52, (0.12 + severity * 0.24) * opacityBoost);
       const green = Math.round(224 - severity * 140);
       const fill = `rgba(255,${green},71,${opacity})`;
       const contour = tooth?.contour;
@@ -1206,6 +1819,9 @@ export function ChartPage(props?: ChartPageProps) {
 
   // --- Handlers ---
   const resetView = () => {
+    const defaultViewMode = isVolumeCase ? 'original' : 'overlay';
+    const defaultViewerMode = isVolumeCase ? 'grid' : 'single';
+
     setScale(1);
     setZoom(1);
     setOffset({ x: 0, y: 0 });
@@ -1213,10 +1829,75 @@ export function ChartPage(props?: ChartPageProps) {
     setFlipped(false);
     setBrightness(100);
     setContrast(100);
+    setInverted(false);
+    setViewMode(defaultViewMode);
+    setViewerMode(defaultViewerMode);
+    setOverlayPreset('all');
+    setSelectedTooth(undefined);
+    setActiveLegendFilter(null);
+    setCaptureRect(null);
+    setMagnifierState({
+      visible: false,
+      clientX: 0,
+      clientY: 0,
+      viewerX: 0,
+      viewerY: 0,
+      imgX: 0,
+      imgY: 0,
+    });
+    setShapes([]);
+    setMeasurements([]);
+    setPendingPoints([]);
+    setTempPoint(null);
+    setContextMenu({ show: false, x: 0, y: 0, menu: undefined });
+    setReportError(null);
+    setCaptureNotice(null);
     handleToolChange('pointer');
     setSelectedToolbarButton('pointer');
     setActiveSubTool(null);
+    clearAllAnnotations();
     setCornerstoneResetToken((prev) => prev + 1);
+  };
+
+  const handleApplyAutoWindow = () => {
+    setSelectedToolbarButton('auto-window');
+    setReportError(null);
+
+    if (!originalIsDicom) {
+      setReportError('Auto Window is available only for DICOM views.');
+      return;
+    }
+
+    if (!isVolumeCase) {
+      if (!dicomHudMetadata || !dicomAutoWindow) {
+        setReportError('Auto Window could not be derived for this DICOM.');
+        return;
+      }
+
+      const controls = deriveControlsForWindow(
+        dicomHudMetadata.windowCenter,
+        dicomHudMetadata.windowWidth,
+        dicomAutoWindow.level,
+        dicomAutoWindow.width
+      );
+      setBrightness(controls.brightnessPercent);
+      setContrast(controls.contrastPercent);
+      return;
+    }
+
+    if (viewMode !== 'original') {
+      setViewMode('original');
+    }
+
+    if (viewerMode !== (isVolumeCase ? 'grid' : 'single')) {
+      setViewerMode(isVolumeCase ? 'grid' : 'single');
+    }
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setCornerstoneAutoWindowToken((prev) => prev + 1);
+      });
+    });
   };
 
   // Image fit handled by CSS (width: 100%, height: auto) to avoid calculation errors
@@ -1247,16 +1928,17 @@ export function ChartPage(props?: ChartPageProps) {
   };
 
   const handleToolChange = (tool: string) => {
-    const primaryTools = new Set(['pointer', 'pan', 'wlww', 'erase', 'rotate', 'scroll', 'capture-area', 'magnifier', 'zoom']);
-    if (primaryTools.has(tool)) {
+    const normalizedTool = tool === 'zoom' ? 'pan' : tool;
+    const primaryTools = new Set(['pointer', 'pan', 'wlww', 'erase', 'rotate', 'scroll', 'capture-area', 'magnifier']);
+    if (primaryTools.has(normalizedTool)) {
       setActiveSubTool(null);
       setPendingPoints([]);
       setTempPoint(null);
       setContextMenu({ show: false, x: 0, y: 0, menu: undefined });
     }
-    setLocalActiveTool(tool);
+    setLocalActiveTool(normalizedTool);
     // Sync with Cornerstone global tool groups
-    switch (tool) {
+    switch (normalizedTool) {
       case 'pan': setCornerstoneActiveTool('Pan'); break;
       case 'wlww': setCornerstoneActiveTool('WindowLevel'); break;
       case 'length': setCornerstoneActiveTool('Length'); break;
@@ -1266,7 +1948,6 @@ export function ChartPage(props?: ChartPageProps) {
       case 'rotate': setCornerstoneActiveTool('TrackballRotate'); break;
       case 'erase': setCornerstoneActiveTool('Eraser'); break;
       case 'scroll': setCornerstoneActiveTool('StackScroll'); break;
-      case 'zoom': setCornerstoneActiveTool('Pan'); break;
       case 'magnifier': setCornerstoneActiveTool('Pan'); break;
       case 'pointer': setCornerstoneActiveTool('Pan'); break;
     }
@@ -1627,7 +2308,7 @@ export function ChartPage(props?: ChartPageProps) {
     if (!showSrc) return;
     if (e.button === 2) return; // Right click
 
-    if (activeTool === 'magnifier' || activeTool === 'zoom') {
+    if (activeTool === 'magnifier') {
       return;
     }
 
@@ -1788,7 +2469,7 @@ export function ChartPage(props?: ChartPageProps) {
   };
 
   const handleWheel = (e: React.WheelEvent) => {
-    if (activeTool !== 'zoom') return;
+    if (activeTool !== 'pan') return;
     e.preventDefault();
     handleZoom(e.deltaY < 0 ? 0.1 : -0.1);
   };
@@ -1822,7 +2503,7 @@ export function ChartPage(props?: ChartPageProps) {
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      if (activeTool === 'zoom') {
+      if (activeTool === 'pan') {
         e.preventDefault();
         e.stopPropagation();
         handleZoom(e.deltaY < 0 ? 0.1 : -0.1);
@@ -1867,126 +2548,204 @@ export function ChartPage(props?: ChartPageProps) {
     pushDebug(`subtool selected=${sub}`);
   };
 
-  const renderMagnifier = () => {
+  const magnifierViewport = (() => {
     if (
       shouldUseCornerstone ||
       activeTool !== 'magnifier' ||
       !showSrc ||
       !magnifierState.visible ||
       !dimensions.width ||
-      !dimensions.height
+      !dimensions.height ||
+      !viewerRef.current
     ) {
       return null;
     }
 
-    const currentTransformScale = Math.max(scale * zoom, 0.001);
-    const lensRadius = 200 / currentTransformScale;
-    const zoomFactor = 3.0;
-    const focusImgX = magnifierState.imgX;
-    const focusImgY = magnifierState.imgY;
-    const borderWidth = Math.max(3.5 / currentTransformScale, 1.25);
-    const clipId = 'chart-magnifier-clip';
-    const offsetX = focusImgX - focusImgX * zoomFactor;
-    const offsetY = focusImgY - focusImgY * zoomFactor;
+    const viewerWidth = viewerRef.current.clientWidth || 0;
+    const viewerHeight = viewerRef.current.clientHeight || 0;
+    if (!viewerWidth || !viewerHeight) return null;
 
-    return (
-      <g pointerEvents="none">
-        <defs>
-          <clipPath id={clipId}>
-            <circle cx={focusImgX} cy={focusImgY} r={lensRadius} />
-          </clipPath>
-        </defs>
-        <g clipPath={`url(#${clipId})`}>
-          <circle cx={focusImgX} cy={focusImgY} r={lensRadius} fill="rgba(255,255,255,0.05)" />
-          <g transform={`translate(${offsetX} ${offsetY}) scale(${zoomFactor})`}>
-            <image
-              href={showSrc}
-              x={0}
-              y={0}
-              width={dimensions.width}
-              height={dimensions.height}
-              preserveAspectRatio="none"
-              style={{
-                filter: `invert(${inverted ? 1 : 0}) brightness(${brightness}%) contrast(${contrast}%)`,
-              }}
-            />
-            {renderRiskDetections()}
-            {shapes.map((s: any, idx: number) => renderShape(s, false, idx))}
-            {activeSubTool && renderShape({ type: activeSubTool, points: pendingPoints, color: drawingColor }, true)}
-          </g>
-          <circle
-            cx={focusImgX}
-            cy={focusImgY}
-            r={lensRadius}
-            fill="url(#magnifierGloss)"
-            opacity={0.22}
-          />
-        </g>
-        <circle
-          cx={focusImgX}
-          cy={focusImgY}
-          r={lensRadius}
-          fill="none"
-          stroke="rgba(255,255,255,0.92)"
-          strokeWidth={borderWidth}
-        />
-        <circle
-          cx={focusImgX}
-          cy={focusImgY}
-          r={Math.max(lensRadius - borderWidth * 1.8, 0)}
-          fill="none"
-          stroke="rgba(34,211,238,0.55)"
-          strokeWidth={Math.max(1.5 / currentTransformScale, 1)}
-        />
-      </g>
+    const sampleSize = Math.max(MAGNIFIER_SIZE_PX / MAGNIFIER_ZOOM_FACTOR, 1);
+    const sampleLeft = clampNumber(
+      magnifierState.imgX - sampleSize / 2,
+      0,
+      Math.max(0, dimensions.width - sampleSize)
     );
-  };
+    const sampleTop = clampNumber(
+      magnifierState.imgY - sampleSize / 2,
+      0,
+      Math.max(0, dimensions.height - sampleSize)
+    );
 
-  const magnifierDebug = (() => {
-    const enabled = activeTool === 'magnifier';
-    const renderable =
-      !shouldUseCornerstone &&
-      enabled &&
-      magnifierState.visible &&
-      Boolean(showSrc) &&
-      Boolean(imageRef.current) &&
-      Boolean(dimensions.width) &&
-      Boolean(dimensions.height);
+    let lensLeft = magnifierState.viewerX + MAGNIFIER_CURSOR_OFFSET_PX;
+    let lensTop = magnifierState.viewerY + MAGNIFIER_CURSOR_OFFSET_PX;
 
-    const currentTransformScale = Math.max(scale * zoom, 0.001);
-    const lensRadius = 150 / currentTransformScale;
-    const displayX =
-      dimensions.width > 0
-        ? (magnifierState.imgX / dimensions.width) * displaySize.width
-        : 0;
-    const displayY =
-      dimensions.height > 0
-        ? (magnifierState.imgY / dimensions.height) * displaySize.height
-        : 0;
+    if (lensLeft + MAGNIFIER_SIZE_PX + MAGNIFIER_EDGE_PADDING_PX > viewerWidth) {
+      lensLeft = magnifierState.viewerX - MAGNIFIER_CURSOR_OFFSET_PX - MAGNIFIER_SIZE_PX;
+    }
+    if (lensTop + MAGNIFIER_SIZE_PX + MAGNIFIER_EDGE_PADDING_PX > viewerHeight) {
+      lensTop = magnifierState.viewerY - MAGNIFIER_CURSOR_OFFSET_PX - MAGNIFIER_SIZE_PX;
+    }
+
+    lensLeft = clampNumber(
+      lensLeft,
+      MAGNIFIER_EDGE_PADDING_PX,
+      Math.max(MAGNIFIER_EDGE_PADDING_PX, viewerWidth - MAGNIFIER_SIZE_PX - MAGNIFIER_EDGE_PADDING_PX)
+    );
+    lensTop = clampNumber(
+      lensTop,
+      MAGNIFIER_EDGE_PADDING_PX,
+      Math.max(MAGNIFIER_EDGE_PADDING_PX, viewerHeight - MAGNIFIER_SIZE_PX - MAGNIFIER_EDGE_PADDING_PX)
+    );
 
     return {
-      enabled,
-      renderable,
-      shouldUseCornerstone,
-      showSrc: Boolean(showSrc),
-      imageRefReady: Boolean(imageRef.current),
-      imgRectReady: Boolean(imgRect),
-      visible: magnifierState.visible,
-      clientX: Math.round(magnifierState.clientX),
-      clientY: Math.round(magnifierState.clientY),
-      viewerX: Math.round(magnifierState.viewerX),
-      viewerY: Math.round(magnifierState.viewerY),
-      imgX: Math.round(magnifierState.imgX),
-      imgY: Math.round(magnifierState.imgY),
-      displayX: Math.round(displayX),
-      displayY: Math.round(displayY),
-      displayWidth: Math.round(displaySize.width),
-      displayHeight: Math.round(displaySize.height),
-      naturalWidth: dimensions.width,
-      naturalHeight: dimensions.height,
-      lensRadius: Number(lensRadius.toFixed(2)),
+      lensLeft,
+      lensTop,
+      sampleLeft,
+      sampleTop,
+      sampleSize,
     };
   })();
+
+  useEffect(() => {
+    if (!magnifierViewport || !magnifierCanvasRef.current || !imageRef.current) {
+      return;
+    }
+
+    let frameId = 0;
+    frameId = window.requestAnimationFrame(() => {
+      const canvas = magnifierCanvasRef.current;
+      const image = imageRef.current;
+      if (!canvas || !image) return;
+
+      canvas.width = MAGNIFIER_SIZE_PX;
+      canvas.height = MAGNIFIER_SIZE_PX;
+
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+
+      ctx.clearRect(0, 0, MAGNIFIER_SIZE_PX, MAGNIFIER_SIZE_PX);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.save();
+      ctx.filter = `invert(${inverted ? 1 : 0}) brightness(${brightness}%) contrast(${contrast}%)`;
+      if (flipped) {
+        ctx.translate(MAGNIFIER_SIZE_PX, 0);
+        ctx.scale(-1, 1);
+      }
+      ctx.drawImage(
+        image,
+        magnifierViewport.sampleLeft,
+        magnifierViewport.sampleTop,
+        magnifierViewport.sampleSize,
+        magnifierViewport.sampleSize,
+        0,
+        0,
+        MAGNIFIER_SIZE_PX,
+        MAGNIFIER_SIZE_PX
+      );
+      ctx.restore();
+
+      const enhanced = ctx.getImageData(0, 0, MAGNIFIER_SIZE_PX, MAGNIFIER_SIZE_PX);
+      enhanceMagnifierImage(enhanced);
+      ctx.putImageData(enhanced, 0, 0);
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [
+    magnifierViewport,
+    brightness,
+    contrast,
+    inverted,
+    flipped,
+    showSrc,
+  ]);
+
+  const renderMagnifier = () => {
+    if (!magnifierViewport) return null;
+
+    const overlayContent = (
+      <>
+        {renderAIDetections({ emphasize: true })}
+        {renderRiskDetections({ emphasize: true })}
+        {shapes.map((s: any, idx: number) => renderShape(s, false, idx))}
+        {activeSubTool && renderShape({ type: activeSubTool, points: pendingPoints, color: drawingColor }, true)}
+      </>
+    );
+
+    const transformedOverlay = (
+      <g transform={`translate(${-magnifierViewport.sampleLeft * MAGNIFIER_ZOOM_FACTOR} ${-magnifierViewport.sampleTop * MAGNIFIER_ZOOM_FACTOR}) scale(${MAGNIFIER_ZOOM_FACTOR})`}>
+        {overlayContent}
+      </g>
+    );
+
+    return (
+      <div
+        className="pointer-events-none absolute overflow-hidden"
+        style={{
+          position: 'absolute',
+          left: magnifierViewport.lensLeft,
+          top: magnifierViewport.lensTop,
+          width: MAGNIFIER_SIZE_PX,
+          height: MAGNIFIER_SIZE_PX,
+          isolation: 'isolate',
+          zIndex: 20000,
+          background: 'rgba(0,0,0,0.88)',
+          border: '2px solid rgba(255,255,255,0.92)',
+          boxShadow: '0 18px 42px rgba(0,0,0,0.42), inset 0 0 0 1px rgba(34,211,238,0.35)',
+        }}
+      >
+        <canvas
+          ref={magnifierCanvasRef}
+          className="absolute inset-0 h-full w-full"
+          style={{ imageRendering: 'auto' }}
+        />
+        <svg
+          className="absolute inset-0 h-full w-full"
+          viewBox={`0 0 ${MAGNIFIER_SIZE_PX} ${MAGNIFIER_SIZE_PX}`}
+          preserveAspectRatio="none"
+        >
+          <defs>
+            <marker id="display-arrowhead" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
+              <polygon points="0 0, 6 2, 0 4" fill="#facc15" />
+            </marker>
+            <marker id="display-arrowhead-white" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
+              <polygon points="0 0, 6 2, 0 4" fill="#ffffff" />
+            </marker>
+            <filter id="riskBlurStrong" x="-35%" y="-35%" width="170%" height="170%">
+              <feGaussianBlur stdDeviation={22 / effectiveScale} />
+            </filter>
+            <filter id="riskBlurSoft" x="-25%" y="-25%" width="150%" height="150%">
+              <feGaussianBlur stdDeviation={12 / effectiveScale} />
+            </filter>
+          </defs>
+          <rect
+            x={0}
+            y={0}
+            width={MAGNIFIER_SIZE_PX}
+            height={MAGNIFIER_SIZE_PX}
+            fill="rgba(255,255,255,0.04)"
+          />
+          {flipped ? (
+            <g transform={`translate(${MAGNIFIER_SIZE_PX} 0) scale(-1 1)`}>
+              {transformedOverlay}
+            </g>
+          ) : (
+            transformedOverlay
+          )}
+          <rect
+            x={1}
+            y={1}
+            width={MAGNIFIER_SIZE_PX - 2}
+            height={MAGNIFIER_SIZE_PX - 2}
+            fill="none"
+            stroke="rgba(34,211,238,0.52)"
+            strokeWidth={1}
+          />
+        </svg>
+      </div>
+    );
+  };
 
   // Render SVG Helper
   const renderShape = (shape: any, isTemp = false, index?: number) => {
@@ -2277,7 +3036,7 @@ export function ChartPage(props?: ChartPageProps) {
   const toolbarPrimaryButtons = (
     <>
       <ToolBtn compact active={selectedToolbarButton === 'pointer'} onClick={() => { handleToolChange('pointer'); setSelectedToolbarButton('pointer'); }} icon={MousePointer} title="Select Tool" />
-      <ToolBtn compact active={selectedToolbarButton === 'pan'} onClick={() => toggleToolOrPointer('pan')} icon={Hand} title="Pan" />
+      <ToolBtn compact active={selectedToolbarButton === 'pan'} onClick={() => toggleToolOrPointer('pan')} icon={Hand} title="Pan + Wheel Zoom" />
       <ToolBtn compact active={selectedToolbarButton === 'wlww'} onClick={() => toggleToolOrPointer('wlww')} icon={WindowLevelIcon} title="Window / Level" />
       <ToolBtn compact active={selectedToolbarButton === 'invert'} onClick={() => { setInverted((value) => !value); setSelectedToolbarButton((value) => value === 'invert' ? 'pointer' : 'invert'); }} icon={InvertIcon} title="Invert" />
       <ToolBtn compact active={selectedToolbarButton === 'flip'} onClick={() => { setFlipped((value) => !value); setSelectedToolbarButton((value) => value === 'flip' ? 'pointer' : 'flip'); }} icon={FlipHorizontal} title="Flip Horizontal" />
@@ -2309,7 +3068,13 @@ export function ChartPage(props?: ChartPageProps) {
       >
         <RotateCcw className="h-5 w-5" />
       </button>
-      <ToolBtn compact active={selectedToolbarButton === 'zoom'} onClick={() => toggleToolOrPointer('zoom')} icon={ZoomIn} title={zoomWheelActive ? 'Disable Wheel Zoom' : 'Enable Wheel Zoom'} />
+      <ToolBtn
+        compact
+        active={selectedToolbarButton === 'auto-window'}
+        onClick={handleApplyAutoWindow}
+        icon={Sliders}
+        title="Apply Auto Window"
+      />
       <button
         onClick={() => { setViewMode(viewMode === 'overlay' ? 'original' : 'overlay'); setSelectedToolbarButton('view-toggle'); }}
         className={getToolbarButtonClass({ active: selectedToolbarButton === 'view-toggle', compact: true })}
@@ -2453,12 +3218,30 @@ export function ChartPage(props?: ChartPageProps) {
                       </div>
                     ) : (
                       <StudiesWorkspacePanel
-                        studies={originalFolderStudies}
+                        studies={combinedStudies as any}
                         selectedSeriesId={selectedFolderSeriesId}
-                        onSelectSeries={(seriesId) => {
-                          setSelectedFolderSeriesId(seriesId);
-                          setViewMode('original');
-                          setViewerMode('grid');
+                        onSelectSeries={async (seriesId) => {
+                          let nextSeries = findFolderSeriesById(seriesId);
+                          if (!nextSeries) {
+                            const targetStudy = serverStudies.find(s => s.series.some((ser: any) => ser.id === seriesId));
+                            if (targetStudy) {
+                              setIsProcessing(true);
+                              try {
+                                const materialized = await materializeServerStudy(targetStudy);
+                                setActiveFolderStudies(prev => [...prev, materialized]);
+                                nextSeries = materialized.series.find((s: any) => s.id === seriesId);
+                              } catch (e) {
+                                console.error('Failed to materialize study inside ChartPage', e);
+                              } finally {
+                                setIsProcessing(false);
+                              }
+                            }
+                          }
+                          if (nextSeries) {
+                            setSelectedFolderSeriesId(seriesId);
+                            setViewMode('original');
+                            setViewerMode(nextSeries?.volumeEligible ? 'grid' : 'single');
+                          }
                         }}
                       />
                     )}
@@ -2533,17 +3316,21 @@ export function ChartPage(props?: ChartPageProps) {
                         </div>
                       </div>
                     )}
-                    <div className="absolute top-4 left-4 z-10 flex items-center gap-3 bg-black/60 backdrop-blur-xl px-5 py-2.5 rounded-full border border-white/10 shadow-2xl pointer-events-none">
+                    <div
+                      className="absolute flex items-center gap-3 bg-black/60 backdrop-blur-xl px-5 py-2.5 rounded-full border border-white/10 shadow-2xl pointer-events-none"
+                      style={shouldCenterModeBadge
+                        ? { top: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 70 }
+                        : { top: 16, left: 16, zIndex: 70 }}
+                    >
                       <div className={`w-2.5 h-2.5 rounded-full ${viewModeDotClass}`} />
                       <span className="text-xs font-bold uppercase tracking-wider text-gray-300">
                         {viewModeLabel}
                       </span>
                     </div>
-
                       {/* Magnifier debug panel kept for local troubleshooting; hidden in normal UI. */}
 
                     <div
-                              className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : activeTool === 'magnifier' ? 'cursor-none' : activeTool === 'zoom' ? 'cursor-zoom-in' : 'cursor-grab active:cursor-grabbing'}`}
+                              className={`w-full h-full relative overflow-hidden ${shouldUseCornerstone ? '' : activeTool === 'magnifier' ? 'cursor-none' : activeTool === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
                       style={{ minHeight: `${shouldUseCornerstone ? containerHeight : viewerHeight}px`, height: `${shouldUseCornerstone ? containerHeight : viewerHeight}px` }}
                       ref={viewerRef}
                       onMouseDown={handleMouseDown}
@@ -2553,6 +3340,41 @@ export function ChartPage(props?: ChartPageProps) {
                       onWheel={shouldUseCornerstone ? undefined : handleWheel}
                       onContextMenu={shouldUseCornerstone ? undefined : handleContextMenu}
                     >
+                      {shouldShowOverlayPresetSelector && (
+                        <div
+                          className="pointer-events-auto"
+                          style={{ position: 'absolute', top: 16, right: 16, zIndex: 90 }}
+                        >
+                          <select
+                            value={overlayPreset}
+                            onChange={(event) => setOverlayPreset(event.target.value as typeof overlayPreset)}
+                            className="w-auto min-w-[240px] appearance-none rounded-xl border border-white/10 bg-black/60 px-3 py-2 text-xs font-semibold text-white shadow-2xl outline-none backdrop-blur-xl"
+                            style={{
+                              backgroundColor: 'rgba(0, 0, 0, 0.82)',
+                              color: '#f8fafc',
+                              colorScheme: 'dark',
+                              WebkitTextFillColor: '#f8fafc',
+                            }}
+                            title="Select AI overlay preset"
+                          >
+                            <option value="all" style={{ backgroundColor: '#0b1120', color: '#f8fafc' }}>1. 전체</option>
+                            <option value="sinus" style={{ backgroundColor: '#0b1120', color: '#f8fafc' }}>2. sinus</option>
+                            <option value="nerve" style={{ backgroundColor: '#0b1120', color: '#f8fafc' }}>3. nerve</option>
+                            <option value="tooth" style={{ backgroundColor: '#0b1120', color: '#f8fafc' }}>4. tooth</option>
+                            <option value="sinus-upper-tooth" style={{ backgroundColor: '#0b1120', color: '#f8fafc' }}>5. sinus + upper tooth</option>
+                            <option value="nerve-lower-tooth" style={{ backgroundColor: '#0b1120', color: '#f8fafc' }}>6. nerve + lower tooth</option>
+                          </select>
+                        </div>
+                      )}
+                      {shouldShowFloatingDicomHud && (
+                        <DicomMetadataOverlay
+                          metadata={displayDicomHudMetadata}
+                          top={16}
+                          bottom={16}
+                          left={16}
+                          right={16}
+                        />
+                      )}
                       {/* Area Capture Selection Overlay */}
                       {captureRect && (
                         <div
@@ -2592,6 +3414,7 @@ export function ChartPage(props?: ChartPageProps) {
                           onLayoutChange={setGridLayout}
                           interactionMode={activeTool}
                           resetToken={cornerstoneResetToken}
+                          autoWindowToken={cornerstoneAutoWindowToken}
                           onViewportCapture={handleGridViewportCapture}
                           invert={inverted}
                           brightness={brightness}
@@ -2604,36 +3427,29 @@ export function ChartPage(props?: ChartPageProps) {
                         />
                       ) : shouldUseCornerstone ? (
                         <div className="w-full h-full relative flex flex-col">
-                          <CornerstoneGridViewer
-                            sources={cornerstoneSources}
-                            title={viewMode === 'original' ? 'Original Axial' : 'Overlay Axial'}
-                            maxHeight={containerHeight}
-                            showToolbar={false}
-                            hideLayoutControls
-                            layout={{ rows: 1, cols: 1 }}
-                            interactionMode={activeTool}
-                            resetToken={cornerstoneResetToken}
-                            onViewportCapture={handleGridViewportCapture}
-                            invert={inverted}
-                            brightness={brightness}
-                            contrast={contrast}
-                            rotation={rotation}
-                            flipped={flipped}
-                            assignedCaptureSlots={assignedCaptureSlots}
-                            onAssignCaptureToViewport={assignCaptureToViewport}
-                            onClearAssignedCapture={clearAssignedCapture}
-                          />
-                          {/* Test path: single CT view renders as 1x1 axial MPR instead of stack viewer. */}
-                          {/* <CornerstoneViewer
-                            title={viewMode === 'original' ? 'Original DICOM' : 'Overlay DICOM'}
-                            sources={cornerstoneSources}
-                            initialSourceId={cornerstoneSources[0]?.id}
-                            maxHeight={containerHeight}
-                            showToolbar={false} // Use ChartPage's sidebar instead
-                            interactionMode={activeTool}
-                            resetToken={cornerstoneResetToken}
-                            invert={inverted}
-                          /> */}
+                          {!isVolumeCase && cornerstoneSources[0]?.file ? (
+                            <MinimalCornerstoneDicomViewer
+                              file={cornerstoneSources[0].file}
+                              title={viewMode === 'original' ? 'Original DICOM' : 'Overlay DICOM'}
+                              maxHeight={containerHeight}
+                            />
+                          ) : (
+                            <CornerstoneViewer
+                              title={viewMode === 'original' ? 'Original DICOM' : 'Overlay DICOM'}
+                              sources={cornerstoneSources}
+                              initialSourceId={cornerstoneSources[0]?.id}
+                              maxHeight={containerHeight}
+                              showToolbar={false}
+                              interactionMode={activeTool}
+                              resetToken={cornerstoneResetToken}
+                              autoWindowToken={cornerstoneAutoWindowToken}
+                              invert={inverted}
+                              brightness={brightness}
+                              contrast={contrast}
+                              rotation={rotation}
+                              flipped={flipped}
+                            />
+                          )}
                           {result?.is_volume && (
                             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 bg-indigo-600/80 backdrop-blur-md px-4 py-2 rounded-full border border-indigo-400/50 shadow-lg flex items-center gap-2 pointer-events-none">
                               <Rotate3d className="w-4 h-4 text-white animate-pulse" />
@@ -2646,15 +3462,16 @@ export function ChartPage(props?: ChartPageProps) {
                       ) : showSrc ? (
                         <div className="relative w-full h-full flex items-center justify-center overflow-hidden" ref={containerRef}>
                           <div
-                            className={`relative transform-gpu will-change-transform shadow-2xl ring-1 ring-black/5 mx-auto ${activeTool === 'magnifier' ? 'cursor-none' : 'cursor-crosshair'}`}
+                            className={`relative transform-gpu will-change-transform shadow-2xl ring-1 ring-black/5 mx-auto ${activeTool === 'magnifier' ? 'cursor-none' : activeTool === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
                             style={{
                               width: displaySize.width,
                               height: displaySize.height,
                               isolation: 'isolate',
+                              zIndex: 10,
                               transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale * zoom}) rotate(${rotation}deg) scaleX(${flipped ? -1 : 1})`,
                               transition: activeTool === 'pan' ? 'none' : 'transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
                               transformOrigin: 'center',
-                              cursor: activeTool === 'magnifier' ? 'none' : 'crosshair',
+                              cursor: activeTool === 'magnifier' ? 'none' : activeTool === 'pan' ? 'grab' : 'crosshair',
                             }}
                           >
                             <img
@@ -2683,7 +3500,7 @@ export function ChartPage(props?: ChartPageProps) {
                               style={{
                                 position: 'absolute',
                                 inset: 0,
-                                zIndex: 9999,
+                                zIndex: 20,
                                 overflow: 'visible',
                                 pointerEvents: 'none',
                               }}
@@ -2691,6 +3508,12 @@ export function ChartPage(props?: ChartPageProps) {
                               <defs>
                                 <marker id="arrowhead" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
                                   <polygon points="0 0, 6 2, 0 4" fill="#facc15" />
+                                </marker>
+                                <marker id="display-arrowhead" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
+                                  <polygon points="0 0, 6 2, 0 4" fill="#facc15" />
+                                </marker>
+                                <marker id="display-arrowhead-white" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
+                                  <polygon points="0 0, 6 2, 0 4" fill="#ffffff" />
                                 </marker>
                                 <filter id="riskBlurStrong" x="-35%" y="-35%" width="170%" height="170%">
                                   <feGaussianBlur stdDeviation={22 / effectiveScale} />
@@ -2704,10 +3527,10 @@ export function ChartPage(props?: ChartPageProps) {
                                   <stop offset="100%" stopColor="rgba(255,255,255,0)" />
                                 </radialGradient>
                               </defs>
+                              {renderAIDetections()}
                               {renderRiskDetections()}
                               {shapes.map((s: any, idx: number) => renderShape(s, false, idx))}
                               {activeSubTool && renderShape({ type: activeSubTool, points: pendingPoints, color: drawingColor }, true)}
-                              {renderMagnifier()}
                             </svg>
                           </div>
                         </div>
@@ -2728,6 +3551,7 @@ export function ChartPage(props?: ChartPageProps) {
                           )}
                         </div>
                       )}
+                      {renderMagnifier()}
                     </div>
                   </div>
                 </div>
@@ -2789,7 +3613,7 @@ export function ChartPage(props?: ChartPageProps) {
                       </div>
                       <div className="flex flex-col items-center">
                         <BottomTeethChart
-                          onToothClick={(id) => setSelectedTooth(id)}
+                          onToothClick={(id) => setSelectedTooth((prev) => (prev === id ? undefined : id))}
                           selectedTooth={selectedTooth}
                           statuses={statuses}
                           highlightRing={chartHighlights}

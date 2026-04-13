@@ -693,11 +693,11 @@ export function WebReportDrawer({
         <div className="flex flex-1 flex-col overflow-hidden">
           <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
           <div className="rounded-[28px] border border-cyan-400/15 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(14,165,233,0.04))] p-5">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Report Workspace</p>
+            {/* <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Report Workspace</p>
             <p className="mt-2 text-[15px] leading-6 text-slate-200">
               Review findings in this floating panel, then open the full HTML document in its own page when you need the final layout.
             </p>
-            <br />
+            <br /> */}
           </div>
 
           <div className="mt-4 grid gap-4 md:grid-cols-2">
@@ -712,7 +712,7 @@ export function WebReportDrawer({
               </div>
               <p className="mt-3 text-[13px] text-slate-300">
                 <br/>
-                Regenerate after review changes, then open the full report page to inspect the actual document layout.
+                {/* Regenerate after review changes, then open the full report page to inspect the actual document layout. */}
               </p>
               <br/>
             </div>
@@ -886,8 +886,8 @@ export function WebReportDrawer({
               value={reportNoteDraft}
               disabled={session?.is_finalized}
               onChange={(event) => updateReportNoteDraft(event.target.value)}
-              className="mt-3 w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] text-slate-100 outline-none"
-              style={{ border: '1px solid #ffffff' }}
+              className="mt-3 w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] leading-6 text-white outline-none placeholder:text-slate-400"
+              style={{ border: '1px solid rgba(255,255,255,0.22)', caretColor: '#ffffff' }}
               placeholder="Add a clinician note for the report draft"
             />
             {dictationTranscript && (
@@ -926,14 +926,14 @@ export function WebReportDrawer({
                   setEditorDirty(false);
                   setSaveState('idle');
                 }}
-              className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] outline-none"
-              style={{ backgroundColor: '#0f172a', color: '#e2e8f0', colorScheme: 'dark', border: '1px solid #ffffff' }}
+              className="w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] text-white outline-none"
+              style={{ backgroundColor: '#020617', color: '#f8fafc', colorScheme: 'dark', border: '1px solid rgba(255,255,255,0.22)', WebkitTextFillColor: '#f8fafc' }}
               >
                 {teeth.map((tooth) => (
                   <option
                     key={tooth.tooth_label}
                     value={String(tooth.tooth_label)}
-                    style={{ backgroundColor: '#0f172a', color: '#e2e8f0' }}
+                    style={{ backgroundColor: '#020617', color: '#f8fafc' }}
                   >
                     Tooth {tooth.tooth_label}
                   </option>
@@ -941,8 +941,8 @@ export function WebReportDrawer({
               </select>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block">
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+              <label className="block" style={{ flex: 1, minWidth: 0 }}>
                 <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Bone Level</span>
                 <input
                   type="number"
@@ -959,7 +959,7 @@ export function WebReportDrawer({
                   style={{ border: '1px solid #ffffff' }}
                 />
               </label>
-              <label className="block">
+              <label className="block" style={{ flex: 1, minWidth: 0 }}>
                 <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Bone %</span>
                 <input
                   type="number"
@@ -1001,8 +1001,8 @@ export function WebReportDrawer({
                     acceptToothNoteAutocomplete();
                   }
                 }}
-                className="mt-3 w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] text-slate-100 outline-none"
-                style={{ border: '1px solid #ffffff' }}
+                className="mt-3 w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] leading-6 text-white outline-none placeholder:text-slate-400"
+                style={{ border: '1px solid rgba(255,255,255,0.22)', caretColor: '#ffffff' }}
                 placeholder="Add a note for the selected tooth"
               />
               {toothNoteAutocomplete?.ghostText ? (
@@ -1026,8 +1026,8 @@ export function WebReportDrawer({
                 value={reportNoteDraft}
                 disabled={session?.is_finalized}
                 onChange={(event) => updateReportNoteDraft(event.target.value)}
-                className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] text-slate-100 outline-none"
-                style={{ border: '1px solid #ffffff' }}
+                className="w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] leading-6 text-white outline-none placeholder:text-slate-400"
+                style={{ border: '1px solid rgba(255,255,255,0.22)', caretColor: '#ffffff' }}
                 placeholder="Add a clinician note for the report draft"
               />
             </label>

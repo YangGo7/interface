@@ -11,11 +11,13 @@
 
 import * as cornerstone from '@cornerstonejs/core';
 import dicomParser from 'dicom-parser';
+import { DicomOverlayMetadata, parseDicomMetadataFromDataSet } from './dicomMetadata';
 
 export interface MultiframeDicomRegistration {
     key: string;
     file: File;
     dataSet: dicomParser.DataSet;
+    metadata: DicomOverlayMetadata;
     rows: number;
     columns: number;
     bitsAllocated: number;
@@ -272,6 +274,7 @@ export async function registerMultiframeDicomFile(
     const arrayBuffer = await file.arrayBuffer();
     const byteArray = new Uint8Array(arrayBuffer);
     const dataSet = dicomParser.parseDicom(byteArray);
+    const baseMetadata = parseDicomMetadataFromDataSet(dataSet, file.name);
 
     const rows = dataSet.uint16('x00280010') || 0;
     const columns = dataSet.uint16('x00280011') || 0;
@@ -338,6 +341,23 @@ export async function registerMultiframeDicomFile(
         key,
         file,
         dataSet,
+        metadata: {
+            ...baseMetadata,
+            numberOfFrames,
+            windowCenter: windowCenter || baseMetadata.windowCenter,
+            windowWidth: windowWidth || baseMetadata.windowWidth,
+            sliceThickness,
+            spacingBetweenSlices: sliceThickness,
+            pixelSpacing: [pixelSpacing[0] || 1, pixelSpacing[1] || 1],
+            rowPixelSpacing: pixelSpacing[0] || 1,
+            columnPixelSpacing: pixelSpacing[1] || 1,
+            imageOrientationPatient,
+            imagePositionPatient,
+            modality,
+            seriesInstanceUID,
+            frameOfReferenceUID,
+            transferSyntaxUid,
+        },
         rows,
         columns,
         bitsAllocated,
@@ -383,6 +403,17 @@ export function generateMultiframeImageIds(reg: MultiframeDicomRegistration): st
         ids.push(`multiframe:${reg.key}&frame=${f}`);
     }
     return ids;
+}
+
+export function getMultiframeDicomMetadata(imageId?: string | null) {
+    if (!imageId || !imageId.startsWith('multiframe:')) {
+        return null;
+    }
+
+    const withoutScheme = imageId.replace('multiframe:', '');
+    const frameIdx = withoutScheme.indexOf('&frame=');
+    const key = frameIdx > -1 ? withoutScheme.substring(0, frameIdx) : withoutScheme;
+    return registrations.get(key)?.metadata || null;
 }
 
 /**
@@ -563,6 +594,33 @@ export function registerMultiframeMetadataProvider() {
             return {
                 modality: reg.modality,
                 seriesInstanceUID: reg.seriesInstanceUID,
+                seriesDescription: reg.metadata.seriesDescription,
+            };
+        }
+
+        if (type === 'generalPatientModule') {
+            return {
+                patientName: reg.metadata.patientName,
+                patientId: reg.metadata.patientId,
+                patientSex: reg.metadata.patientSex,
+                patientBirthDate: reg.metadata.patientBirthDate,
+            };
+        }
+
+        if (type === 'generalStudyModule') {
+            return {
+                studyDate: reg.metadata.studyDate,
+                studyTime: reg.metadata.studyTime,
+                accessionNumber: reg.metadata.accessionNumber,
+                studyDescription: reg.metadata.studyDescription,
+                institutionName: reg.metadata.institutionName,
+            };
+        }
+
+        if (type === 'generalImageModule') {
+            return {
+                instanceNumber: reg.metadata.instanceNumber,
+                imageType: reg.metadata.imageType,
             };
         }
 

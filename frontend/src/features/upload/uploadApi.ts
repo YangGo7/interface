@@ -1,5 +1,9 @@
 import { isDicomFile } from './uploadSelection';
 
+const DIRECT_API_BASE =
+  ((import.meta as any)?.env?.VITE_API_BASE_URL as string | undefined)?.trim() ||
+  'http://localhost:5000';
+
 async function readJsonOrThrow<T>(response: Response): Promise<T> {
   const contentType = response.headers.get('content-type') || '';
   const raw = await response.text();
@@ -20,11 +24,29 @@ async function readJsonOrThrow<T>(response: Response): Promise<T> {
   }
 }
 
+function withDirectApiBase(path: string) {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${DIRECT_API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+async function fetchApi(path: string, init?: RequestInit) {
+  const response = await fetch(path, init);
+  const contentType = response.headers.get('content-type') || '';
+  const looksLikeHtml = !contentType.includes('application/json');
+  const requestedRelativeApi = !/^https?:\/\//i.test(path) && path.startsWith('/api/');
+
+  if (requestedRelativeApi && looksLikeHtml) {
+    return fetch(withDirectApiBase(path), init);
+  }
+
+  return response;
+}
+
 export async function requestAsyncDetection(primaryFile: File, folderFiles: File[]) {
   const form = new FormData();
   form.append('image', primaryFile);
 
-  const res = await fetch('/api/detect_async', { method: 'POST', body: form });
+  const res = await fetchApi('/api/detect_async', { method: 'POST', body: form });
   const data = await readJsonOrThrow<{ success?: boolean; job_id?: string; preview_url?: string; message?: string }>(res);
 
   if (!res.ok || !data.success || !data.job_id) {
@@ -49,7 +71,7 @@ export async function requestPatientReport(primaryFile: File, userName: string, 
   form.append('user_name', userName);
   form.append('language', language);
 
-  const res = await fetch('/api/v2/analyze', { method: 'POST', body: form });
+  const res = await fetchApi('/api/v2/analyze', { method: 'POST', body: form });
   const data = await readJsonOrThrow<{ report_url?: string; error?: string } & Record<string, unknown>>(res);
 
   if (!data.report_url) {

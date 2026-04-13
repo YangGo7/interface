@@ -1,0 +1,29 @@
+# PyTorch CUDA Index
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# Web Framework
+flask==3.0.0
+flask-cors==4.0.0
+Werkzeug==3.0.1
+
+# Deep Learning & Computer Vision
+ultralytics==8.4.6
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+opencv-python==4.8.1.78
+Pillow==10.1.0
+pydicom==3.0.1
+
+# Data Validation & Serialization
+pydantic==2.5.0
+
+# Utilities
+numpy==1.26.4
+PyYAML==6.0.3
+scipy==1.15.3
+python-dotenv==1.0.0
+google-generativeai==0.8.6
+requests==2.32.5
+
+# COCO Tools for RLE encoding/decoding
+pycocotools==2.0.7

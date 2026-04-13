@@ -2,6 +2,19 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { CornerstoneViewer, MinimalCornerstoneDicomViewer, CornerstoneCanvasProbe, CornerstoneNativeToolsViewer, ImageViewer, CornerstoneGridViewer } from '../viewer';
 import { inspectLocalDicomFile, type LocalDicomInspection } from '../viewer/cornerstone/dicomDebug';
 import { buildDicomFolderStudies, type FolderStudy } from '../features/upload/dicomFolderStudies';
+import { buildDicomPreviewDataUrl, generateDentalArchCprPano, type ArchPoint } from '../features/cpr/cprPano';
+
+function buildTemporaryCorticalArch(columns: number, rows: number): ArchPoint[] {
+    const baseY = rows * 0.6; // 40% up from the bottom
+    const midLift = rows * 0.08;
+    return [
+        { x: columns * 0.16, y: baseY + rows * 0.03 },
+        { x: columns * 0.32, y: baseY - rows * 0.02 },
+        { x: columns * 0.5, y: baseY - midLift },
+        { x: columns * 0.68, y: baseY - rows * 0.02 },
+        { x: columns * 0.84, y: baseY + rows * 0.03 },
+    ];
+}
 
 export function CornerstonePage() {
     const [file, setFile] = useState<File | null>(null);
@@ -9,12 +22,19 @@ export function CornerstonePage() {
     const [selectedFolderSeriesId, setSelectedFolderSeriesId] = useState<string | null>(null);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [dicomInspection, setDicomInspection] = useState<LocalDicomInspection | null>(null);
+    const [cprPreview, setCprPreview] = useState<LocalDicomInspection | null>(null);
+    const [cprSliceIndex, setCprSliceIndex] = useState(0);
+    const [archPoints, setArchPoints] = useState<ArchPoint[]>([]);
+    const [cprImageUrl, setCprImageUrl] = useState<string | null>(null);
+    const [cprStatus, setCprStatus] = useState<string>('Select at least 3 arch points on the axial preview.');
+    const [cprBusy, setCprBusy] = useState(false);
 
     const selectedFolderSeries = useMemo(
         () => folderStudies.flatMap((study) => study.series).find((series) => series.id === selectedFolderSeriesId) || null,
         [folderStudies, selectedFolderSeriesId]
     );
     const folderMode = Boolean(selectedFolderSeries);
+    const cprSliceCount = selectedFolderSeries?.files.length || 0;
 
     useEffect(() => {
         if (!file || folderMode) {
@@ -77,16 +97,110 @@ export function CornerstonePage() {
         setSelectedFolderSeriesId(studies.flatMap((study) => study.series)[0]?.id || null);
     };
 
+    useEffect(() => {
+        setArchPoints([]);
+        setCprImageUrl(null);
+        if (!selectedFolderSeries || !selectedFolderSeries.files.length) {
+            setCprSliceIndex(0);
+            return;
+        }
+        setCprSliceIndex(Math.floor(selectedFolderSeries.files.length / 2));
+    }, [selectedFolderSeries]);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!selectedFolderSeries || !selectedFolderSeries.files.length || selectedFolderSeries.orientation !== 'Axial') {
+            setCprPreview(null);
+            setCprStatus(selectedFolderSeries ? 'CPR sandbox currently supports axial CT series.' : 'Select an axial CT series for CPR.');
+            return;
+        }
+
+        const clampedIndex = Math.max(0, Math.min(cprSliceIndex, selectedFolderSeries.files.length - 1));
+        const selectedFile = selectedFolderSeries.files[clampedIndex];
+        buildDicomPreviewDataUrl(selectedFile)
+            .then((preview) => {
+                if (!cancelled) {
+                    const defaultArch = buildTemporaryCorticalArch(preview.columns, preview.rows);
+                    setCprPreview({
+                        fileName: selectedFile.name,
+                        transferSyntaxUid: '',
+                        rows: preview.rows,
+                        columns: preview.columns,
+                        samplesPerPixel: 1,
+                        photometricInterpretation: 'MONOCHROME2',
+                        bitsAllocated: 16,
+                        bitsStored: 16,
+                        pixelRepresentation: 0,
+                        pixelBytes: 0,
+                        expectedBytes: 0,
+                        numberOfFrames: 1,
+                        windowCenter: null,
+                        windowWidth: null,
+                        canRenderPreview: true,
+                        previewDataUrl: preview.dataUrl,
+                        issues: [],
+                    });
+                    setArchPoints(defaultArch);
+                    setCprStatus(`Temporary cortical arch applied on axial slice ${clampedIndex + 1}/${selectedFolderSeries.files.length}.`);
+                }
+            })
+            .catch((error) => {
+                console.error('CPR preview inspection failed', error);
+                if (!cancelled) {
+                    setCprPreview(null);
+                    setCprStatus('Could not prepare axial preview for CPR.');
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [selectedFolderSeries, cprSliceIndex]);
+
+    const handleCprPreviewClick = (event: React.MouseEvent<HTMLImageElement>) => {
+        if (!cprPreview?.previewDataUrl || !selectedFolderSeries || cprBusy) return;
+        const rect = event.currentTarget.getBoundingClientRect();
+        const scaleX = cprPreview.columns / rect.width;
+        const scaleY = cprPreview.rows / rect.height;
+        const x = (event.clientX - rect.left) * scaleX;
+        const y = (event.clientY - rect.top) * scaleY;
+        setArchPoints((prev) => [...prev, { x, y }]);
+    };
+
+    const handleGenerateCpr = async () => {
+        if (!selectedFolderSeries || archPoints.length < 3) {
+            setCprStatus('Arch points are not ready yet.');
+            return;
+        }
+        setCprBusy(true);
+        setCprStatus('Generating curved pano from axial stack...');
+        try {
+            const result = await generateDentalArchCprPano({
+                files: selectedFolderSeries.files,
+                archPoints,
+            });
+            setCprImageUrl(result.dataUrl);
+            setCprStatus(`Generated pano ${result.width} x ${result.height} from ${result.sliceCount} slices.`);
+        } catch (error: any) {
+            console.error('CPR generation failed', error);
+            setCprStatus(error?.message || 'CPR generation failed.');
+        } finally {
+            setCprBusy(false);
+        }
+    };
+
     const isDicomFile = !!file && (file.name.toLowerCase().endsWith('.dcm') || file.name.toLowerCase().endsWith('.dicom'));
     const originalViewerUrl = isDicomFile ? dicomInspection?.previewDataUrl || '' : previewUrl || '';
     const viewerSources = folderMode
-        ? [{
-            id: `folder-series-${selectedFolderSeries.id}`,
-            label: selectedFolderSeries.label,
-            url: '',
-            files: selectedFolderSeries.files,
-            scheme: 'dicomfolder' as const,
-        }]
+        ? selectedFolderSeries
+            ? [{
+                id: `folder-series-${selectedFolderSeries.id}`,
+                label: selectedFolderSeries.label,
+                url: '',
+                files: selectedFolderSeries.files,
+                scheme: 'dicomfolder' as const,
+            }]
+            : []
         : file
             ? [{
                 id: 'local-file',
@@ -98,7 +212,7 @@ export function CornerstonePage() {
             : [];
 
     return (
-        <div className="min-h-screen bg-gray-100 flex flex-col p-8">
+        <div className="h-screen overflow-y-auto bg-gray-100 flex flex-col p-8">
             <div className="mx-auto w-full max-w-6xl flex flex-col gap-6">
                 <div className="bg-white p-6 rounded-2xl shadow-sm">
                     <h1 className="text-2xl font-bold text-gray-800 mb-2">Cornerstone Sandbox</h1>
@@ -187,6 +301,120 @@ export function CornerstonePage() {
                                 sources={viewerSources}
                                 maxHeight={720}
                             />
+                        </div>
+                    </div>
+                )}
+
+                {folderMode && (
+                    <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
+                        <div className="bg-white p-6 rounded-2xl shadow-sm flex flex-col gap-4">
+                            <div>
+                                <h2 className="text-lg font-semibold text-gray-800">CPR Pano Sandbox</h2>
+                                <p className="mt-1 text-sm text-gray-500">
+                                    Temporary MVP uses a cortical guide curve at 40% from the lower border of the axial preview.
+                                </p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setArchPoints([])}
+                                    className="rounded-full border border-gray-300 px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                                >
+                                    Clear Points
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setArchPoints((prev) => prev.slice(0, -1))}
+                                    disabled={!archPoints.length || cprBusy}
+                                    className="rounded-full border border-gray-300 px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                    Undo
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleGenerateCpr}
+                                    disabled={archPoints.length < 3 || cprBusy || !selectedFolderSeries || selectedFolderSeries.orientation !== 'Axial'}
+                                    className="rounded-full bg-cyan-600 px-4 py-2 text-xs font-semibold text-white hover:bg-cyan-500 disabled:opacity-50"
+                                >
+                                    {cprBusy ? 'Generating...' : 'Generate Pano'}
+                                </button>
+                            </div>
+                            <div className="text-xs text-gray-500">
+                                {cprStatus} {archPoints.length > 0 ? `(${archPoints.length} points)` : ''}
+                            </div>
+                            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-3">
+                                {cprPreview?.previewDataUrl ? (
+                                    <div className="relative">
+                                        <img
+                                            src={cprPreview.previewDataUrl}
+                                            alt="Axial preview for CPR"
+                                            className="block w-full rounded-xl bg-black"
+                                        />
+                                        <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox={`0 0 ${cprPreview.columns} ${cprPreview.rows}`} preserveAspectRatio="none">
+                                            {archPoints.length > 1 && (
+                                                <polyline
+                                                    points={archPoints.map((point) => `${point.x},${point.y}`).join(' ')}
+                                                    fill="none"
+                                                    stroke="#22d3ee"
+                                                    strokeWidth={2}
+                                                    strokeLinejoin="round"
+                                                    strokeLinecap="round"
+                                                />
+                                            )}
+                                            {archPoints.map((point, index) => (
+                                                <g key={`${point.x}-${point.y}-${index}`}>
+                                                    <circle cx={point.x} cy={point.y} r={4} fill="#06b6d4" stroke="white" strokeWidth={1.5} />
+                                                    <text x={point.x + 6} y={point.y - 6} fontSize="10" fill="white">
+                                                        {index + 1}
+                                                    </text>
+                                                </g>
+                                            ))}
+                                        </svg>
+                                    </div>
+                                ) : (
+                                    <div className="flex h-56 items-center justify-center rounded-xl bg-gray-100 text-sm text-gray-500">
+                                        Axial preview unavailable for this series.
+                                    </div>
+                                )}
+                                {cprSliceCount > 1 && (
+                                    <div className="mt-3 space-y-2">
+                                        <div className="flex items-center justify-between text-[11px] text-gray-500">
+                                            <span>Axial Slice</span>
+                                            <span>{cprSliceIndex + 1} / {cprSliceCount}</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={Math.max(0, cprSliceCount - 1)}
+                                            step={1}
+                                            value={Math.min(cprSliceIndex, Math.max(0, cprSliceCount - 1))}
+                                            onChange={(event) => setCprSliceIndex(Number(event.target.value))}
+                                            className="w-full accent-cyan-500"
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                        <div className="bg-white p-6 rounded-2xl shadow-sm flex flex-col gap-4">
+                            <div>
+                                <h2 className="text-lg font-semibold text-gray-800">Generated Curved Pano</h2>
+                                <p className="mt-1 text-sm text-gray-500">
+                                    MVP output using manual arch points and slice-wise sampling across the CT volume.
+                                </p>
+                            </div>
+                            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                                {cprImageUrl ? (
+                                    <img
+                                        src={cprImageUrl}
+                                        alt="Curved panoramic reconstruction"
+                                        className="max-h-[520px] w-full rounded-xl bg-black object-contain"
+                                    />
+                                ) : (
+                                    <div className="flex h-[320px] items-center justify-center rounded-xl bg-gray-100 text-sm text-gray-500">
+                                        Generate the pano after selecting the arch points.
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
                 )}

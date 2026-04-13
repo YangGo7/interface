@@ -13,8 +13,16 @@ import {
     ZoomOut,
     Sliders
 } from 'lucide-react';
-import { initCornerstone, registerLocalDicomFile, registerNativeDicomFile } from './cornerstone/init';
+import {
+    getRegisteredDicomMetadata,
+    initCornerstone,
+    registerLocalDicomFileWithMetadata,
+    registerNativeDicomFileWithMetadata,
+} from './cornerstone/init';
+import type { DicomOverlayMetadata } from './cornerstone/dicomMetadata';
+import { getAutoWindowForCornerstoneImage } from './cornerstone/autoWindow';
 import { addAndGroupTools, createOrGetToolGroup, setActiveTool, TOOL_GROUP_ID } from './cornerstone/tools';
+import { DicomMetadataOverlay } from './DicomMetadataOverlay';
 
 export type ViewerSource = {
     id: string;
@@ -35,6 +43,7 @@ type CornerstoneViewerProps = {
     invert?: boolean;
     interactionMode?: string;
     resetToken?: number;
+    autoWindowToken?: number;
     brightness?: number;
     contrast?: number;
     rotation?: number;
@@ -53,6 +62,7 @@ export function CornerstoneViewer({
     invert = false,
     interactionMode,
     resetToken = 0,
+    autoWindowToken = 0,
     brightness = 100,
     contrast = 100,
     rotation = 0,
@@ -74,8 +84,19 @@ export function CornerstoneViewer({
     const [debugEnabled, setDebugEnabled] = useState(false);
     const lensCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const [magnifier, setMagnifier] = useState({ visible: false, x: 0, y: 0 });
+    const [overlayMetadata, setOverlayMetadata] = useState<DicomOverlayMetadata | null>(null);
 
     const activeSource = sources.find((s) => s.id === activeSourceId) || sources[0];
+
+    function syncOverlayWindow(windowCenter: number, windowWidth: number) {
+        setOverlayMetadata((prev) => prev
+            ? {
+                ...prev,
+                windowCenter,
+                windowWidth,
+            }
+            : prev);
+    }
 
     function applyViewportDisplayState(
         viewport: cornerstone.Types.IStackViewport | undefined,
@@ -87,14 +108,14 @@ export function CornerstoneViewer({
         if (!image) return;
 
         const props: cornerstone.Types.ViewportProperties = {};
-        if (image.windowCenter != null && image.windowWidth != null) {
+        if (image.minPixelValue !== undefined && image.maxPixelValue !== undefined) {
+            props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
+        } else if (image.windowCenter != null && image.windowWidth != null) {
             const wc = Array.isArray(image.windowCenter) ? image.windowCenter[0] : image.windowCenter;
             const ww = Array.isArray(image.windowWidth) ? image.windowWidth[0] : image.windowWidth;
             if (typeof wc === 'number' && typeof ww === 'number' && ww > 0) {
                 props.voiRange = { lower: wc - ww / 2, upper: wc + ww / 2 };
             }
-        } else if (image.minPixelValue !== undefined && image.maxPixelValue !== undefined) {
-            props.voiRange = { lower: image.minPixelValue, upper: image.maxPixelValue };
         }
 
         props.invert = Boolean(image.invert);
@@ -160,22 +181,29 @@ export function CornerstoneViewer({
             toolGroup.addViewport(viewportId, renderingEngineId);
         }
 
-        // Load image
-        const imageId =
-            scheme === 'dicomfile' && activeSource.file
-                ? (dicomImageIdsRef.current[activeSource.id] ||= registerNativeDicomFile(activeSource.file))
-                : scheme === 'dicomlocal' && activeSource.file
-                    ? (dicomImageIdsRef.current[activeSource.id] ||= registerLocalDicomFile(activeSource.id, activeSource.file))
-                    : `${scheme}:${activeSource.url}`;
-        console.log('Cornerstone: Setting stack for', imageId);
-        setLastImageId(imageId);
+        let isCancelled = false;
+        setOverlayMetadata(null);
         setLoadState('loading');
         setStatusMessage(`Loading ${activeSource.label} automatically on GPU...`);
 
-        let isCancelled = false;
+        const loadSource = async () => {
+            try {
+                const imageId =
+                    scheme === 'dicomfile' && activeSource.file
+                        ? (dicomImageIdsRef.current[activeSource.id] ||= await registerNativeDicomFileWithMetadata(activeSource.file))
+                        : scheme === 'dicomlocal' && activeSource.file
+                            ? (dicomImageIdsRef.current[activeSource.id] ||= await registerLocalDicomFileWithMetadata(activeSource.id, activeSource.file))
+                            : `${scheme}:${activeSource.url}`;
+                if (isCancelled) return;
 
-        viewport.setStack([imageId])
-            .then(() => {
+                console.log('Cornerstone: Setting stack for', imageId);
+                await cornerstone.imageLoader.loadAndCacheImage(imageId);
+                if (isCancelled) return;
+
+                setLastImageId(imageId);
+                setOverlayMetadata(getRegisteredDicomMetadata(imageId));
+
+                await viewport.setStack([imageId]);
                 if (isCancelled) return;
 
                 applyViewportDisplayState(viewport, imageId);
@@ -183,15 +211,20 @@ export function CornerstoneViewer({
                 console.log('Cornerstone: Stack set, resetting camera...');
                 renderingEngine.resize(true, false);
                 viewport.resetCamera();
+                applyViewportDisplayState(viewport, imageId);
                 viewport.render();
+                renderingEngine.render();
+                setOverlayMetadata(getRegisteredDicomMetadata(imageId));
                 setLoadState('ready');
                 setStatusMessage(`Rendered ${activeSource.label}`);
-            })
-            .catch((err) => {
+            } catch (err) {
                 console.error('Cornerstone: setStack failed', err);
                 setLoadState('error');
                 setStatusMessage(err instanceof Error ? err.message : 'setStack failed');
-            });
+            }
+        };
+
+        void loadSource();
 
         // Initial tool
         handleToolChange('pan');
@@ -219,6 +252,7 @@ export function CornerstoneViewer({
         const renderingEngine = renderingEngineRef.current;
         const viewport = renderingEngine?.getViewport(viewportIdRef.current) as cornerstone.Types.IStackViewport | undefined;
         applyViewportDisplayState(viewport, lastImageId);
+        setOverlayMetadata(getRegisteredDicomMetadata(lastImageId));
         viewport?.render();
     }, [lastImageId]);
 
@@ -332,11 +366,37 @@ export function CornerstoneViewer({
         }
     };
 
+    function applyAutoWindow() {
+        const renderingEngine = renderingEngineRef.current;
+        const viewport = renderingEngine?.getViewport(viewportIdRef.current) as cornerstone.Types.IStackViewport | undefined;
+        if (!viewport || !lastImageId) return;
+
+        const image = cornerstone.cache.getImage(lastImageId);
+        const autoWindow = getAutoWindowForCornerstoneImage(image as any);
+        if (!image || !autoWindow) return;
+
+        viewport.setProperties({
+            voiRange: {
+                lower: autoWindow.level - autoWindow.width / 2,
+                upper: autoWindow.level + autoWindow.width / 2,
+            },
+            invert: Boolean(image.invert),
+        });
+        syncOverlayWindow(autoWindow.level, autoWindow.width);
+        viewport.render();
+    }
+
     useEffect(() => {
         if (resetToken > 0) {
             resetView();
         }
     }, [resetToken]);
+
+    useEffect(() => {
+        if (autoWindowToken > 0) {
+            applyAutoWindow();
+        }
+    }, [autoWindowToken, lastImageId]);
 
     const zoomInOut = (delta: number) => {
         const renderingEngine = renderingEngineRef.current;
@@ -482,6 +542,11 @@ export function CornerstoneViewer({
                             <div>Status: {statusMessage}</div>
                         </div>
                     )}
+
+                    <DicomMetadataOverlay
+                        metadata={overlayMetadata}
+                        top={debugEnabled ? 116 : 12}
+                    />
 
                     {loadState === 'error' && (
                         <div className="absolute inset-x-4 bottom-4 rounded-xl border border-red-500/40 bg-black/70 px-4 py-3 text-sm text-red-200 z-10">

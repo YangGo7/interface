@@ -1658,7 +1658,7 @@ export function ChartPage(props?: ChartPageProps) {
                       </div>
                       <div className="flex justify-center">
                         <span className="text-sm font-semibold tracking-[0.08em] text-[#CBD5E1]">
-                          Odontogram
+                          {/* Odontogram */}
                         </span>
                       </div>
                     </div>

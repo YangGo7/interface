@@ -71,7 +71,7 @@ export default function UploadPage() {
     <div className="h-screen flex flex-col bg-[#0a0a0a] text-gray-100">
       <main className="flex-1 flex flex-col items-center justify-center gap-8 px-4">
         <div className="flex items-center gap-3">
-          <div style={{ width: 24, height: 24 }}>
+          <div style={{ width: 60, height: 60 }}>
             <img src={logo} alt="E2DW logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
           </div>
           <div className="flex flex-col leading-tight">
