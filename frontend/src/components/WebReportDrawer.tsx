@@ -145,6 +145,7 @@ export function WebReportDrawer({
   onClose,
   open = true,
   layout = 'modal',
+  isInactive = false,
 }: {
   sessionId: string;
   selectedToothId?: string | null;
@@ -152,6 +153,7 @@ export function WebReportDrawer({
   onClose: () => void;
   open?: boolean;
   layout?: 'modal' | 'dock';
+  isInactive?: boolean;
 }) {
   const [session, setSession] = useState<WebReportSessionResponse['session'] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -543,31 +545,12 @@ export function WebReportDrawer({
     mediaRecorderRef.current?.stop();
   };
 
-  const renderDictationControl = () => (
-    <div className="flex items-center gap-2">
-      <button
-        type="button"
-        onClick={dictationState === 'recording' ? handleStopDictation : handleStartDictation}
-        disabled={dictationState === 'processing' || Boolean(session?.is_finalized)}
-        title={dictationState === 'recording' ? 'Stop dictation' : 'Start dictation'}
-        aria-label={dictationState === 'recording' ? 'Stop dictation' : 'Start dictation'}
-        className={`inline-flex h-8 w-8 items-center justify-center rounded-full border transition disabled:opacity-50 ${
-          dictationState === 'recording'
-            ? 'border-red-400/60 bg-red-500/20 text-red-100 hover:bg-red-500/25'
-            : 'border-cyan-300/35 bg-cyan-400/15 text-cyan-100 hover:bg-cyan-400/20'
-        }`}
-      >
-        {dictationState === 'recording' ? <Square className="h-3.5 w-3.5 fill-current" /> : <Mic className="h-3.5 w-3.5" />}
-      </button>
-      <span className="whitespace-nowrap text-[9px] leading-none text-slate-500">
-        {dictationState === 'recording'
-          ? 'Recording...'
-          : dictationState === 'processing'
-            ? 'Processing...'
-            : 'Voice to SOAP'}
-      </span>
-    </div>
-  );
+  /*
+  const handleStartDictation = async () => { ... };
+  const handleStopDictation = () => { ... };
+  */
+  const renderDictationControl = () => null;
+
 
   const reportUrl = `/api/web_report/session/${sessionId}/report`;
   const reportPageUrl = reportUrl;
@@ -605,8 +588,9 @@ export function WebReportDrawer({
         colorScheme: 'dark' as const,
       };
 
+
   return (
-    <div className={rootClassName} style={rootStyle}>
+    <div className={`${rootClassName} ${isInactive ? 'opacity-40 pointer-events-none' : ''}`} style={rootStyle}>
       <div className={`pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2 ${isDock ? 'right-14 md:left-auto md:translate-x-0' : 'md:left-auto md:right-14 md:translate-x-0'}`}>
         <div className="h-12 w-44 rounded-full bg-gradient-to-r from-cyan-400 via-sky-400 to-blue-500 opacity-75 blur-[10px]" />
       </div>
@@ -785,6 +769,7 @@ export function WebReportDrawer({
             )}
           </div>
 
+          {/* 
           <div className="mt-4 rounded-[24px] border border-white/10 bg-white/5 p-5">
             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Available Captures</p>
             {availableCaptures.length ? (
@@ -820,6 +805,7 @@ export function WebReportDrawer({
               <p className="mt-3 text-[13px] text-slate-500">No captures available from the current chart.</p>
             )}
           </div>
+          */}
           </div>
           <div className={`border-t border-white/10 bg-black/10 ${isDock ? 'px-4 py-2' : 'px-5 py-2.5 md:px-6'}`}>
             <div className="flex items-center justify-between gap-3 rounded-[18px] border border-white/10 bg-white/5 px-4 py-2.5">

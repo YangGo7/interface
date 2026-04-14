@@ -24,6 +24,7 @@ import { buildWebReportKeywords, countWebReportFindingTeeth } from '../lib/webRe
 import type { FolderStudy } from '../features/upload/dicomFolderStudies';
 import { requestAsyncDetection } from '../features/upload/uploadApi';
 import { fetchServerFolderIndex, materializeServerStudy, resolveServerAssetUrl } from '../lib/folderLeaderApi';
+import { FileText } from 'lucide-react';
 
 type ChartPageProps = {
   result?: any;
@@ -232,7 +233,11 @@ const enhanceMagnifierImage = (imageData: ImageData) => {
 export function ChartPage(props?: ChartPageProps) {
   const location = useLocation();
   const locationState = (location.state as any) || {};
-  const [activeFolderStudies, setActiveFolderStudies] = useState<FolderStudy[]>((locationState.originalFolderStudies as FolderStudy[] | undefined) || []);
+  const [activeFolderStudies, setActiveFolderStudies] = useState<FolderStudy[]>(() => {
+    const raw = (locationState.originalFolderStudies as FolderStudy[] | undefined) || [];
+    const seen = new Set<string>();
+    return raw.filter(s => { if (seen.has(s.id)) return false; seen.add(s.id); return true; });
+  });
   const [serverStudies, setServerStudies] = useState<any[]>([]);
 
   useEffect(() => {
@@ -243,11 +248,20 @@ export function ChartPage(props?: ChartPageProps) {
 
   const combinedStudies = useMemo(() => {
     const activeIds = new Set(activeFolderStudies.map(s => s.id));
-    const additional = serverStudies.filter(s => !activeIds.has(s.id)).map(s => ({
+    const activeFingerprints = new Set(activeFolderStudies.map(s => `${s.label}::${s.description}::${s.patientId}`));
+    const additional = serverStudies.filter(s => {
+      if (activeIds.has(s.id)) return false;
+      const fp = `${s.label}::${s.description}::${s.patientId}`;
+      if (activeFingerprints.has(fp)) return false;
+      return true;
+    }).map(s => ({
       ...s,
       previewUrl: s.previewUrl ? resolveServerAssetUrl(s.previewUrl) : undefined
     }));
-    return [...activeFolderStudies, ...additional];
+    // Final dedup pass to prevent any remaining duplicates
+    const merged = [...activeFolderStudies, ...additional];
+    const seen = new Set<string>();
+    return merged.filter(s => { if (seen.has(s.id)) return false; seen.add(s.id); return true; });
   }, [activeFolderStudies, serverStudies]);
 
   const originalFolderStudies = activeFolderStudies;
@@ -282,7 +296,7 @@ export function ChartPage(props?: ChartPageProps) {
   const [reportError, setReportError] = useState<string | null>(null);
   const [captureNotice, setCaptureNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
-  const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'captures'>('studies');
+  const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'report'>('studies');
   const [selectedFolderSeriesId, setSelectedFolderSeriesId] = useState<string | null>(initialFolderSeriesId);
   const [captureGallery, setCaptureGallery] = useState<Array<{
     id: string;
@@ -1300,10 +1314,11 @@ export function ChartPage(props?: ChartPageProps) {
     return `${url}${url.includes('?') ? '&' : '?'}t=${timestamp}`;
   };
 
-  const originalUrl = getUrlWithCacheBuster(result?.image_url || result?.overlay_url);
-  const overlayUrl = getUrlWithCacheBuster(result?.overlay_url || result?.image_url);
-  const heatmapUrl = getUrlWithCacheBuster(result?.heatmap_overlay_url || result?.overlay_url || result?.image_url);
-  const originalRasterUrl = getUrlWithCacheBuster(dicomPreviewDataUrl || locationState.previewUrl || result?.preview_url || result?.image_url || result?.overlay_url);
+  const originalRasterUrl = getUrlWithCacheBuster(dicomPreviewDataUrl || locationState.previewUrl || result?.preview_url);
+  const originalUrl = getUrlWithCacheBuster(result?.image_url);
+  const overlayUrl = getUrlWithCacheBuster(result?.overlay_url);
+  const heatmapUrl = getUrlWithCacheBuster(result?.heatmap_overlay_url);
+  
   const hasHeatmapAsset = Boolean(result?.heatmap_overlay_url);
   const hasStructuredOverlayData = Boolean(
     (Array.isArray(result?.sinus_contours) && result.sinus_contours.length > 0) ||
@@ -1312,27 +1327,29 @@ export function ChartPage(props?: ChartPageProps) {
     (Array.isArray(result?.teeth_objects) && result.teeth_objects.length > 0)
   );
   const shouldUseStructuredAiOverlay = viewMode === 'overlay' && hasStructuredOverlayData;
-  let showSrc =
+  const overlayIsDicom = isDicomPath(result?.overlay_url);
+
+  // If we are in 2D mode but it's a DICOM, we MUST use a raster preview for <img> tags.
+  // Raw .dcm URLs will result in a black screen.
+  const shouldUseCornerstone =
     viewMode === 'original'
-      ? (originalIsDicom && !isVolumeCase ? (originalRasterUrl || originalUrl) : originalUrl)
-      : viewMode === 'heatmap'
-        ? (hasHeatmapAsset ? heatmapUrl : (originalUrl || overlayUrl))
-        : (shouldUseStructuredAiOverlay
-            ? (originalRasterUrl || originalUrl || overlayUrl)
-            : (overlayUrl || originalRasterUrl || originalUrl));
+      ? (originalIsDicom && isVolumeCase) || (originalFolderMode && Boolean(selectedFolderSeries))
+      : viewMode === 'overlay'
+        ? (overlayIsDicom && isVolumeCase)
+        : false;
+
+  const showSrc = shouldUseCornerstone
+    ? null
+    : (originalRasterUrl || originalUrl || result?.image_url);
+    // Note: We always use the clear original raster even in heatmap/overlay mode 
+    // to avoid server-side colored artifacts (like green sinus) from appearing in the background.
 
   // If no result yet but we have a preview, show that
   // if (!showSrc && locationState.previewUrl) {
   //   showSrc = locationState.previewUrl;
   // }
 
-  const overlayIsDicom = isDicomPath(result?.overlay_url);
-  const shouldUseCornerstone =
-    viewMode === 'original'
-      ? (originalIsDicom && isVolumeCase)
-      : viewMode === 'overlay'
-        ? (overlayIsDicom && isVolumeCase)
-        : false;
+
   const displayDicomHudMetadata = (() => {
     if (!dicomHudMetadata) return null;
     if (shouldUseCornerstone) return dicomHudMetadata;
@@ -1491,7 +1508,7 @@ export function ChartPage(props?: ChartPageProps) {
         ? { x: Number(pt[0]), y: Number(pt[1]) }
         : null)
       .filter((pt): pt is { x: number; y: number } =>
-        Boolean(pt) && Number.isFinite(pt.x) && Number.isFinite(pt.y));
+        pt !== null && Number.isFinite(pt.x) && Number.isFinite(pt.y));
 
     if (points.length < 3) return [];
 
@@ -1539,202 +1556,175 @@ export function ChartPage(props?: ChartPageProps) {
     return runs;
   };
 
+  const warmPastelPalette = [
+    { fill: 'rgba(255, 216, 194, 0.26)', stroke: 'rgba(255, 182, 151, 0.94)' },
+    { fill: 'rgba(255, 226, 203, 0.26)', stroke: 'rgba(241, 174, 129, 0.94)' },
+    { fill: 'rgba(255, 212, 209, 0.26)', stroke: 'rgba(234, 153, 150, 0.94)' },
+    { fill: 'rgba(246, 224, 198, 0.26)', stroke: 'rgba(221, 171, 118, 0.94)' },
+    { fill: 'rgba(255, 229, 214, 0.26)', stroke: 'rgba(232, 163, 121, 0.94)' },
+    { fill: 'rgba(255, 239, 221, 0.26)', stroke: 'rgba(227, 180, 126, 0.94)' },
+  ];
+
   const selectedToothKey = selectedTooth ? String(selectedTooth) : null;
 
   // --- AI Overlay Rendering ---
-  const renderAIDetections = (options?: { emphasize?: boolean }) => {
-    if (viewMode !== 'overlay' || !result) return null;
-
-    const emphasize = Boolean(options?.emphasize);
-    const strokeBoost = emphasize ? 1.12 : 1;
-    const structureStroke = emphasize ? 'rgba(255, 78, 78, 0.96)' : 'rgba(255, 78, 78, 0.92)';
-    const structureFill = 'rgba(255, 78, 78, 0.40)';
-    const items: React.ReactNode[] = [];
-    const shouldFocusSingleTooth = Boolean(selectedToothKey);
-    const shouldShowSinus = !shouldFocusSingleTooth && (overlayPreset === 'all' || overlayPreset === 'sinus' || overlayPreset === 'sinus-upper-tooth');
-    const shouldShowNerve = !shouldFocusSingleTooth && (overlayPreset === 'all' || overlayPreset === 'nerve' || overlayPreset === 'nerve-lower-tooth');
-    const shouldShowUpperTooth = overlayPreset === 'all' || overlayPreset === 'tooth' || overlayPreset === 'sinus-upper-tooth';
-    const shouldShowLowerTooth = overlayPreset === 'all' || overlayPreset === 'tooth' || overlayPreset === 'nerve-lower-tooth';
-    const warmPastelPalette = [
-      { fill: 'rgba(255, 216, 194, 0.26)', stroke: 'rgba(255, 182, 151, 0.94)' },
-      { fill: 'rgba(255, 226, 203, 0.26)', stroke: 'rgba(241, 174, 129, 0.94)' },
-      { fill: 'rgba(255, 212, 209, 0.26)', stroke: 'rgba(234, 153, 150, 0.94)' },
-      { fill: 'rgba(246, 224, 198, 0.26)', stroke: 'rgba(221, 171, 118, 0.94)' },
-      { fill: 'rgba(255, 229, 214, 0.26)', stroke: 'rgba(232, 163, 121, 0.94)' },
-      { fill: 'rgba(255, 239, 221, 0.26)', stroke: 'rgba(227, 180, 126, 0.94)' },
-    ];
-    const getToothOverlayStyle = (label: string) => {
-      const numericLabel = Number(label);
-      const paletteIndex = Number.isFinite(numericLabel)
-        ? Math.abs(numericLabel) % warmPastelPalette.length
-        : 0;
-      const palette = warmPastelPalette[paletteIndex];
-      if (!shouldFocusSingleTooth || label !== selectedToothKey) {
-        return palette;
-      }
-      return {
-        fill: palette.fill.replace('0.26', emphasize ? '0.40' : '0.34'),
-        stroke: palette.stroke.replace('0.94', '0.98'),
+    const renderAIDetections = () => {
+      if (viewMode !== 'overlay' || !result) return null;
+  
+      const items: React.ReactNode[] = [];
+      const shouldFocusSingleTooth = Boolean(selectedToothKey);
+      
+      const shouldShowSinus = !shouldFocusSingleTooth && (overlayPreset === 'all' || overlayPreset === 'sinus' || overlayPreset === 'sinus-upper-tooth');
+      const shouldShowNerve = !shouldFocusSingleTooth && (overlayPreset === 'all' || overlayPreset === 'nerve' || overlayPreset === 'nerve-lower-tooth');
+      const shouldShowUpperTooth = overlayPreset === 'all' || overlayPreset === 'tooth' || overlayPreset === 'sinus-upper-tooth';
+      const shouldShowLowerTooth = overlayPreset === 'all' || overlayPreset === 'tooth' || overlayPreset === 'nerve-lower-tooth';
+  
+      const getToothOverlayStyle = (label: string) => {
+        const numericLabel = Number(label);
+        const paletteIndex = Number.isFinite(numericLabel) ? Math.abs(numericLabel) % warmPastelPalette.length : 0;
+        const palette = warmPastelPalette[paletteIndex];
+        const isSelected = selectedToothKey === label;
+        
+        return {
+          fill: isSelected ? palette.fill.replace('0.26', '0.45') : palette.fill,
+          stroke: isSelected ? '#ffffff' : palette.stroke,
+          strokeWidth: isSelected ? 2.5 : 1.2
+        };
       };
-    };
-
-    const addContourGroup = (
-      contours: any[],
-      color: string,
-      fill: string,
-      keyPrefix: string,
-      closed = true
-    ) => {
-      if (!Array.isArray(contours)) return;
-      contours.forEach((contour, idx) => {
-        if (!Array.isArray(contour) || contour.length < 2) return;
-        const points = contour
-          .map((pt: any) => Array.isArray(pt) && pt.length >= 2 ? `${pt[0]},${pt[1]}` : null)
-          .filter(Boolean)
-          .join(' ');
-        if (!points) return;
-        items.push(
-          closed ? (
-            <polygon
-              key={`${keyPrefix}-${idx}`}
-              points={points}
-              fill={fill}
-              stroke={color}
-              strokeWidth={(1.05 * strokeBoost) / effectiveScale}
-              vectorEffect="non-scaling-stroke"
-            />
-          ) : (
+  
+      // 1. Sinus Rendering (Lower 25% only, sharp red contour)
+      if (shouldShowSinus && result.sinus_contours) {
+        result.sinus_contours.forEach((contour: any, idx: number) => {
+          if (!Array.isArray(contour)) return;
+          const runs = buildLowerContourRuns(contour, 0.25);
+          runs.forEach((run, ridx) => {
+            const points = run.map((pt) => `${pt.x},${pt.y}`).join(' ');
+            items.push(
+              <polyline
+                key={`sinus-lower-${idx}-${ridx}`}
+                points={points}
+                fill="none"
+                stroke="#ff4444"
+                strokeWidth={1.2 / effectiveScale}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                vectorEffect="non-scaling-stroke"
+              />
+            );
+          });
+        });
+      }
+  
+      // 2. Nerve Rendering (Minimalist, 0.3 opacity, thin)
+      if (shouldShowNerve && result.nerve_contours) {
+        result.nerve_contours.forEach((contour: any, idx: number) => {
+          if (!Array.isArray(contour) || contour.length < 2) return;
+          const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
+          items.push(
             <polyline
-              key={`${keyPrefix}-${idx}`}
+              key={`nerve-line-${idx}`}
               points={points}
               fill="none"
-              stroke={color}
-              strokeWidth={(1.35 * strokeBoost) / effectiveScale}
+              stroke="rgba(255, 0, 255, 0.3)"
+              strokeWidth={1 / effectiveScale}
               strokeLinecap="round"
               strokeLinejoin="round"
               vectorEffect="non-scaling-stroke"
             />
-          )
-        );
-      });
-    };
-
-    const filteredTeeth = (Array.isArray(result?.teeth) ? result.teeth : (Array.isArray(result?.teeth_objects) ? result.teeth_objects : [])).filter((tooth: any) => {
-      const label = String(tooth?.tooth_label || tooth?.label || tooth?.tooth || '');
-      const isUnassignedNatural = !label && tooth?.status === 'unassigned' && tooth?.type === 'natural';
-      if (!label && !isUnassignedNatural) return false;
-      if (selectedToothKey && label !== selectedToothKey) return false;
-      if (isUnassignedNatural) {
-        return overlayPreset === 'all' || overlayPreset === 'tooth';
+          );
+        });
       }
-      const isUpper = label.startsWith('1') || label.startsWith('2');
-      return isUpper ? shouldShowUpperTooth : shouldShowLowerTooth;
-    });
-
-    if (shouldShowSinus) {
-      addContourGroup(result?.sinus_contours || [], structureStroke, structureFill, 'sinus');
-    }
-
-    if (shouldShowNerve) {
-      addContourGroup(result?.nerve_contours || [], structureStroke, structureFill, 'nerve');
-    }
-
-    filteredTeeth.forEach((tooth: any, idx: number) => {
-      const contour = tooth?.contour;
-      if (!Array.isArray(contour) || contour.length < 3) return;
-      const label = String(tooth?.tooth_label || tooth?.label || tooth?.tooth || '');
-      const labelHint = String(tooth?.label_hint || '');
-      const isUnassignedNatural = !label && tooth?.status === 'unassigned' && tooth?.type === 'natural';
-      const toothStyle = isUnassignedNatural
-        ? {
-            fill: emphasize ? 'rgba(255, 244, 214, 0.32)' : 'rgba(255, 244, 214, 0.26)',
-            stroke: 'rgba(245, 158, 11, 0.96)',
-          }
-        : getToothOverlayStyle(label);
-      const points = contour
-        .map((pt: any) => Array.isArray(pt) && pt.length >= 2 ? `${pt[0]},${pt[1]}` : null)
-        .filter(Boolean)
-        .join(' ');
-      if (!points) return;
-      items.push(
-        <polygon
-          key={`tooth-${tooth?.tooth_label || idx}`}
-          points={points}
-          fill={toothStyle.fill}
-          stroke={toothStyle.stroke}
-          strokeWidth={(0.92 * strokeBoost) / effectiveScale}
-          strokeDasharray={isUnassignedNatural ? `${5 / effectiveScale} ${3 / effectiveScale}` : undefined}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-
-    });
-
-    const addPathologyBoxes = (entries: Array<[string, any]>, color: string, label: string) => {
-      entries.forEach(([tooth, data], idx) => {
-        if (selectedToothKey && String(tooth) !== selectedToothKey) return;
-        const box = data?.box;
-        if (!Array.isArray(box) || box.length < 4) return;
-        const [x1, y1, x2, y2] = box.map((value: any) => Number(value));
-        if (![x1, y1, x2, y2].every(Number.isFinite)) return;
-        const width = Math.max(0, x2 - x1);
-        const height = Math.max(0, y2 - y1);
-        if (!width || !height) return;
-
-        const strokeWidth = (1.15 * (emphasize ? 1.12 : 1)) / effectiveScale;
-        const fontSize = Math.max(7 / effectiveScale, 9 / effectiveScale);
-        const tagHeight = 12 / effectiveScale;
-        const tagWidth = Math.max((label.length + String(tooth).length + 1) * (fontSize * 0.58), 44 / effectiveScale);
-
+  
+      // 3. Tooth Contours
+      const toothList = (Array.isArray(result?.teeth) ? result.teeth : (Array.isArray(result?.teeth_objects) ? result.teeth_objects : []));
+      toothList.forEach((tooth: any, idx: number) => {
+        const label = String(tooth?.tooth_label || tooth?.label || tooth?.tooth || '');
+        if (!label || (selectedToothKey && label !== selectedToothKey)) return;
+        
+        const isUpper = label.startsWith('1') || label.startsWith('2');
+        if (isUpper && !shouldShowUpperTooth) return;
+        if (!isUpper && !shouldShowLowerTooth) return;
+  
+        const contour = tooth?.contour;
+        if (!Array.isArray(contour) || contour.length < 3) return;
+        
+        const style = getToothOverlayStyle(label);
+        const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
+        
         items.push(
-          <g key={`pathology-${label}-${tooth}-${idx}`}>
-            <rect
-              x={x1}
-              y={y1}
-              width={width}
-              height={height}
-              rx={4 / effectiveScale}
-              ry={4 / effectiveScale}
-              fill="none"
-              stroke={color}
-              strokeWidth={strokeWidth}
-              strokeDasharray={`${5 / effectiveScale} ${3 / effectiveScale}`}
+          <g key={`tooth-overlay-${label}-${idx}`}>
+            <polygon
+              points={points}
+              fill={style.fill}
+              stroke={style.stroke}
+              strokeWidth={style.strokeWidth / effectiveScale}
+              strokeLinejoin="round"
               vectorEffect="non-scaling-stroke"
             />
-            <rect
-              x={x1}
-              y={y1 - tagHeight - 3 / effectiveScale}
-              width={tagWidth}
-              height={tagHeight}
-              rx={3 / effectiveScale}
-              ry={3 / effectiveScale}
-              fill={color}
-              fillOpacity={emphasize ? 0.94 : 0.78}
-            />
-            <text
-              x={x1 + 4 / effectiveScale}
-              y={y1 - 5 / effectiveScale}
-              fill="#ffffff"
-              fontSize={fontSize}
-              fontWeight="700"
-              style={{ textShadow: '0 0 4px rgba(0,0,0,0.95)' }}
-            >
-              {label} {tooth}
-            </text>
+            {/* Tooth Label Tag */}
+            {!selectedToothKey && (
+                <g transform={`translate(${contour[0][0]}, ${contour[0][1] - 15 / effectiveScale})`}>
+                    <rect x={-10 / effectiveScale} y={-10 / effectiveScale} width={20 / effectiveScale} height={14 / effectiveScale} rx={4 / effectiveScale} fill="rgba(0,0,0,0.6)" />
+                    <text textAnchor="middle" fill="#ffffff" fontSize={10 / effectiveScale} fontWeight="bold">{label}</text>
+                </g>
+            )}
           </g>
         );
       });
+  
+      // 4. Labeled Pathology Boxes (Caries / Periapical)
+      const addPathology = (dataMap: any, color: string, labelPrefix: string) => {
+        if (!dataMap) return;
+        Object.entries(dataMap).forEach(([tooth, data]: any, idx) => {
+          if (selectedToothKey && String(tooth) !== selectedToothKey) return;
+          const box = data?.box;
+          if (!Array.isArray(box) || box.length < 4) return;
+          const [x1, y1, x2, y2] = box;
+          const w = x2 - x1;
+          const h = y2 - y1;
+          
+          const tagHeight = 14 / effectiveScale;
+          const tagPadding = 6 / effectiveScale;
+          const labelText = `${labelPrefix} ${tooth}`;
+          const fontSize = 9 / effectiveScale;
+          // Rough estimate of width based on text length
+          const tagWidth = (labelText.length * (fontSize * 0.6)) + (tagPadding * 2);
+
+          items.push(
+            <g key={`patho-${labelPrefix}-${tooth}-${idx}`}>
+              <rect
+                x={x1} y={y1} width={w} height={h}
+                fill="none" stroke={color}
+                strokeWidth={0.8 / effectiveScale}
+                strokeDasharray={`${3 / effectiveScale} ${2 / effectiveScale}`}
+                vectorEffect="non-scaling-stroke"
+              />
+              <rect
+                x={x1} y={y1 - tagHeight}
+                width={tagWidth} height={tagHeight}
+                rx={3 / effectiveScale} ry={3 / effectiveScale}
+                fill={color}
+                fillOpacity={0.85}
+              />
+              <text 
+                x={x1 + tagPadding} y={y1 - (tagHeight / 2) + (fontSize / 3)} 
+                fill="#fff" fontSize={fontSize} fontWeight="bold"
+              >
+                {labelText}
+              </text>
+            </g>
+          );
+        });
+      };
+  
+      addPathology(result.caries_by_tooth_best, "#ff4444", "Caries");
+      addPathology(result.periapical_by_tooth_best, "#ff9800", "Periapical");
+  
+      return <g id="ai-overlay-layer">{items}</g>;
     };
-
-    addPathologyBoxes(Object.entries(result?.caries_by_tooth_best || {}), 'rgba(239, 68, 68, 0.95)', 'Caries');
-    addPathologyBoxes(Object.entries(result?.periapical_by_tooth_best || {}), 'rgba(249, 115, 22, 0.95)', 'Periapical');
-
-    return <g id="ai-overlay-layer">{items}</g>;
-  };
-
+  
   const renderRiskDetections = (options?: { emphasize?: boolean }) => {
-    if (viewMode !== 'heatmap' || !result || hasHeatmapAsset) return null;
+    if (viewMode !== 'heatmap' || !result) return null;
 
     const emphasize = Boolean(options?.emphasize);
     const opacityBoost = emphasize ? 1.18 : 1;
@@ -1746,7 +1736,11 @@ export function ChartPage(props?: ChartPageProps) {
       ([tooth]) => !selectedToothKey || String(tooth) === selectedToothKey
     );
     const teeth = (Array.isArray(result.teeth) ? result.teeth : []).filter(
-      (tooth: any) => !selectedToothKey || String(tooth?.tooth_label || '') === selectedToothKey
+      (tooth: any) => {
+        const label = String(tooth?.tooth_label || '');
+        if (!label) return false; // Important: Skip non-tooth elements like sinus
+        return !selectedToothKey || label === selectedToothKey;
+      }
     );
 
     cariesEntries.forEach(([tooth, data]: any, idx) => {
@@ -1758,10 +1752,10 @@ export function ChartPage(props?: ChartPageProps) {
       const cy = (y1 + y2) / 2;
       const rx = Math.max((x2 - x1) * 0.85, 18);
       const ry = Math.max((y2 - y1) * 0.85, 18);
-      const opacity = Math.min(0.7, (0.22 + conf * 0.28) * opacityBoost);
+      const opacity = Math.min(0.95, (0.45 + conf * 0.48) * opacityBoost);
       items.push(
-        <g key={`risk-caries-${tooth}-${idx}`} filter="url(#riskBlurStrong)">
-          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill={`rgba(251,146,60,${opacity})`} />
+        <g key={`risk-caries-${tooth}-${idx}`} filter="url(#riskBlurStrong)" style={{ mixBlendMode: 'screen' }}>
+          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#cariesGlow)" fillOpacity={opacity} />
         </g>
       );
     });
@@ -1775,43 +1769,36 @@ export function ChartPage(props?: ChartPageProps) {
       const cy = (y1 + y2) / 2;
       const rx = Math.max((x2 - x1) * 0.95, 22);
       const ry = Math.max((y2 - y1) * 0.95, 22);
-      const opacity = Math.min(0.75, (0.26 + conf * 0.3) * opacityBoost);
+      const opacity = Math.min(0.98, (0.5 + conf * 0.45) * opacityBoost);
       items.push(
-        <g key={`risk-peri-${tooth}-${idx}`} filter="url(#riskBlurStrong)">
-          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill={`rgba(239,68,68,${opacity})`} />
+        <g key={`risk-peri-${tooth}-${idx}`} filter="url(#riskBlurStrong)" style={{ mixBlendMode: 'screen' }}>
+          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#periGlow)" fillOpacity={opacity} />
         </g>
       );
     });
 
+    // Bone-loss heatmap restored but filtered tightly to tooth labels
     teeth.forEach((tooth: any, idx: number) => {
       const boneLossPct = Number(
         result?.bonelevel?.[String(tooth?.tooth_label || '')]?.percent ??
         tooth?.bone_loss_pct ??
         0
       );
-      if (boneLossPct < 10) return;
-      const severity = Math.min(1, Math.max(0, (boneLossPct - 10) / 35));
-      const opacity = Math.min(0.52, (0.12 + severity * 0.24) * opacityBoost);
+      if (boneLossPct < 15) return; // Slightly higher threshold to reduce noise
+      const severity = Math.min(1, Math.max(0, (boneLossPct - 15) / 30));
+      const opacity = Math.min(0.7, (0.28 + severity * 0.35) * opacityBoost);
       const green = Math.round(224 - severity * 140);
       const fill = `rgba(255,${green},71,${opacity})`;
       const contour = tooth?.contour;
+      
       if (Array.isArray(contour) && contour.length >= 3) {
         const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
         items.push(
-          <g key={`risk-bone-contour-${tooth?.tooth_label || idx}`} filter="url(#riskBlurSoft)">
+          <g key={`risk-bone-contour-${tooth?.tooth_label || idx}`} filter="url(#riskBlurSoft)" style={{ mixBlendMode: 'screen' }}>
             <polygon points={points} fill={fill} />
           </g>
         );
-        return;
       }
-      const box = tooth?.box;
-      if (!box || box.length < 4) return;
-      const [x1, y1, x2, y2] = box;
-      items.push(
-        <g key={`risk-bone-box-${tooth?.tooth_label || idx}`} filter="url(#riskBlurSoft)">
-          <rect x={x1} y={y1} width={x2 - x1} height={y2 - y1} rx={18} ry={18} fill={fill} />
-        </g>
-      );
     });
 
     return <g id="risk-overlay-layer">{items}</g>;
@@ -3139,7 +3126,7 @@ export function ChartPage(props?: ChartPageProps) {
                   <div className="space-y-2 rounded-[24px] border border-white/8 bg-black/35 p-2">
                     {[
                       { id: 'studies' as const, label: 'Studies', icon: ClipboardList },
-                      { id: 'captures' as const, label: 'Captures', icon: Camera },
+                      { id: 'report' as const, label: 'Report', icon: FileText },
                     ].map((item) => (
                       <button
                         key={item.id}
@@ -3156,98 +3143,59 @@ export function ChartPage(props?: ChartPageProps) {
                     ))}
                   </div>
                   <div className="min-h-0 flex-1 overflow-hidden rounded-[28px] border border-dashed border-white/8 bg-[linear-gradient(180deg,rgba(15,23,42,0.55),rgba(8,12,28,0.82))]">
-                    {workspaceSection === 'captures' ? (
-                      <div className="flex h-full flex-col p-2">
-                        {captureGallery.length === 0 ? (
-                          <div className="flex h-full items-center justify-center px-2 text-center text-[11px] leading-5 text-slate-500">
-                  
-                          </div>
-                        ) : (
-                          <div
-                            className="overflow-y-auto pr-1"
-                            style={{
-                              display: 'grid',
-                              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-                              gap: 6,
-                            }}
-                          >
-                            {captureGallery.map((capture) => (
-                              <button
-                                key={capture.id}
-                                type="button"
-                                draggable
-                                onClick={() => {}}
-                                onDragStart={(event) => {
-                                  setDraggingCaptureId(capture.id);
-                                  event.dataTransfer.effectAllowed = 'copyMove';
-                                  event.dataTransfer.setData('application/x-capture-id', capture.id);
-                                }}
-                                onDragEnd={() => setDraggingCaptureId(null)}
-                                onDragOver={(event) => {
-                                  event.preventDefault();
-                                  if (draggingCaptureId && draggingCaptureId !== capture.id) {
-                                    event.dataTransfer.dropEffect = 'move';
-                                  }
-                                }}
-                                onDrop={(event) => {
-                                  event.preventDefault();
-                                  if (draggingCaptureId) {
-                                    moveCapturePreview(draggingCaptureId, capture.id);
-                                  }
-                                  setDraggingCaptureId(null);
-                                }}
-                                className={`flex min-w-0 flex-col items-center rounded-[12px] border p-1 text-left transition ${
-                                  draggingCaptureId === capture.id
-                                    ? 'border-cyan-300/50 bg-cyan-400/12 opacity-70'
-                                    : 'border-white/8 bg-black/20 hover:border-cyan-300/30 hover:bg-white/8'
-                                }`}
-                                title={capture.label}
-                              >
-                                <img
-                                  src={capture.dataUrl}
-                                  alt={capture.label}
-                                  className="h-[21px] w-[21px] rounded-[10px] border border-white/8 bg-black object-cover"
-                                />
-                                <div className="mt-1 text-center">
-                                  <p className="text-[9px] text-slate-400">{capture.createdAt}</p>
-                                </div>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <StudiesWorkspacePanel
-                        studies={combinedStudies as any}
-                        selectedSeriesId={selectedFolderSeriesId}
-                        onSelectSeries={async (seriesId) => {
-                          let nextSeries = findFolderSeriesById(seriesId);
-                          if (!nextSeries) {
-                            const targetStudy = serverStudies.find(s => s.series.some((ser: any) => ser.id === seriesId));
-                            if (targetStudy) {
-                              setIsProcessing(true);
-                              try {
-                                const materialized = await materializeServerStudy(targetStudy);
-                                setActiveFolderStudies(prev => [...prev, materialized]);
-                                nextSeries = materialized.series.find((s: any) => s.id === seriesId);
-                              } catch (e) {
-                                console.error('Failed to materialize study inside ChartPage', e);
-                              } finally {
-                                setIsProcessing(false);
+                    <div className="flex h-full flex-row">
+                      <div className="flex-1 min-w-0">
+                        <StudiesWorkspacePanel
+                          studies={combinedStudies as any}
+                          selectedSeriesId={selectedFolderSeriesId}
+                          isVisible={workspaceSection === 'studies'}
+                          onSelectSeries={async (seriesId) => {
+                            let nextSeries = findFolderSeriesById(seriesId);
+                            if (!nextSeries) {
+                              const targetStudy = serverStudies.find(s => s.series.some((ser: any) => ser.id === seriesId));
+                              if (targetStudy) {
+                                setIsProcessing(true);
+                                try {
+                                  const materialized = await materializeServerStudy(targetStudy);
+                                  setActiveFolderStudies(prev => {
+                                    if (prev.some(s => s.id === materialized.id)) return prev;
+                                    return [...prev, materialized];
+                                  });
+                                  nextSeries = materialized.series.find((s: any) => s.id === seriesId) || null;
+                                } catch (e) {
+                                  console.error('Failed to materialize study inside ChartPage', e);
+                                } finally {
+                                  setIsProcessing(false);
+                                }
                               }
                             }
-                          }
-                          if (nextSeries) {
-                            setSelectedFolderSeriesId(seriesId);
-                            setViewMode('original');
-                            setViewerMode(nextSeries?.volumeEligible ? 'grid' : 'single');
-                          }
-                        }}
-                      />
-                    )}
+                            if (nextSeries) {
+                              setSelectedFolderSeriesId(seriesId);
+                              setWorkspaceSection('studies');
+                              setViewMode('original');
+                              setViewerMode(nextSeries?.volumeEligible ? 'grid' : 'single');
+                            }
+                          }}
+                        />
+                      </div>
+                      {captureGallery.length > 0 && (
+                        <div className="w-10 shrink-0 border-l border-white/5 bg-black/10 flex flex-col items-center py-2 gap-2 overflow-y-auto">
+                          {captureGallery.map(capture => (
+                            <div 
+                              key={capture.id}
+                              className="w-7 h-7 rounded-md border border-white/10 overflow-hidden bg-black shrink-0 shadow-sm"
+                              title={capture.createdAt}
+                            >
+                              <img src={capture.dataUrl} className="w-full h-full object-cover" />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  {workspaceSection === 'captures' && (
-                    <div className="rounded-[20px] border border-white/8 bg-black/15 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                  {workspaceSection === 'report' && (
+                    <div className="rounded-[20px] border border-white/8 bg-white/5 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200">
+                      Drafting Report
                     </div>
                   )}
                 </div>
@@ -3255,7 +3203,7 @@ export function ChartPage(props?: ChartPageProps) {
                 <div className="mt-4 flex flex-1 flex-col items-center gap-2">
                   {[
                     { id: 'studies' as const, icon: ClipboardList, label: 'Studies' },
-                    { id: 'captures' as const, icon: Camera, label: 'Captures' },
+                    { id: 'report' as const, icon: FileText, label: 'Report' },
                   ].map((item) => (
                     <button
                       key={item.id}
@@ -3277,8 +3225,33 @@ export function ChartPage(props?: ChartPageProps) {
           {/* Center: report-style stacked layout on dark background */}
           <div className="min-w-0 flex-1 overflow-visible text-gray-100" style={{ backgroundColor: '#06071A' }}>
             <div className="max-w-7xl mx-auto py-6 px-4 lg:px-8 space-y-6">
-              {/* Hero card mimicking report_v2 */}
-              <div className="bg-[#0f0f0f] border border-white/5 rounded-3xl shadow-2xl overflow-hidden">
+              {workspaceSection === 'report' ? (
+                <div className="bg-[#0f0f0f] border border-white/5 rounded-3xl shadow-2xl overflow-hidden" style={{ minHeight: '80vh' }}>
+                  {reportSessionId ? (
+                    <iframe 
+                      src={`/api/web_report/session/${reportSessionId}/report`}
+                      className="w-full h-full border-0"
+                      style={{ height: '80vh' }}
+                      title="Report Preview"
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center justify-center h-full gap-5 p-20 text-center" style={{ minHeight: '80vh' }}>
+                      <div className="h-20 w-20 rounded-full bg-cyan-400/10 flex items-center justify-center border border-cyan-400/20 shadow-xl">
+                        <FileText className="h-10 w-10 text-cyan-400" />
+                      </div>
+                      <div className="space-y-2">
+                        <h3 className="text-2xl font-bold text-white tracking-tight">Report Draft Not Found</h3>
+                        <p className="max-w-md mx-auto text-base text-slate-400 leading-relaxed">
+                          Please click the <span className="text-cyan-400 font-semibold px-2 py-0.5 rounded-md bg-cyan-400/10 border border-cyan-400/20 shadow-sm mx-1">Start AI Report</span> button in the bottom right corner to generate your first findings.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {/* Hero card mimicking report_v2 */}
+                  <div className="bg-[#0f0f0f] border border-white/5 rounded-3xl shadow-2xl overflow-hidden">
                 <div className="flex flex-col lg:flex-row lg:items-start gap-6">
                   {/* Viewer column */}
                     <div className="w-full bg-black relative select-none">
@@ -3429,6 +3402,7 @@ export function ChartPage(props?: ChartPageProps) {
                         <div className="w-full h-full relative flex flex-col">
                           {!isVolumeCase && cornerstoneSources[0]?.file ? (
                             <MinimalCornerstoneDicomViewer
+                              key={cornerstoneSources[0]?.id || 'minimal-cs'}
                               file={cornerstoneSources[0].file}
                               title={viewMode === 'original' ? 'Original DICOM' : 'Overlay DICOM'}
                               maxHeight={containerHeight}
@@ -3448,6 +3422,15 @@ export function ChartPage(props?: ChartPageProps) {
                               contrast={contrast}
                               rotation={rotation}
                               flipped={flipped}
+                            />
+                          )}
+                          {!isVolumeCase && dicomHudMetadata && (
+                            <DicomMetadataOverlay
+                              metadata={displayDicomHudMetadata}
+                              top={16}
+                              bottom={16}
+                              left={16}
+                              right={16}
                             />
                           )}
                           {result?.is_volume && (
@@ -3515,12 +3498,26 @@ export function ChartPage(props?: ChartPageProps) {
                                 <marker id="display-arrowhead-white" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
                                   <polygon points="0 0, 6 2, 0 4" fill="#ffffff" />
                                 </marker>
-                                <filter id="riskBlurStrong" x="-35%" y="-35%" width="170%" height="170%">
-                                  <feGaussianBlur stdDeviation={22 / effectiveScale} />
+                                <filter id="riskBlurStrong" x="-50%" y="-50%" width="200%" height="200%">
+                                  <feGaussianBlur stdDeviation={32 / effectiveScale} />
                                 </filter>
-                                <filter id="riskBlurSoft" x="-25%" y="-25%" width="150%" height="150%">
-                                  <feGaussianBlur stdDeviation={12 / effectiveScale} />
+                                <filter id="riskBlurSoft" x="-40%" y="-40%" width="180%" height="180%">
+                                  <feGaussianBlur stdDeviation={18 / effectiveScale} />
                                 </filter>
+                                <radialGradient id="cariesGlow" cx="50%" cy="50%" r="50%">
+                                  <stop offset="0%" stopColor="rgba(255, 255, 255, 0.9)" />
+                                  <stop offset="30%" stopColor="rgba(255, 180, 0, 0.85)" />
+                                  <stop offset="100%" stopColor="rgba(255, 100, 0, 0)" />
+                                </radialGradient>
+                                <radialGradient id="periGlow" cx="50%" cy="50%" r="50%">
+                                  <stop offset="0%" stopColor="rgba(255, 255, 255, 0.95)" />
+                                  <stop offset="30%" stopColor="rgba(255, 60, 60, 0.88)" />
+                                  <stop offset="100%" stopColor="rgba(200, 0, 0, 0)" />
+                                </radialGradient>
+                                <radialGradient id="boneLossGlow" cx="50%" cy="50%" r="50%">
+                                  <stop offset="0%" stopColor="rgba(255, 255, 255, 0.4)" />
+                                  <stop offset="100%" stopColor="rgba(255, 180, 71, 0)" />
+                                </radialGradient>
                                 <radialGradient id="magnifierGloss" cx="35%" cy="30%" r="70%">
                                   <stop offset="0%" stopColor="rgba(255,255,255,0.9)" />
                                   <stop offset="35%" stopColor="rgba(255,255,255,0.18)" />
@@ -3628,6 +3625,8 @@ export function ChartPage(props?: ChartPageProps) {
                   </div>
                 </div>
               </div>
+              </>
+              )}
             </div>
           </div>
 
@@ -3739,6 +3738,7 @@ export function ChartPage(props?: ChartPageProps) {
           onClose={() => setReportDrawerOpen(false)}
           open={reportDrawerOpen}
           layout="dock"
+          isInactive={workspaceSection === 'report'}
         />,
         document.body
       )}
@@ -3752,14 +3752,15 @@ export function ChartPage(props?: ChartPageProps) {
       )}
       <button
         type="button"
-        className="cursor-pointer bg-cyan-400 text-slate-950 transition hover:bg-cyan-300"
+        disabled={workspaceSection === 'report'}
+        className={`cursor-pointer bg-cyan-400 text-slate-950 transition hover:bg-cyan-300 ${workspaceSection === 'report' ? 'opacity-40 pointer-events-none' : ''}`}
         style={{
           position: 'fixed',
           right: 24,
           bottom: 24,
           zIndex: 2147483002,
-          pointerEvents: 'auto',
-          opacity: hasViewerShell ? 1 : 0.7,
+          pointerEvents: workspaceSection === 'report' ? 'none' : 'auto',
+          opacity: workspaceSection === 'report' ? 0.4 : (hasViewerShell ? 1 : 0.7),
           width: 80,
           height: 80,
           display: 'flex',

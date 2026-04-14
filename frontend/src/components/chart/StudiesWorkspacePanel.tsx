@@ -2,18 +2,23 @@ import { useEffect, useMemo, useState } from 'react';
 import * as cornerstone from '@cornerstonejs/core';
 import { ChevronDown, Search } from 'lucide-react';
 import type { FolderStudy } from '../../features/upload/dicomFolderStudies';
-import { initCornerstone, registerNativeDicomFileWithMetadata } from '../../viewer/cornerstone/init';
+import { initCornerstone, registerNativeDicomFileWithMetadata, getRegisteredDicomMetadata } from '../../viewer/cornerstone/init';
+
 
 type StudiesWorkspacePanelProps = {
   studies: FolderStudy[];
   selectedSeriesId: string | null;
   onSelectSeries: (seriesId: string) => void;
+  isVisible?: boolean;
 };
 
-export function StudiesWorkspacePanel({ studies, selectedSeriesId, onSelectSeries }: StudiesWorkspacePanelProps) {
+
+export function StudiesWorkspacePanel({ studies, selectedSeriesId, onSelectSeries, isVisible = true }: StudiesWorkspacePanelProps) {
   const [expandedStudyIds, setExpandedStudyIds] = useState<string[]>(() => (studies[0] ? [studies[0].id] : []));
   const [searchTerm, setSearchTerm] = useState('');
   const [studyThumbs, setStudyThumbs] = useState<Record<string, string>>({});
+  const [studyMetadata, setStudyMetadata] = useState<Record<string, any>>({});
+
 
   const normalizedStudies = useMemo(
     () =>
@@ -76,6 +81,7 @@ export function StudiesWorkspacePanel({ studies, selectedSeriesId, onSelectSerie
     const generateThumbs = async () => {
       await initCornerstone();
       const nextThumbs: Record<string, string> = {};
+      const nextMetadata: Record<string, any> = {};
 
       for (const study of normalizedStudies) {
         const firstFile = study.series[0]?.files?.[0];
@@ -83,6 +89,11 @@ export function StudiesWorkspacePanel({ studies, selectedSeriesId, onSelectSerie
 
         try {
           const imageId = await registerNativeDicomFileWithMetadata(firstFile);
+          const meta = getRegisteredDicomMetadata(imageId);
+          if (meta) {
+            nextMetadata[study.id] = meta;
+          }
+
           const image = await cornerstone.imageLoader.loadAndCacheImage(imageId);
           const canvas = document.createElement('canvas');
           canvas.width = 64;
@@ -126,6 +137,7 @@ export function StudiesWorkspacePanel({ studies, selectedSeriesId, onSelectSerie
 
       if (!cancelled) {
         setStudyThumbs(nextThumbs);
+        setStudyMetadata(nextMetadata);
       }
     };
 
@@ -143,6 +155,8 @@ export function StudiesWorkspacePanel({ studies, selectedSeriesId, onSelectSerie
       </div>
     );
   }
+
+  if (!isVisible) return null;
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -171,50 +185,68 @@ export function StudiesWorkspacePanel({ studies, selectedSeriesId, onSelectSerie
 
             return (
               <section key={study.id} className="flex flex-col gap-1">
-                <button
-                  type="button"
-                  onClick={() => toggleStudy(study.id)}
+                <div 
                   className={`overflow-hidden rounded-[8px] border transition ${
                     expanded ? 'border-cyan-500/50 bg-[#0a1d47]' : 'border-white/8 bg-black/20 hover:bg-white/5'
                   } p-1 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]`}
                 >
-                  <div className="flex gap-2">
-                    <div className="relative h-[34px] w-[50px] shrink-0 rounded-[4px] border border-white/10 bg-black overflow-hidden">
-                      {studyThumbs[study.id] ? (
-                        <img
-                          src={studyThumbs[study.id]}
-                          alt={study.description || study.label || 'Study thumbnail'}
-                          className="h-full w-full object-cover"
-                        />
-                      ) : (
-                        <div className="h-full w-full bg-[radial-gradient(circle_at_center,rgba(160,160,160,0.5)_0_4px,transparent_5px)]" />
-                      )}
-                      <div className="absolute bottom-0.5 left-0.5 rounded-[2px] bg-black/60 px-0.5 py-0 text-[5px] font-bold text-white">
-                        {primaryModality}
+                  <div className="flex-1 min-w-0 px-1 py-0.5 cursor-pointer" onClick={(e) => { e.stopPropagation(); toggleStudy(study.id); }}>
+                    <div className="flex items-center justify-between gap-1">
+                      <div className={`truncate text-[10px] font-bold transition-colors ${expanded ? 'text-cyan-400' : 'text-white'}`}>
+                        {studyMetadata[study.id]?.patientName || study.description || study.label || 'Unnamed Study'}
                       </div>
+                      <ChevronDown className={`h-3 w-3 shrink-0 text-white/50 transition-transform duration-300 ${expanded ? 'rotate-180 text-cyan-400' : ''}`} />
                     </div>
-                    
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-start justify-between gap-1">
-                        <div className="truncate text-[8px] font-semibold text-white">
-                          {study.description || study.label || 'Study'}
+                  </div>
+
+                  {expanded && (
+                    <div 
+                      className="mt-2 flex gap-3 p-1 rounded-lg bg-white/5 hover:bg-white/10 transition-colors cursor-pointer group"
+                      onClick={() => {
+                        if (study.series[0]) onSelectSeries(study.series[0].id);
+                      }}
+                    >
+                      <div className="relative h-[48px] w-[70px] shrink-0 rounded-[6px] border border-white/20 bg-black overflow-hidden ring-1 ring-white/5 group-hover:border-cyan-500/50 transition-colors">
+                        {studyThumbs[study.id] ? (
+                          <img
+                            src={studyThumbs[study.id]}
+                            alt={study.description || study.label}
+                            className="h-full w-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
+                          />
+                        ) : (
+                          <div className="h-full w-full bg-[radial-gradient(circle_at_center,rgba(160,160,160,0.3)_0_4px,transparent_5px)]" />
+                        )}
+                        <div className="absolute bottom-1 left-1 rounded-[3px] bg-black/70 px-1 py-0.5 text-[6px] font-bold text-white backdrop-blur-sm">
+                          {primaryModality}
                         </div>
-                        <ChevronDown className={`h-2.5 w-2.5 shrink-0 text-white/50 transition ${expanded ? 'rotate-180' : ''}`} />
                       </div>
-                      <div className="mt-0.5 flex items-center gap-2 text-[7px] text-cyan-100/60 font-medium">
-                        <span>Series {study.totalSeries}</span>
-                        <span className="h-2 w-px bg-white/10" />
-                        <span>Files {study.totalFiles}</span>
+                      
+                      <div className="flex-1 min-w-0 flex flex-col justify-center gap-0.5 items-end text-right">
+                        <div className="flex items-center justify-end gap-1.5 text-[6px] text-white/50 font-medium">
+                          <span>Series {study.totalSeries}</span>
+                          <span className="h-1.5 w-px bg-white/10" />
+                          <span>Files {study.totalFiles}</span>
+                        </div>
                         {study.patientId && (
-                          <>
-                            <span className="h-2 w-px bg-white/10" />
-                            <span className="truncate">{study.patientId}</span>
-                          </>
+                          <div 
+                            className="text-[7px] text-cyan-400 font-bold truncate hover:underline cursor-pointer transition-all"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (study.series[0]) onSelectSeries(study.series[0].id);
+                            }}
+                          >
+                            ID: {studyMetadata[study.id]?.patientId || study.patientId}
+                          </div>
+                        )}
+                        {(studyMetadata[study.id]?.studyDate || study.studyDate) && (
+                          <div className="text-[6px] text-slate-500 font-medium truncate">
+                            {studyMetadata[study.id]?.studyDate || study.studyDate}
+                          </div>
                         )}
                       </div>
                     </div>
-                  </div>
-                </button>
+                  )}
+                </div>
 
                 {expanded && (
                   <div className="ml-2 mt-0.5 space-y-1 rounded-[8px] border-l-2 border-cyan-500/30 bg-black/10 pl-2 py-1">

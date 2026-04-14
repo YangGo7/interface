@@ -84,7 +84,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="/" element={<RouteErrorBoundary routeLabel="/"><App /></RouteErrorBoundary>} />
           <Route path="/folder-leader" element={<RouteErrorBoundary routeLabel="/folder-leader"><FolderLeaderPage /></RouteErrorBoundary>} />
           <Route path="/folder_leader_ver_2" element={<RouteErrorBoundary routeLabel="/folder_leader_ver_2"><FolderLeaderVer2Page /></RouteErrorBoundary>} />
-          <Route path="/folder-leader-ver-2" element={<RouteErrorBoundary routeLabel="/folder-leader-ver-2"><FolderLeaderVer2Page /></RouteErrorBoundary>} />
           <Route path="/upload" element={<RouteErrorBoundary routeLabel="/upload"><UploadPage /></RouteErrorBoundary>} />
           <Route path="/chart" element={<RouteErrorBoundary routeLabel="/chart"><ChartPage /></RouteErrorBoundary>} />
           <Route path="/chart/:sessionId" element={<RouteErrorBoundary routeLabel="/chart/:sessionId"><WebChartPage /></RouteErrorBoundary>} />

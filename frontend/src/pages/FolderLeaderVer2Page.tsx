@@ -115,7 +115,7 @@ export default function FolderLeaderVer2Page() {
     if (nextSelectedStudy && nextSelectedStudy.id !== selectedStudyId) {
       setSelectedStudyId(nextSelectedStudy.id);
     }
-    
+
     if (nextSelectedStudy) {
       const hasSelectedSeries = nextSelectedStudy.series.some((series) => series.id === selectedSeriesId);
       if (!hasSelectedSeries) {
@@ -181,7 +181,7 @@ export default function FolderLeaderVer2Page() {
 
   return (
     <div className="folder-leader-v2-page">
-      <TopHeader actions={<div className="text-sm font-medium text-slate-500">Folder Leader Ver.2</div>} />
+      <TopHeader actions={<div className="text-sm font-medium text-slate-500"></div>} />
       <main className="folder-leader-v2-shell">
         <section className="folder-leader-v2-panel">
           <div className="folder-leader-v2-panel-title">
@@ -195,7 +195,7 @@ export default function FolderLeaderVer2Page() {
             <div className="folder-leader-v2-db-copy">
               <div className="folder-leader-v2-db-name">Master Database</div>
               <div className="folder-leader-v2-db-rule" />
-              <div className="folder-leader-v2-db-meta">Type : OnDemand3DApp</div>
+              <div className="folder-leader-v2-db-meta">Type : OnDemand3DWeb</div>
               <div className="folder-leader-v2-db-meta">Root : {rootPath || 'Not configured'}</div>
               <div className="folder-leader-v2-db-meta">
                 Status : {rootExists ? 'Available' : 'Missing'}

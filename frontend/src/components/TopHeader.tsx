@@ -14,12 +14,12 @@ export function TopHeader({ actions }: TopHeaderProps) {
         <a href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
           <img
             src={logo}
-            alt="E2DW logo"
+            alt="Saturn logo"
             style={{ width: '60px', height: '60px' }}
             className="object-contain"
           />
           <div className="flex flex-col leading-tight">
-            <div className="text-lg font-semibold text-gray-900">E2DW</div>
+            <div className="text-lg font-semibold text-gray-900">Saturn</div>
             <div className="text-xs text-gray-500">AI panoramic insights</div>
           </div>
         </a>
