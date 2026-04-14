@@ -27,6 +27,7 @@ venv/
 .env
 .claude/
 temp/
+.nested-git-backups/
 
 **/__pycache__/
 

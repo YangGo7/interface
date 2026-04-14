@@ -1,0 +1,13 @@
+temp/
+reports/
+test_output/
+api/logs/  
+weights/
+.env
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+data/*.db
+runs/web_report/
+test_debug.png
