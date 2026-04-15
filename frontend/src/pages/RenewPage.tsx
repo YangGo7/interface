@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useLocation } from 'react-router-dom';
 import O3Logo from '../assets/O3_logo_only.png';
+import { WebReportDrawer } from '../components/WebReportDrawer';
+import { createWebReportFromChart } from '../lib/webReportApi';
+import { clearAllAnnotations, setActiveTool as setCornerstoneActiveTool } from '../viewer/cornerstone/tools';
 
 const DESIGN_WIDTH = 1920;
 const DESIGN_HEIGHT = 1080;
@@ -10,6 +15,7 @@ const scalePx = (value: number) => `${value}px`;
 const relativePercent = (value: number, total: number) => `${(value / total) * 100}%`;
 
 const assetPath = (relativePath: string) => encodeURI(`/imgs/${relativePath}`);
+const headerMarkerIcon = assetPath('7 7.png');
 
 const reportButtonIcons = {
   inactive: assetPath('메인-비활성화 아이콘/report버튼 (94 94).png'),
@@ -46,6 +52,11 @@ const displayRailIcons = {
   captures: assetPath('mian_deactive/left_bar_deactive (51 57)/자산 584.png'),
 };
 
+const activeRailIcons = {
+  studies: assetPath('main_active/left_bar_active (51 57)/자산 425@4x.png'),
+  captures: assetPath('main_active/left_bar_active (51 57)/자산 587.png'),
+};
+
 const displayToolbarIcons = [
   assetPath('mian_deactive/tools_deactive(36 36)/자산 20@4x.png'),
   assetPath('mian_deactive/tools_deactive(36 36)/자산 21@4x.png'),
@@ -63,6 +74,25 @@ const displayToolbarIcons = [
   assetPath('mian_deactive/tools_deactive(36 36)/자산 34@4x.png'),
   assetPath('mian_deactive/tools_deactive(36 36)/자산 33@4x.png'),
   assetPath('mian_deactive/tools_deactive(36 36)/자산 32@4x.png'),
+];
+
+const activeToolbarIcons = [
+  assetPath('main_active/tools_active (36 36)/자산 399@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 401@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 400@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 398@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 397@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 391@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 396@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 395@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 386@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 394@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 393@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 392@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 390@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 389@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 388@4x.png'),
+  assetPath('main_active/tools_active (36 36)/자산 387@4x.png'),
 ];
 
 const displayReportButtonIcons = {
@@ -103,6 +133,24 @@ const RAIL_ICON_WIDTH = 61;
 const RAIL_ICON_HEIGHT = 68;
 const TOOL_ICON_SIZE = 43;
 
+type ToolbarKey =
+  | 'pointer'
+  | 'pan'
+  | 'wlww'
+  | 'invert'
+  | 'magnifier'
+  | 'flip'
+  | 'measure-length'
+  | 'measure-draw'
+  | 'measure-eraser'
+  | 'measure-clear'
+  | 'measure-rotate'
+  | 'measure-reset'
+  | 'output-capture'
+  | 'output-save'
+  | 'task-original'
+  | 'task-heatmap';
+
 function getToothAsset(tooth: number) {
   const index = (tooth % 10) - 1;
   const upper = tooth >= 11 && tooth <= 28;
@@ -111,26 +159,49 @@ function getToothAsset(tooth: number) {
   return assetPath(`치아/건강치(ffffff)/${prefix}-${index + 1} (${size})_4.png`);
 }
 
-function ToolIcon({ icon, left, top }: { icon: string; left: number; top: number }) {
+function ToolIcon({
+  icon,
+  activeIcon,
+  left,
+  top,
+  active = false,
+  onClick,
+  label,
+}: {
+  icon: string;
+  activeIcon?: string;
+  left: number;
+  top: number;
+  active?: boolean;
+  onClick?: () => void;
+  label?: string;
+}) {
   return (
-    <div
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      aria-label={label}
       style={{
         width: wp(TOOL_ICON_SIZE),
         height: hp(TOOL_ICON_SIZE),
         left: wp(left),
         top: hp(top),
         position: 'absolute',
-        border: `${scalePx(1)} solid black`,
-        background: '#8D8D8D',
+        border: `${scalePx(1)} solid ${active ? '#00C0F3' : 'black'}`,
+        background: active ? '#A8A8A8' : '#8D8D8D',
+        boxShadow: active ? `0 0 ${scalePx(8)} rgba(0, 192, 243, 0.35)` : 'none',
+        cursor: 'pointer',
+        padding: 0,
       }}
     >
       <img
-        src={icon}
+        src={active && activeIcon ? activeIcon : icon}
         alt=""
         draggable={false}
         style={{ width: '100%', height: '100%', position: 'absolute', left: 0, top: 0 }}
       />
-    </div>
+    </button>
   );
 }
 
@@ -230,19 +301,33 @@ function useViewportSize() {
 }
 
 export function RenewPage() {
+  const location = useLocation();
+  const locationState = (location.state as any) || {};
+  const result = locationState?.result;
   const [isReportActive, setIsReportActive] = useState(false);
+  const [isChartVisible, setIsChartVisible] = useState(true);
+  const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'report'>('studies');
+  const [selectedToolbarButton, setSelectedToolbarButton] = useState<ToolbarKey>('pointer');
+  const [flashToolbarButton, setFlashToolbarButton] = useState<ToolbarKey | null>(null);
+  const [reportSessionId, setReportSessionId] = useState<string | null>(locationState?.reportSessionId || null);
+  const [reportDrawerOpen, setReportDrawerOpen] = useState(false);
+  const [reportStartState, setReportStartState] = useState<'idle' | 'creating'>('idle');
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [inverted, setInverted] = useState(false);
+  const [flipped, setFlipped] = useState(false);
+  const [viewMode, setViewMode] = useState<'original' | 'heatmap'>('original');
   const viewport = useViewportSize();
   const scale = Math.min(viewport.width / DESIGN_WIDTH, viewport.height / DESIGN_HEIGHT);
   const stageWidth = viewport.width;
   const stageHeight = DESIGN_HEIGHT * scale;
   const designCanvasWidth = stageWidth / scale;
   const viewerExtraWidth = Math.max(0, designCanvasWidth - DESIGN_WIDTH);
-  const viewerLeft = 234;
-  const topBarLeft = 241;
+  const viewerLeft = 237;
+  const topBarLeft = viewerLeft;
   const viewerWidth = 1676 + viewerExtraWidth;
-  const topBarWidth = 1666 + viewerExtraWidth;
+  const topBarWidth = viewerWidth;
   const rightEdge = viewerLeft + viewerWidth;
-  const chartSectionLeft = 236;
+  const chartSectionLeft = 239;
   const chartSectionWidth = rightEdge - chartSectionLeft;
   const chartLegendDividerX = chartSectionLeft + chartSectionWidth * 0.15;
   const chartLegendWidth = chartLegendDividerX - chartLegendLeft - 28;
@@ -252,24 +337,153 @@ export function RenewPage() {
   const chartOdontoCenterX = (odontoFrameLeft + odontoFrameRight) / 2;
   const toothSlotCentersLeft = outerToInnerOffsets.map((offset) => chartOdontoCenterX - offset);
   const toothSlotCentersRight = innerToOuterOffsets.map((offset) => chartOdontoCenterX + offset);
-  const maxUpperHeight = Math.max(...upperSizes.map((size) => Number(size.split(' ')[1])));
-  const maxLowerHeight = Math.max(...lowerSizes.map((size) => Number(size.split(' ')[1])));
-  const chartOdontoVerticalPadding = 10;
-  const chartOdontoFrameTop = upperBaseline - maxUpperHeight - chartOdontoVerticalPadding;
-  const chartOdontoFrameBottom = lowerTop + maxLowerHeight + chartOdontoVerticalPadding;
+  const chartOdontoFramePaddingY = 18;
+  const chartOdontoFrameTop = chartContentTop + chartOdontoFramePaddingY;
+  const chartOdontoFrameBottom = chartContentTop + chartContentHeight - chartOdontoFramePaddingY;
   const chartOdontoLineLeft = toothSlotCentersLeft[0] - 24;
   const chartOdontoLineRight = toothSlotCentersRight[toothSlotCentersRight.length - 1] + 24;
   const chartOdontoLineWidth = chartOdontoLineRight - chartOdontoLineLeft;
-  const chartOdontoLineY = Math.round((upperBaseline + lowerTop) / 2);
+  const chartOdontoLineY = Math.round(chartContentTop + chartContentHeight / 2);
   const chartOdontoVerticalTop = chartOdontoFrameTop;
   const chartOdontoVerticalHeight = chartOdontoFrameBottom - chartOdontoFrameTop;
   const viewLabelTop = 75;
   const measureLabelTop = 195;
   const outputLabelTop = 315;
   const sectionArrowOffsetY = 6;
+  const panoFrameHeight = isChartVisible ? 755 : 1019;
   const reportTop = chartContentTop + 130;
   const fdiLeft = rightEdge - 82;
   const lLabelLeft = rightEdge - 29;
+  const chartHeaderHideLeft = rightEdge - 28;
+  const panoChartToggleLeft = viewerLeft + 8;
+  const panoChartToggleTop = 1044;
+  const panoLabelTop = Math.round(49 + panoFrameHeight / 2 - 7);
+  const isChartBodyVisible = isChartVisible;
+
+  const handleChartToggle = () => {
+    setIsChartVisible((current) => !current);
+  };
+
+  const flashToolbarActive = (button: ToolbarKey) => {
+    setFlashToolbarButton(button);
+    window.setTimeout(() => {
+      setFlashToolbarButton((current) => (current === button ? null : current));
+    }, 180);
+  };
+
+  const handleToolSelection = (button: ToolbarKey) => {
+    switch (button) {
+      case 'pointer':
+        setCornerstoneActiveTool('Pan');
+        setSelectedToolbarButton('pointer');
+        return;
+      case 'pan':
+        setCornerstoneActiveTool('Pan');
+        setSelectedToolbarButton('pan');
+        return;
+      case 'wlww':
+        setCornerstoneActiveTool('WindowLevel');
+        setSelectedToolbarButton('wlww');
+        return;
+      case 'invert':
+        setInverted((current) => !current);
+        setSelectedToolbarButton((current) => (current === 'invert' ? 'pointer' : 'invert'));
+        return;
+      case 'magnifier':
+        setCornerstoneActiveTool('Pan');
+        setSelectedToolbarButton((current) => (current === 'magnifier' ? 'pointer' : 'magnifier'));
+        return;
+      case 'flip':
+        setFlipped((current) => !current);
+        setSelectedToolbarButton((current) => (current === 'flip' ? 'pointer' : 'flip'));
+        return;
+      case 'measure-length':
+        setCornerstoneActiveTool('Length');
+        setSelectedToolbarButton('measure-length');
+        return;
+      case 'measure-draw':
+        setCornerstoneActiveTool('ArrowAnnotate');
+        setSelectedToolbarButton('measure-draw');
+        return;
+      case 'measure-eraser':
+        setCornerstoneActiveTool('Eraser');
+        setSelectedToolbarButton('measure-eraser');
+        return;
+      case 'measure-clear':
+        clearAllAnnotations();
+        flashToolbarActive('measure-clear');
+        setSelectedToolbarButton('pointer');
+        return;
+      case 'measure-rotate':
+        setCornerstoneActiveTool('TrackballRotate');
+        setSelectedToolbarButton('measure-rotate');
+        return;
+      case 'measure-reset':
+        clearAllAnnotations();
+        setInverted(false);
+        setFlipped(false);
+        setViewMode('original');
+        flashToolbarActive('measure-reset');
+        setSelectedToolbarButton('pointer');
+        setReportError(null);
+        setCornerstoneActiveTool('Pan');
+        return;
+      case 'output-capture':
+      case 'output-save':
+        setSelectedToolbarButton(button);
+        return;
+      case 'task-original':
+        setViewMode('original');
+        setSelectedToolbarButton('task-original');
+        return;
+      case 'task-heatmap':
+        setViewMode('heatmap');
+        setSelectedToolbarButton('task-heatmap');
+        return;
+      default:
+        return;
+    }
+  };
+
+  const handleStartReport = async () => {
+    setWorkspaceSection('report');
+
+    if (reportStartState === 'creating') return;
+
+    if (reportSessionId) {
+      setReportDrawerOpen((current) => {
+        const next = !current;
+        setIsReportActive(next);
+        return next;
+      });
+      setReportError(null);
+      return;
+    }
+
+    if (!result) {
+      setReportError('Analysis result is not ready yet.');
+      return;
+    }
+
+    setReportStartState('creating');
+    setReportError(null);
+    try {
+      const response = await createWebReportFromChart({
+        result,
+        source_url: result?.image_url,
+        overlay_url: result?.overlay_url,
+        language: 'English',
+      });
+      setReportSessionId(response.session_id);
+      setReportDrawerOpen(true);
+      setIsReportActive(true);
+    } catch (error: any) {
+      setReportError(error?.message || 'Failed to start report workspace');
+      setIsReportActive(false);
+    } finally {
+      setReportStartState('idle');
+    }
+  };
 
   return (
     <div
@@ -337,11 +551,25 @@ export function RenewPage() {
             SATURN
           </div>
 
-          <div style={{ width: wp(topBarWidth), height: hp(18), left: wp(topBarLeft), top: hp(49), position: 'absolute', background: '#5C5C5C' }} />
+          <div style={{ width: wp(topBarWidth), height: hp(18), left: wp(topBarLeft), top: hp(49), position: 'absolute', background: '#5C5C5C', zIndex: 1 }} />
           <div style={{ width: wp(viewerWidth), height: hp(1018), left: wp(viewerLeft), top: hp(50), position: 'absolute', background: 'black' }} />
-          <div style={{ width: wp(viewerWidth), height: hp(18), left: wp(viewerLeft), top: hp(804), position: 'absolute', background: '#5C5C5C' }} />
-          <div style={{ width: wp(viewerWidth), height: hp(755), left: wp(viewerLeft), top: hp(49), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
-          <div style={{ width: wp(viewerWidth), height: hp(264), left: wp(viewerLeft), top: hp(804), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
+          {isChartVisible && (
+            <div style={{ width: wp(viewerWidth), height: hp(18), left: wp(viewerLeft), top: hp(804), position: 'absolute', background: '#5C5C5C', zIndex: 1 }} />
+          )}
+          <div style={{ width: wp(viewerWidth), height: hp(panoFrameHeight), left: wp(viewerLeft), top: hp(49), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
+          {isChartVisible && (
+            <div
+              style={{
+                width: wp(viewerWidth),
+                height: hp(264),
+                left: wp(viewerLeft),
+                top: hp(804),
+                position: 'absolute',
+                border: `${scalePx(1)} solid #4C4C4C`,
+                pointerEvents: 'none',
+              }}
+            />
+          )}
           <div style={{ width: scalePx(1), height: hp(1019), left: wp(viewerLeft), top: hp(49), position: 'absolute', background: '#4C4C4C' }} />
 
         <div style={{ width: wp(70), height: hp(1019), left: wp(12), top: hp(49), position: 'absolute', background: '#2D2D2D' }} />
@@ -349,14 +577,26 @@ export function RenewPage() {
         {/* 먼 세로선이지 */} 
         {/*<div style={{ width: scalePx(1), height: hp(1019), left: wp(48), top: hp(49), position: 'absolute', background: '#3F3F3F' }} />  
         <div style={{ width: scalePx(1), height: hp(1019), left: wp(68), top: hp(49), position: 'absolute', background: '#5C5C5C' }} /> */}
-        <div style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(52), position: 'absolute', background: '#2D2D2D' }} />
-        <div style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(122), position: 'absolute', background: '#2D2D2D' }} />
-        <img style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(52), position: 'absolute' }} src={displayRailIcons.studies} alt="" />
-        <img style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(122), position: 'absolute' }} src={displayRailIcons.captures} alt="" />
+        <button
+          type="button"
+          onClick={() => setWorkspaceSection('studies')}
+          aria-pressed={workspaceSection === 'studies'}
+          style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(52), position: 'absolute', background: '#2D2D2D', padding: 0, cursor: 'pointer' }}
+        >
+          <img style={{ width: '100%', height: '100%', display: 'block' }} src={workspaceSection === 'studies' ? activeRailIcons.studies : displayRailIcons.studies} alt="" />
+        </button>
+        <button
+          type="button"
+          onClick={() => { void handleStartReport(); }}
+          aria-pressed={workspaceSection === 'report' || reportDrawerOpen}
+          style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(122), position: 'absolute', background: '#2D2D2D', padding: 0, cursor: 'pointer' }}
+        >
+          <img style={{ width: '100%', height: '100%', display: 'block' }} src={workspaceSection === 'report' || reportDrawerOpen ? activeRailIcons.captures : displayRailIcons.captures} alt="" />
+        </button>
 
         <div style={{ width: wp(154), height: hp(1019), left: wp(82), top: hp(49), position: 'absolute', background: '#2D2D2D' }} />
         <div style={{ width: wp(154), height: hp(1019), left: wp(82), top: hp(49), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
-        <div style={{ width: wp(148), height: hp(334), left: wp(86), top: hp(51), position: 'absolute', background: '#333333' }} />
+        <div style={{ width: wp(148), height: hp(336), left: wp(86), top: hp(49), position: 'absolute', background: '#333333' }} />
         <div style={{ width: wp(148), height: hp(84), left: wp(86), top: hp(389), position: 'absolute', background: '#333333' }} />
         <div style={{ width: wp(140), height: hp(116), left: wp(88), top: hp(69), position: 'absolute', background: '#414141' }} />
         <div style={{ width: wp(140), height: hp(118), left: wp(88), top: hp(189), position: 'absolute', background: '#414141' }} />
@@ -409,66 +649,125 @@ export function RenewPage() {
         />
 
         {[
-          { x: 91.5, y: 96, icon: displayToolbarIcons[0] },
-          { x: 136.5, y: 96, icon: displayToolbarIcons[1] },
-          { x: 181.5, y: 96, icon: displayToolbarIcons[2] },
-          { x: 91.5, y: 141, icon: displayToolbarIcons[3] },
-          { x: 136.5, y: 141, icon: displayToolbarIcons[4] },
-          { x: 181.5, y: 141, icon: displayToolbarIcons[5] },
-          { x: 91.5, y: 216, icon: displayToolbarIcons[6] },
-          { x: 136.5, y: 216, icon: displayToolbarIcons[7] },
-          { x: 181.5, y: 216, icon: displayToolbarIcons[8] },
-          { x: 91.5, y: 261, icon: displayToolbarIcons[9] },
-          { x: 136.5, y: 261, icon: displayToolbarIcons[10] },
-          { x: 181.5, y: 261, icon: displayToolbarIcons[11] },
-          { x: 92, y: 336, icon: displayToolbarIcons[12] },
-          { x: 139, y: 336, icon: displayToolbarIcons[13] },
-          { x: 92, y: 416, icon: displayToolbarIcons[14] },
-          { x: 139, y: 416, icon: displayToolbarIcons[15] },
+          { key: 'pointer' as ToolbarKey, x: 91.5, y: 96, label: 'Mouse', active: selectedToolbarButton === 'pointer' },
+          { key: 'pan' as ToolbarKey, x: 136.5, y: 96, label: 'Zoom and drag', active: selectedToolbarButton === 'pan' },
+          { key: 'wlww' as ToolbarKey, x: 181.5, y: 96, label: 'Window level', active: selectedToolbarButton === 'wlww' },
+          { key: 'invert' as ToolbarKey, x: 91.5, y: 141, label: 'Invert', active: inverted },
+          { key: 'magnifier' as ToolbarKey, x: 136.5, y: 141, label: 'Magnification', active: selectedToolbarButton === 'magnifier' },
+          { key: 'flip' as ToolbarKey, x: 181.5, y: 141, label: 'Flip', active: flipped },
+          { key: 'measure-length' as ToolbarKey, x: 91.5, y: 216, label: 'Ruler', active: selectedToolbarButton === 'measure-length' },
+          { key: 'measure-draw' as ToolbarKey, x: 136.5, y: 216, label: 'Draw', active: selectedToolbarButton === 'measure-draw' },
+          { key: 'measure-eraser' as ToolbarKey, x: 181.5, y: 216, label: 'Eraser', active: selectedToolbarButton === 'measure-eraser' },
+          { key: 'measure-clear' as ToolbarKey, x: 91.5, y: 261, label: 'Delete all measure', active: flashToolbarButton === 'measure-clear' },
+          { key: 'measure-rotate' as ToolbarKey, x: 136.5, y: 261, label: 'Rotate', active: selectedToolbarButton === 'measure-rotate' },
+          { key: 'measure-reset' as ToolbarKey, x: 181.5, y: 261, label: 'Reset', active: flashToolbarButton === 'measure-reset' },
+          { key: 'output-capture' as ToolbarKey, x: 92, y: 336, label: 'Capture', active: selectedToolbarButton === 'output-capture' },
+          { key: 'output-save' as ToolbarKey, x: 139, y: 336, label: 'Capture save', active: selectedToolbarButton === 'output-save' },
+          { key: 'task-original' as ToolbarKey, x: 92, y: 416, label: 'Original image', active: viewMode === 'original' },
+          { key: 'task-heatmap' as ToolbarKey, x: 139, y: 416, label: 'Heatmap', active: viewMode === 'heatmap' },
         ].map((item, index) => (
-          <ToolIcon key={index} icon={item.icon} left={item.x} top={item.y} />
+          <ToolIcon
+            key={item.key}
+            icon={displayToolbarIcons[index]}
+            activeIcon={activeToolbarIcons[index]}
+            left={item.x}
+            top={item.y}
+            active={item.active}
+            onClick={() => handleToolSelection(item.key)}
+            label={item.label}
+          />
         ))}
 
-        <div style={{ left: wp(251), top: hp(49), position: 'absolute', color: 'white', fontSize: scalePx(13), fontWeight: 700 }}>Panorama</div>
-        <div style={{ width: scalePx(7), height: scalePx(7), left: wp(240), top: hp(55), position: 'absolute', background: '#D9D9D9' }} />
-        <div style={{ left: wp(251), top: hp(803), position: 'absolute', color: 'white', fontSize: scalePx(13), fontWeight: 700 }}>Dental Chart</div>
-        <div style={{ width: scalePx(7), height: scalePx(7), left: wp(240), top: hp(809), position: 'absolute', background: '#D9D9D9' }} />
-
-        <div style={{ left: wp(fdiLeft), top: hp(845), position: 'absolute', fontWeight: 700 }}>
-          <span style={{ color: 'white', fontSize: scalePx(14) }}>FDI</span>
-          <span style={{ color: 'white', fontSize: scalePx(13) }}> </span>
-          <span style={{ color: '#9C9C9C', fontSize: scalePx(13) }}>/ Univ</span>
-        </div>
-
-        <div style={{ left: wp(251), top: hp(415), position: 'absolute', color: '#D39C00', fontSize: scalePx(14), fontWeight: 700, zIndex: 14 }}>R</div>
-        <div style={{ left: wp(lLabelLeft), top: hp(415), position: 'absolute', color: '#D39C00', fontSize: scalePx(14), fontWeight: 700, zIndex: 14 }}>L</div>
-
-        <div
-          style={{
-            width: wp(chartOdontoLineWidth),
-            height: scalePx(1),
-            left: wp(chartOdontoLineLeft),
-            top: hp(chartOdontoLineY),
-            position: 'absolute',
-            background: '#B4B4B4',
-          }}
+        <div style={{ left: wp(251), top: hp(49), position: 'absolute', color: 'white', fontSize: scalePx(13), fontWeight: 700, zIndex: 2 }}>Panorama</div>
+        <img
+          src={headerMarkerIcon}
+          alt=""
+          draggable={false}
+          style={{ width: scalePx(7), height: scalePx(7), left: wp(240), top: hp(55), position: 'absolute', zIndex: 2 }}
         />
-        <div
-          style={{
-            width: scalePx(1),
-            height: hp(chartOdontoVerticalHeight),
-            left: wp(chartOdontoCenterX),
-            top: hp(chartOdontoVerticalTop),
-            position: 'absolute',
-            background: '#B4B4B4',
-          }}
-        />
-        <div style={{ width: scalePx(1), height: hp(264), left: wp(chartSectionLeft), top: hp(804), position: 'absolute', background: '#5C5C5C' }} />
-        <div style={{ width: scalePx(1), height: hp(chartContentHeight), left: wp(chartLegendDividerX), top: hp(chartContentTop), position: 'absolute', background: '#5C5C5C' }} />
-        <div style={{ width: scalePx(1), height: hp(250), left: wp(rightEdge - 1), top: hp(813), position: 'absolute', background: '#5C5C5C' }} />
-        <div style={{ width: wp(chartLegendDividerX - chartSectionLeft), height: hp(chartContentHeight), left: wp(chartSectionLeft), top: hp(chartContentTop), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
+        {isChartVisible && (
+          <>
+            <div style={{ left: wp(251), top: hp(803), position: 'absolute', color: 'white', fontSize: scalePx(13), fontWeight: 700, zIndex: 2 }}>Dental Chart</div>
+            <img
+              src={headerMarkerIcon}
+              alt=""
+              draggable={false}
+              style={{ width: scalePx(7), height: scalePx(7), left: wp(240), top: hp(809), position: 'absolute', zIndex: 2 }}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setIsChartVisible(false);
+              }}
+              aria-label="Hide dental chart"
+              style={{
+                width: wp(18),
+                height: hp(14),
+                left: wp(chartHeaderHideLeft),
+                top: hp(806),
+                position: 'absolute',
+                border: `${scalePx(1)} solid #2C2C2C`,
+                background: '#8D8D8D',
+                color: '#111111',
+                fontSize: scalePx(10),
+                fontWeight: 700,
+                lineHeight: hp(12),
+                textAlign: 'center',
+                cursor: 'pointer',
+                zIndex: 3,
+                padding: 0,
+              }}
+            >
+              x
+            </button>
+          </>
+        )}
 
-        {upperLeftOrders.map((order, index) => {
+        {isChartBodyVisible && (
+          <div style={{ left: wp(fdiLeft), top: hp(845), position: 'absolute', fontWeight: 700 }}>
+            <span style={{ color: 'white', fontSize: scalePx(14) }}>FDI</span>
+            <span style={{ color: 'white', fontSize: scalePx(13) }}> </span>
+            <span style={{ color: '#9C9C9C', fontSize: scalePx(13) }}>/ Univ</span>
+          </div>
+        )}
+
+        <div style={{ left: wp(251), top: hp(panoLabelTop), position: 'absolute', color: '#D39C00', fontSize: scalePx(14), fontWeight: 700, zIndex: 14 }}>R</div>
+        <div style={{ left: wp(lLabelLeft), top: hp(panoLabelTop), position: 'absolute', color: '#D39C00', fontSize: scalePx(14), fontWeight: 700, zIndex: 14 }}>L</div>
+
+        {isChartBodyVisible && (
+          <div
+            style={{
+              width: wp(chartOdontoLineWidth),
+              height: scalePx(1),
+              left: wp(chartOdontoLineLeft),
+              top: hp(chartOdontoLineY),
+              position: 'absolute',
+              background: '#B4B4B4',
+            }}
+          />
+        )}
+        {isChartBodyVisible && (
+          <div
+            style={{
+              width: scalePx(1),
+              height: hp(chartOdontoVerticalHeight),
+              left: wp(chartOdontoCenterX),
+              top: hp(chartOdontoVerticalTop),
+              position: 'absolute',
+              background: '#B4B4B4',
+            }}
+          />
+        )}
+        {isChartBodyVisible && (
+          <>
+            <div style={{ width: scalePx(1), height: hp(264), left: wp(chartSectionLeft), top: hp(804), position: 'absolute', background: '#5C5C5C' }} />
+            <div style={{ width: scalePx(1), height: hp(chartContentHeight), left: wp(chartLegendDividerX), top: hp(chartContentTop), position: 'absolute', background: '#5C5C5C' }} />
+            <div style={{ width: scalePx(1), height: hp(250), left: wp(rightEdge - 1), top: hp(813), position: 'absolute', background: '#5C5C5C' }} />
+            <div style={{ width: wp(chartLegendDividerX - chartSectionLeft), height: hp(chartContentHeight), left: wp(chartSectionLeft), top: hp(chartContentTop), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
+          </>
+        )}
+
+        {isChartBodyVisible && upperLeftOrders.map((order, index) => {
           const width = Number(upperSizes[order - 1].split(' ')[0]);
           const height = Number(upperSizes[order - 1].split(' ')[1]);
           return (
@@ -484,7 +783,7 @@ export function RenewPage() {
             />
           );
         })}
-        {upperRightOrders.map((order, index) => {
+        {isChartBodyVisible && upperRightOrders.map((order, index) => {
           const width = Number(upperSizes[order - 1].split(' ')[0]);
           const height = Number(upperSizes[order - 1].split(' ')[1]);
           return (
@@ -499,7 +798,7 @@ export function RenewPage() {
             />
           );
         })}
-        {lowerLeftOrders.map((order, index) => {
+        {isChartBodyVisible && lowerLeftOrders.map((order, index) => {
           const width = Number(lowerSizes[order - 1].split(' ')[0]);
           const height = Number(lowerSizes[order - 1].split(' ')[1]);
           return (
@@ -515,7 +814,7 @@ export function RenewPage() {
             />
           );
         })}
-        {lowerRightOrders.map((order, index) => {
+        {isChartBodyVisible && lowerRightOrders.map((order, index) => {
           const width = Number(lowerSizes[order - 1].split(' ')[0]);
           const height = Number(lowerSizes[order - 1].split(' ')[1]);
           return (
@@ -531,77 +830,134 @@ export function RenewPage() {
           );
         })}
 
-        <div style={{ width: wp(chartLegendWidth), height: hp(chartLegendHeight), left: wp(chartLegendLeft + 22), top: hp(chartLegendTop), position: 'absolute' }}>
-          {legendItems.map((item) => (
-            <div key={item.label}>
-              <div
-                style={{
-                  width: relativePercent(19, chartLegendWidth),
-                  height: relativePercent(19, chartLegendHeight),
-                  left: 0,
-                  top: relativePercent(item.top - 834, chartLegendHeight),
-                  position: 'absolute',
-                  background: '#808181',
-                }}
-              />
-              <div
-                style={{
-                  width: relativePercent(52, chartLegendWidth),
-                  height: relativePercent(19, chartLegendHeight),
-                  left: relativePercent(chartLegendWidth - 52 - 12, chartLegendWidth),
-                  top: relativePercent(item.top - 834, chartLegendHeight),
-                  position: 'absolute',
-                  background: item.color,
-                }}
-              />
-              <div
-                style={{
-                  left: relativePercent(30, chartLegendWidth),
-                  top: relativePercent(item.top - 834, chartLegendHeight),
-                  position: 'absolute',
-                  color: 'white',
-                  fontSize: scalePx(13),
-                  fontWeight: 700,
-                }}
-              >
-                {item.label}
+        {isChartBodyVisible && (
+          <div style={{ width: wp(chartLegendWidth), height: hp(chartLegendHeight), left: wp(chartLegendLeft + 22), top: hp(chartLegendTop), position: 'absolute' }}>
+            {legendItems.map((item) => (
+              <div key={item.label}>
+                <div
+                  style={{
+                    width: relativePercent(19, chartLegendWidth),
+                    height: relativePercent(19, chartLegendHeight),
+                    left: 0,
+                    top: relativePercent(item.top - 834, chartLegendHeight),
+                    position: 'absolute',
+                    background: '#808181',
+                  }}
+                />
+                <div
+                  style={{
+                    width: relativePercent(52, chartLegendWidth),
+                    height: relativePercent(19, chartLegendHeight),
+                    left: relativePercent(chartLegendWidth - 52 - 12, chartLegendWidth),
+                    top: relativePercent(item.top - 834, chartLegendHeight),
+                    position: 'absolute',
+                    background: item.color,
+                  }}
+                />
+                <div
+                  style={{
+                    left: relativePercent(30, chartLegendWidth),
+                    top: relativePercent(item.top - 834, chartLegendHeight),
+                    position: 'absolute',
+                    color: 'white',
+                    fontSize: scalePx(13),
+                    fontWeight: 700,
+                  }}
+                >
+                  {item.label}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
-          <button
-            type="button"
-            onClick={() => setIsReportActive((current) => !current)}
-            aria-pressed={isReportActive}
-            aria-label="Open report modal"
-            style={{
-              width: wp(88),
-              height: hp(88),
-              left: wp(reportLeft),
-              top: hp(reportTop),
-              position: 'absolute',
-              zIndex: 30,
-              borderRadius: '50%',
-              outline: isReportActive ? `${scalePx(3)} solid #00C0F3` : 'none',
-              outlineOffset: scalePx(2),
-              boxShadow: isReportActive ? `0 0 ${scalePx(18)} rgba(0, 192, 243, 0.45)` : 'none',
-              cursor: 'pointer',
-            }}
-          >
-            <img
+          {isChartBodyVisible && (
+            <button
+              type="button"
+              onClick={() => { void handleStartReport(); }}
+              aria-pressed={isReportActive || reportDrawerOpen}
+              aria-label="Open report workspace"
               style={{
-                width: '100%',
-                height: '100%',
-                display: 'block',
-                filter: isReportActive ? 'drop-shadow(0 0 10px rgba(0, 192, 243, 0.7))' : 'none',
+                width: wp(88),
+                height: hp(88),
+                left: wp(reportLeft),
+                top: hp(reportTop),
+                position: 'absolute',
+                zIndex: 30,
+                borderRadius: '50%',
+                outline: isReportActive || reportDrawerOpen ? `${scalePx(3)} solid #00C0F3` : 'none',
+                outlineOffset: scalePx(2),
+                boxShadow: isReportActive || reportDrawerOpen ? `0 0 ${scalePx(18)} rgba(0, 192, 243, 0.45)` : 'none',
+                cursor: 'pointer',
               }}
-              src={isReportActive ? displayReportButtonIcons.active : displayReportButtonIcons.inactive}
-              alt=""
-            />
-          </button>
+            >
+              <img
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  display: 'block',
+                  filter: isReportActive || reportDrawerOpen ? 'drop-shadow(0 0 10px rgba(0, 192, 243, 0.7))' : 'none',
+                }}
+                src={isReportActive || reportDrawerOpen ? displayReportButtonIcons.active : displayReportButtonIcons.inactive}
+                alt=""
+              />
+            </button>
+          )}
+
+          {reportError && (
+            <div
+              style={{
+                left: wp(251),
+                top: hp(74),
+                position: 'absolute',
+                color: '#FFB4B4',
+                fontSize: scalePx(11),
+                fontWeight: 700,
+                zIndex: 20,
+              }}
+            >
+              {reportError}
+            </div>
+          )}
+
+          {!isChartVisible && (
+            <button
+              type="button"
+              onClick={handleChartToggle}
+              aria-pressed={false}
+              aria-label="Show dental chart"
+              style={{
+                width: wp(82),
+                height: hp(16),
+                left: wp(panoChartToggleLeft),
+                top: hp(panoChartToggleTop),
+                position: 'absolute',
+                border: `${scalePx(1)} solid #4C4C4C`,
+                background: '#5C5C5C',
+                color: '#FFFFFF',
+                fontSize: scalePx(9),
+                fontWeight: 700,
+                cursor: 'pointer',
+                zIndex: 4,
+                padding: 0,
+              }}
+            >
+              Dental Chart
+            </button>
+          )}
         </div>
       </div>
+      {reportSessionId && typeof document !== 'undefined' && createPortal(
+        <WebReportDrawer
+          sessionId={reportSessionId}
+          open={reportDrawerOpen}
+          onClose={() => {
+            setReportDrawerOpen(false);
+            setIsReportActive(false);
+          }}
+        />,
+        document.body
+      )}
     </div>
   );
 }
