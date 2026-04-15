@@ -94,7 +94,7 @@ def parse_gt_file(file_path: str) -> List[Dict[str, Any]]:
                 })
 
     except Exception as e:
-        print(f"⚠️ Failed to parse GT file: {e}")
+        print(f" Failed to parse GT file: {e}")
         return []
 
     return gt_objects

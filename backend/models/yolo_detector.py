@@ -231,7 +231,7 @@ class YOLODetector(BaseDetector):
             return None
 
         except Exception as e:
-            print(f"⚠️ Failed to encode mask: {e}")
+            print(f" Failed to encode mask: {e}")
             return None
 
     def _get_color_for_class(self, class_id: int) -> str:

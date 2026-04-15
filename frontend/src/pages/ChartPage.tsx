@@ -1426,7 +1426,6 @@ export function ChartPage(props?: ChartPageProps) {
                       </div>
                       <div className="flex justify-center">
                         <span className="text-sm font-semibold tracking-[0.08em] text-[#CBD5E1]">
-                          Odontogram
                         </span>
                       </div>
                     </div>
@@ -1450,7 +1449,7 @@ export function ChartPage(props?: ChartPageProps) {
                             style={{ backgroundColor: '#10132F', borderColor: '#2A3166', color: '#E5E7EB' }}
                           >
                             <RotateCw size={12} className="text-[#2563EB]" />
-                            Notation: <span className="text-[#2563EB] whitespace-nowrap">{numberingSystem === 'fdi' ? 'FDI (11-48)' : 'Univ (1-32)'}</span>
+                            <span className="text-[#2563EB] whitespace-nowrap">{numberingSystem === 'fdi' ? 'FDI (11-48)' : 'Univ (1-32)'}</span>
                           </button>
                         </div>
                       </div>
