@@ -440,6 +440,7 @@ export function ChartPage(props?: ChartPageProps) {
   });
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const rasterOverlaySvgRef = useRef<SVGSVGElement | null>(null);
   const magnifierCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const edgeMapRef = useRef<Float32Array | null>(null);
   const [imgRect, setImgRect] = useState<DOMRect | null>(null);
@@ -807,6 +808,81 @@ export function ChartPage(props?: ChartPageProps) {
     return composite;
   };
 
+  const loadImageFromUrl = (src: string) =>
+    new Promise<HTMLImageElement>((resolve, reject) => {
+      const nextImage = new Image();
+      nextImage.decoding = 'async';
+      nextImage.onload = () => resolve(nextImage);
+      nextImage.onerror = () => reject(new Error('Failed to load capture overlay image'));
+      nextImage.src = src;
+    });
+
+  const buildRasterCaptureCanvas = async () => {
+    const imageEl = imageRef.current;
+    if (!imageEl?.naturalWidth || !imageEl?.naturalHeight) return null;
+
+    const sourceWidth = imageEl.naturalWidth;
+    const sourceHeight = imageEl.naturalHeight;
+    const normalizedRotation = ((rotation % 360) + 360) % 360;
+    const radians = (normalizedRotation * Math.PI) / 180;
+    const absCos = Math.abs(Math.cos(radians));
+    const absSin = Math.abs(Math.sin(radians));
+    const exportWidth = Math.max(1, Math.round(sourceWidth * absCos + sourceHeight * absSin));
+    const exportHeight = Math.max(1, Math.round(sourceWidth * absSin + sourceHeight * absCos));
+
+    const exportCanvas = document.createElement('canvas');
+    exportCanvas.width = exportWidth;
+    exportCanvas.height = exportHeight;
+    const exportCtx = exportCanvas.getContext('2d');
+    if (!exportCtx) return null;
+
+    exportCtx.imageSmoothingEnabled = true;
+    exportCtx.imageSmoothingQuality = 'high';
+
+    const drawLayer = (layer: CanvasImageSource, options?: { filter?: string }) => {
+      exportCtx.save();
+      exportCtx.translate(exportWidth / 2, exportHeight / 2);
+      if (normalizedRotation) exportCtx.rotate(radians);
+      if (flipped) exportCtx.scale(-1, 1);
+      if (options?.filter) exportCtx.filter = options.filter;
+      exportCtx.drawImage(layer, -sourceWidth / 2, -sourceHeight / 2, sourceWidth, sourceHeight);
+      exportCtx.restore();
+    };
+
+    drawLayer(imageEl, {
+      filter: `invert(${inverted ? 1 : 0}) brightness(${brightness}%) contrast(${contrast}%)`,
+    });
+
+    const overlaySvg = rasterOverlaySvgRef.current;
+    if (!overlaySvg) return exportCanvas;
+
+    const svgClone = overlaySvg.cloneNode(true) as SVGSVGElement;
+    svgClone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    svgClone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+    svgClone.setAttribute('width', String(sourceWidth));
+    svgClone.setAttribute('height', String(sourceHeight));
+    svgClone.setAttribute('viewBox', `0 0 ${sourceWidth} ${sourceHeight}`);
+    svgClone.style.width = `${sourceWidth}px`;
+    svgClone.style.height = `${sourceHeight}px`;
+    svgClone.style.pointerEvents = 'none';
+
+    const serializedSvg = new XMLSerializer().serializeToString(svgClone);
+    const svgBlob = new Blob(
+      [`<?xml version="1.0" encoding="UTF-8"?>${serializedSvg}`],
+      { type: 'image/svg+xml;charset=utf-8' }
+    );
+    const svgUrl = URL.createObjectURL(svgBlob);
+
+    try {
+      const overlayImage = await loadImageFromUrl(svgUrl);
+      drawLayer(overlayImage);
+    } finally {
+      URL.revokeObjectURL(svgUrl);
+    }
+
+    return exportCanvas;
+  };
+
   const downloadCanvasCapture = (sourceCanvas: HTMLCanvasElement, filePrefix = 'dental_capture') => {
     const capturedAt = new Date();
     const timestamp = formatCaptureFileTimestamp(capturedAt);
@@ -873,12 +949,7 @@ export function ChartPage(props?: ChartPageProps) {
           ? buildGridCompositeCanvas()
           : getPrimaryCanvas(containerRef.current || viewerRef.current);
       } else if (imageRef.current) {
-        const canvas = document.createElement('canvas');
-        const img = imageRef.current;
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        const ctx = canvas.getContext('2d');
-        if (ctx) { ctx.drawImage(img, 0, 0); sourceCanvas = canvas; }
+        sourceCanvas = await buildRasterCaptureCanvas();
       }
 
       if (sourceCanvas) {
@@ -914,6 +985,32 @@ export function ChartPage(props?: ChartPageProps) {
             const scaleY = sourceCanvas.height / Math.max(1, canvasRect.height);
             sx = Math.max(0, (intersectLeft - canvasRect.left) * scaleX);
             sy = Math.max(0, (intersectTop - canvasRect.top) * scaleY);
+            sw *= scaleX;
+            sh *= scaleY;
+          } else if (viewerRef.current && imageRef.current) {
+            const viewerRect = viewerRef.current.getBoundingClientRect();
+            const imageRect = imageRef.current.getBoundingClientRect();
+            const cropLeft = viewerRect.left + sx;
+            const cropTop = viewerRect.top + sy;
+            const cropRight = cropLeft + sw;
+            const cropBottom = cropTop + sh;
+
+            const intersectLeft = Math.max(cropLeft, imageRect.left);
+            const intersectTop = Math.max(cropTop, imageRect.top);
+            const intersectRight = Math.min(cropRight, imageRect.right);
+            const intersectBottom = Math.min(cropBottom, imageRect.bottom);
+
+            sw = Math.max(0, intersectRight - intersectLeft);
+            sh = Math.max(0, intersectBottom - intersectTop);
+            if (sw <= 1 || sh <= 1) {
+              notifyCapture('error', 'Capture failed: select an area inside the image');
+              return;
+            }
+
+            const scaleX = sourceCanvas.width / Math.max(1, imageRect.width);
+            const scaleY = sourceCanvas.height / Math.max(1, imageRect.height);
+            sx = Math.max(0, (intersectLeft - imageRect.left) * scaleX);
+            sy = Math.max(0, (intersectTop - imageRect.top) * scaleY);
             sw *= scaleX;
             sh *= scaleY;
           } else {
@@ -3478,6 +3575,7 @@ export function ChartPage(props?: ChartPageProps) {
                               }}
                             />
                             <svg
+                              ref={rasterOverlaySvgRef}
                               className="absolute inset-0 w-full h-full"
                               viewBox={`0 0 ${dimensions.width} ${dimensions.height}`}
                               style={{

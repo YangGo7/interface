@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation } from 'react-router-dom';
 import O3Logo from '../assets/O3_logo_only.png';
+import { StudiesWorkspacePanel } from '../components/chart/StudiesWorkspacePanel';
 import { WebReportDrawer } from '../components/WebReportDrawer';
 import { createWebReportFromChart } from '../lib/webReportApi';
+import { fetchServerFolderIndex, materializeServerStudy } from '../lib/folderLeaderApi';
+import type { FolderStudy } from '../features/upload/dicomFolderStudies';
 import { clearAllAnnotations, setActiveTool as setCornerstoneActiveTool } from '../viewer/cornerstone/tools';
 
 const DESIGN_WIDTH = 1920;
@@ -304,9 +307,19 @@ export function RenewPage() {
   const location = useLocation();
   const locationState = (location.state as any) || {};
   const result = locationState?.result;
+  const [activeFolderStudies, setActiveFolderStudies] = useState<FolderStudy[]>(() => {
+    const raw = (locationState.originalFolderStudies as FolderStudy[] | undefined) || [];
+    const seen = new Set<string>();
+    return raw.filter((study) => {
+      if (seen.has(study.id)) return false;
+      seen.add(study.id);
+      return true;
+    });
+  });
+  const [serverStudies, setServerStudies] = useState<any[]>([]);
   const [isReportActive, setIsReportActive] = useState(false);
   const [isChartVisible, setIsChartVisible] = useState(true);
-  const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'report'>('studies');
+  const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'report' | 'none'>('studies');
   const [selectedToolbarButton, setSelectedToolbarButton] = useState<ToolbarKey>('pointer');
   const [flashToolbarButton, setFlashToolbarButton] = useState<ToolbarKey | null>(null);
   const [reportSessionId, setReportSessionId] = useState<string | null>(locationState?.reportSessionId || null);
@@ -316,7 +329,11 @@ export function RenewPage() {
   const [inverted, setInverted] = useState(false);
   const [flipped, setFlipped] = useState(false);
   const [viewMode, setViewMode] = useState<'original' | 'heatmap'>('original');
+  const [selectedFolderSeriesId, setSelectedFolderSeriesId] = useState<string | null>(
+    locationState.folderSelectedSeriesId || activeFolderStudies.flatMap((study) => study.series)[0]?.id || null
+  );
   const viewport = useViewportSize();
+  const cacheBuster = useMemo(() => Date.now(), []);
   const scale = Math.min(viewport.width / DESIGN_WIDTH, viewport.height / DESIGN_HEIGHT);
   const stageWidth = viewport.width;
   const stageHeight = DESIGN_HEIGHT * scale;
@@ -359,10 +376,85 @@ export function RenewPage() {
   const panoChartToggleTop = 1044;
   const panoLabelTop = Math.round(49 + panoFrameHeight / 2 - 7);
   const isChartBodyVisible = isChartVisible;
+  const panoBodyTop = 68;
+  const panoBodyHeight = panoFrameHeight - 19;
+  const panoBodyWidth = viewerWidth - 2;
+  const studiesPanelLeft = viewerLeft + 16;
+  const studiesPanelTop = 74;
+  const studiesPanelWidth = 252;
+  const studiesPanelHeight = 356;
+  const getUrlWithCacheBuster = (url?: string | null) => {
+    if (!url) return null;
+    if (url.startsWith('blob:') || url.startsWith('data:')) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}t=${cacheBuster}`;
+  };
+  const originalPanoUrl = getUrlWithCacheBuster(
+    result?.preview_url || locationState.previewUrl || result?.image_url || locationState.imageUrl || null
+  );
+  const heatmapPanoUrl = getUrlWithCacheBuster(
+    result?.heatmap_overlay_url || result?.overlay_url || result?.preview_url || locationState.previewUrl || null
+  );
+  const panoViewerUrl = viewMode === 'heatmap' ? heatmapPanoUrl || originalPanoUrl : originalPanoUrl;
+  const combinedStudies = useMemo(() => {
+    const activeIds = new Set(activeFolderStudies.map((study) => study.id));
+    const activeFingerprints = new Set(activeFolderStudies.map((study) => `${study.label}::${study.description}::${study.patientId}`));
+    const additional = serverStudies.filter((study) => {
+      if (activeIds.has(study.id)) return false;
+      const fingerprint = `${study.label}::${study.description}::${study.patientId}`;
+      if (activeFingerprints.has(fingerprint)) return false;
+      return true;
+    });
+    const merged = [...activeFolderStudies, ...additional];
+    const seen = new Set<string>();
+    return merged.filter((study) => {
+      if (seen.has(study.id)) return false;
+      seen.add(study.id);
+      return true;
+    });
+  }, [activeFolderStudies, serverStudies]);
+
+  const handleOpenStudies = () => {
+    setWorkspaceSection((current) => (current === 'studies' ? 'none' : 'studies'));
+    setReportDrawerOpen(false);
+    setIsReportActive(false);
+    setReportError(null);
+  };
+
+  const handleSelectSeries = async (seriesId: string) => {
+    const existingSeries = activeFolderStudies.flatMap((study) => study.series).find((series) => series.id === seriesId);
+    if (existingSeries) {
+      setSelectedFolderSeriesId(seriesId);
+      handleOpenStudies();
+      return;
+    }
+
+    const targetStudy = serverStudies.find((study) => study.series.some((series: any) => series.id === seriesId));
+    if (!targetStudy) return;
+
+    try {
+      const materialized = await materializeServerStudy(targetStudy);
+      setActiveFolderStudies((current) => {
+        if (current.some((study) => study.id === materialized.id)) return current;
+        return [...current, materialized];
+      });
+      setSelectedFolderSeriesId(seriesId);
+      handleOpenStudies();
+    } catch (error) {
+      console.error('Failed to materialize study inside RenewPage', error);
+    }
+  };
 
   const handleChartToggle = () => {
     setIsChartVisible((current) => !current);
   };
+
+  useEffect(() => {
+    if (locationState.folderSource === 'server') {
+      fetchServerFolderIndex()
+        .then((data) => setServerStudies(data.studies || []))
+        .catch(console.error);
+    }
+  }, [locationState.folderSource]);
 
   const flashToolbarActive = (button: ToolbarKey) => {
     setFlashToolbarButton(button);
@@ -454,6 +546,7 @@ export function RenewPage() {
       setReportDrawerOpen((current) => {
         const next = !current;
         setIsReportActive(next);
+        setWorkspaceSection(next ? 'report' : 'none');
         return next;
       });
       setReportError(null);
@@ -571,6 +664,48 @@ export function RenewPage() {
             />
           )}
           <div style={{ width: scalePx(1), height: hp(1019), left: wp(viewerLeft), top: hp(49), position: 'absolute', background: '#4C4C4C' }} />
+          <div
+            style={{
+              width: wp(panoBodyWidth),
+              height: hp(panoBodyHeight),
+              left: wp(viewerLeft + 1),
+              top: hp(panoBodyTop),
+              position: 'absolute',
+              overflow: 'hidden',
+              background: '#000000',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {panoViewerUrl ? (
+              <img
+                src={panoViewerUrl}
+                alt="Panorama"
+                draggable={false}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'contain',
+                  filter: `invert(${inverted ? 1 : 0})`,
+                  transform: flipped ? 'scaleX(-1)' : 'none',
+                  transformOrigin: 'center',
+                  opacity: viewMode === 'heatmap' ? 0.96 : 1,
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  color: '#7A7A7A',
+                  fontSize: scalePx(14),
+                  fontWeight: 700,
+                  letterSpacing: '0.04em',
+                }}
+              >
+                No panorama source
+              </div>
+            )}
+          </div>
 
         <div style={{ width: wp(70), height: hp(1019), left: wp(12), top: hp(49), position: 'absolute', background: '#2D2D2D' }} />
         <div style={{ width: wp(70), height: hp(1019), left: wp(12), top: hp(49), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
@@ -579,7 +714,7 @@ export function RenewPage() {
         <div style={{ width: scalePx(1), height: hp(1019), left: wp(68), top: hp(49), position: 'absolute', background: '#5C5C5C' }} /> */}
         <button
           type="button"
-          onClick={() => setWorkspaceSection('studies')}
+          onClick={handleOpenStudies}
           aria-pressed={workspaceSection === 'studies'}
           style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(52), position: 'absolute', background: '#2D2D2D', padding: 0, cursor: 'pointer' }}
         >
@@ -685,6 +820,30 @@ export function RenewPage() {
           draggable={false}
           style={{ width: scalePx(7), height: scalePx(7), left: wp(240), top: hp(55), position: 'absolute', zIndex: 2 }}
         />
+        {workspaceSection === 'studies' && (
+          <div
+            style={{
+              width: wp(studiesPanelWidth),
+              height: hp(studiesPanelHeight),
+              left: wp(studiesPanelLeft),
+              top: hp(studiesPanelTop),
+              position: 'absolute',
+              zIndex: 18,
+              border: `${scalePx(1)} solid #4C4C4C`,
+              background: 'rgba(14, 14, 14, 0.92)',
+              overflow: 'hidden',
+            }}
+          >
+            <StudiesWorkspacePanel
+              studies={combinedStudies as FolderStudy[]}
+              selectedSeriesId={selectedFolderSeriesId}
+              isVisible
+              onSelectSeries={(seriesId) => {
+                void handleSelectSeries(seriesId);
+              }}
+            />
+          </div>
+        )}
         {isChartVisible && (
           <>
             <div style={{ left: wp(251), top: hp(803), position: 'absolute', color: 'white', fontSize: scalePx(13), fontWeight: 700, zIndex: 2 }}>Dental Chart</div>
@@ -954,6 +1113,7 @@ export function RenewPage() {
           onClose={() => {
             setReportDrawerOpen(false);
             setIsReportActive(false);
+            setWorkspaceSection('none');
           }}
         />,
         document.body
