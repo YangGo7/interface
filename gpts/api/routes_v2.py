@@ -402,7 +402,8 @@ def run_async_inference(session_id, save_path, dir_inference, dir_crop, base_url
             detailed_findings=findings_list,
             llm_analysis={},
             per_tooth_analysis=per_tooth_analysis,  # [NEW]
-            output_dir=str(session_root) # [USER REQUEST] Save to temp session folder
+            output_dir=str(session_root), # [USER REQUEST] Save to temp session folder
+            language=lang,
         )
         print(f"[{session_id}] DEBUG: Report Generated at {report_path}")
         

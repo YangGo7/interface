@@ -7,6 +7,7 @@ export function WebReportPage() {
   const { sessionId = '' } = useParams();
   const [session, setSession] = useState<WebReportSessionResponse['session'] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const isKorean = session?.language === 'Korean';
 
   useEffect(() => {
     if (!sessionId) return;
@@ -52,9 +53,9 @@ export function WebReportPage() {
   if ((session.status !== 'completed' && session.status !== 'finalized') || !session.report?.html_url) {
     return (
       <SimpleState
-        title="Report not ready"
-        detail={error || `Current status: ${session.status}`}
-        action={<Link to={`/chart/${sessionId}`} className="inline-flex rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800">Back to chart</Link>}
+        title={isKorean ? '리포트 준비 중' : 'Report not ready'}
+        detail={error || (isKorean ? `현재 상태: ${session.status}` : `Current status: ${session.status}`)}
+        action={<Link to={`/chart/${sessionId}`} className="inline-flex rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800">{isKorean ? '차트로 돌아가기' : 'Back to chart'}</Link>}
       />
     );
   }
@@ -68,9 +69,13 @@ export function WebReportPage() {
       <div className="mx-auto max-w-2xl rounded-3xl border border-slate-800 bg-slate-900 p-8 shadow-2xl">
         <div className="flex items-center gap-3">
           <img src={logo} alt="Logo" className="h-8 w-auto object-contain" />
-          <span className="font-bold text-lg tracking-tight">Opening full report</span>
+          <span className="font-bold text-lg tracking-tight">{isKorean ? '전체 리포트 여는 중' : 'Opening full report'}</span>
         </div>
-        <p className="mt-3 text-sm text-slate-300">Redirecting to the report HTML for session {sessionId.slice(0, 8)}.</p>
+        <p className="mt-3 text-sm text-slate-300">
+          {isKorean
+            ? `세션 ${sessionId.slice(0, 8)} 리포트 HTML로 이동합니다.`
+            : `Redirecting to the report HTML for session ${sessionId.slice(0, 8)}.`}
+        </p>
         <div className="mt-6 flex items-center gap-3">
           <a
             href={reportUrl}
@@ -78,7 +83,7 @@ export function WebReportPage() {
             rel="noreferrer"
             className="inline-flex rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-900"
           >
-            Open now
+            {isKorean ? '지금 열기' : 'Open now'}
           </a>
           {hasPdf ? (
             <a
@@ -94,7 +99,7 @@ export function WebReportPage() {
             to={`/chart/${sessionId}`}
             className="inline-flex rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-100"
           >
-            Back to Chart
+            {isKorean ? '차트로 돌아가기' : 'Back to Chart'}
           </Link>
         </div>
       </div>

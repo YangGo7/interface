@@ -29,6 +29,7 @@ class WebReportReportService:
         bl_viz_path: Optional[Path],
         effective_result: Dict[str, Any],
         output_dir: Path,
+        language: str = "English",
     ) -> Dict[str, Any]:
         analysis_result = self.build_analysis_result(effective_result)
         html_path, html_filename, pdf_filename = self.generator.generate(
@@ -38,6 +39,7 @@ class WebReportReportService:
             overlay_path=overlay_path if overlay_path and overlay_path.exists() else None,
             bl_viz_path=bl_viz_path if bl_viz_path and bl_viz_path.exists() else None,
             output_dir=output_dir,
+            language=language,
         )
         pdf_path = str(output_dir / pdf_filename) if pdf_filename else None
         return {

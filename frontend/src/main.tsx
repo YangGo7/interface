@@ -11,6 +11,7 @@ const CornerstonePage = lazy(() => import('./pages/CornerstonePage').then((modul
 const MprTestPage = lazy(() => import('./pages/MprTestPage').then((module) => ({ default: module.MprTestPage })));
 const WebChartPage = lazy(() => import('./pages/WebChartPage').then((module) => ({ default: module.WebChartPage })));
 const WebReportPage = lazy(() => import('./pages/WebReportPage').then((module) => ({ default: module.WebReportPage })));
+const RenewPage = lazy(() => import('./pages/RenewPage').then((module) => ({ default: module.RenewPage })));
 const UploadPage = lazy(() => import('./pages/UploadPage'));
 const FolderLeaderPage = lazy(() => import('./pages/FolderLeaderPage'));
 const FolderLeaderVer2Page = lazy(() => import('./pages/FolderLeaderVer2Page'));
@@ -87,6 +88,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="/upload" element={<RouteErrorBoundary routeLabel="/upload"><UploadPage /></RouteErrorBoundary>} />
           <Route path="/chart" element={<RouteErrorBoundary routeLabel="/chart"><ChartPage /></RouteErrorBoundary>} />
           <Route path="/chart/:sessionId" element={<RouteErrorBoundary routeLabel="/chart/:sessionId"><WebChartPage /></RouteErrorBoundary>} />
+          <Route path="/renew" element={<RouteErrorBoundary routeLabel="/renew"><RenewPage /></RouteErrorBoundary>} />
           <Route path="/test" element={<RouteErrorBoundary routeLabel="/test"><TestPage /></RouteErrorBoundary>} />
           <Route path="/report" element={<RouteErrorBoundary routeLabel="/report"><ReportPage /></RouteErrorBoundary>} />
           <Route path="/report/:sessionId" element={<RouteErrorBoundary routeLabel="/report/:sessionId"><WebReportPage /></RouteErrorBoundary>} />

@@ -169,6 +169,7 @@ def _run_session_analysis(app, session_id: str, source_path: Path, language: str
                 bl_viz_path=bl_viz_path,
                 effective_result=effective_result,
                 output_dir=paths["reports"],
+                language=language,
             )
             session_service.create_report_version(
                 session_id=session_id,
@@ -271,6 +272,7 @@ def create_from_chart():
             bl_viz_path=bl_viz_path,
             effective_result=effective_result,
             output_dir=paths["reports"],
+            language=session.get("language", "English"),
         )
         session_service.create_report_version(
             session_id=session_id,
@@ -494,6 +496,7 @@ def _generate_report_version(session_id: str, version_status: str) -> Dict[str, 
         bl_viz_path=bl_viz_path,
         effective_result=effective_result,
         output_dir=output_dir,
+        language=session.get("language", "English"),
     )
     version = session_service.create_report_version(
         session_id=session_id,
