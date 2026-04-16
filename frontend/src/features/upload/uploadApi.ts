@@ -1,8 +1,19 @@
 import { isDicomFile } from './uploadSelection';
 
-const DIRECT_API_BASE =
-  ((import.meta as any)?.env?.VITE_API_BASE_URL as string | undefined)?.trim() ||
-  'http://localhost:5000';
+const resolveDirectApiBase = () => {
+  const configured = ((import.meta as any)?.env?.VITE_API_BASE_URL as string | undefined)?.trim();
+  if (configured) return configured;
+  if (typeof window === 'undefined') return 'http://localhost:5000';
+
+  const { protocol, hostname, port, origin } = window.location;
+  const isLocalDevHost = hostname === 'localhost' || hostname === '127.0.0.1';
+  if (isLocalDevHost && (port === '3000' || port === '5173')) {
+    return `${protocol}//${hostname}:5000`;
+  }
+  return origin;
+};
+
+const DIRECT_API_BASE = resolveDirectApiBase();
 
 async function readJsonOrThrow<T>(response: Response): Promise<T> {
   const contentType = response.headers.get('content-type') || '';

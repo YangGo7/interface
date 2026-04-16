@@ -12,6 +12,7 @@ def extract_dicom_meta(path: Path) -> Dict[str, Any]:
     """Safely extract a few useful DICOM fields (best effort)."""
     try:
         import pydicom
+        from pydicom.multival import MultiValue
     except ImportError:
         return {}
     try:
@@ -26,8 +27,9 @@ def extract_dicom_meta(path: Path) -> Dict[str, Any]:
                 return None
             if hasattr(v, "value"):
                 v = v.value
-            # Convert multi-valued elements to list
-            if hasattr(v, "__len__") and not isinstance(v, (str, bytes)):
+            # Keep PersonName and other scalar VRs as strings.
+            # Only true DICOM multi-values should become lists.
+            if isinstance(v, MultiValue):
                 return list(v)
             return str(v)
         except Exception:

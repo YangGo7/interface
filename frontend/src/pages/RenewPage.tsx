@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import dicomParser from 'dicom-parser';
 import O3Logo from '../assets/O3_logo_only.png';
 import { DentalChartLegendOverlay } from '../components/chart/DentalChartLegendOverlay';
@@ -47,9 +47,20 @@ const buildSmoothPath = (pts: ImagePoint[], close = false) => {
   d += ` T ${last.x} ${last.y}`;
   return close ? `${d} Z` : d;
 };
-const DIRECT_API_BASE =
-  ((import.meta as any)?.env?.VITE_API_BASE_URL as string | undefined)?.trim() ||
-  'http://localhost:5000';
+const resolveDirectApiBase = () => {
+  const configured = ((import.meta as any)?.env?.VITE_API_BASE_URL as string | undefined)?.trim();
+  if (configured) return configured;
+  if (typeof window === 'undefined') return 'http://localhost:5000';
+
+  const { protocol, hostname, port, origin } = window.location;
+  const isLocalDevHost = hostname === 'localhost' || hostname === '127.0.0.1';
+  if (isLocalDevHost && (port === '3000' || port === '5173')) {
+    return `${protocol}//${hostname}:5000`;
+  }
+  return origin;
+};
+
+const DIRECT_API_BASE = resolveDirectApiBase();
 
 const assetPath = (relativePath: string) => encodeURI(`/imgs/${relativePath}`);
 const headerMarkerIconRelativePath = '7 7.png';
@@ -902,6 +913,7 @@ function useViewportSize() {
 
 export function RenewPage() {
   const location = useLocation();
+  const navigate = useNavigate();
   const locationState = (location.state as any) || {};
   const [result, setResult] = useState<any>(locationState?.result || null);
   const [jobId, setJobId] = useState<string | null>(locationState?.jobId || null);
@@ -3328,34 +3340,50 @@ export function RenewPage() {
         >
           <div style={{ width: wp(designCanvasWidth), height: hp(DESIGN_HEIGHT), left: 0, top: 0, position: 'absolute', background: '#414950' }} />
 
-          <img
-            src={O3Logo}
-            alt="O3"
-            draggable={false}
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            aria-label="Go to home"
             style={{
-              width: wp(144),
-              height: hp(38),
-              left: wp(-20),
-              top: hp(10),
+              width: wp(220),
+              height: hp(48),
+              left: wp(0),
+              top: hp(6),
               position: 'absolute',
-              objectFit: 'contain',
-              zIndex: 12,
-            }}
-          />
-          <div
-            style={{
-              left: wp(88),
-              top: hp(12),
-              position: 'absolute',
-              color: 'white',
-              fontSize: scalePx(20),
-              fontWeight: 700,
-              letterSpacing: '0.08em',
+              border: 'none',
+              background: 'transparent',
+              padding: 0,
+              cursor: 'pointer',
               zIndex: 12,
             }}
           >
-            SATURN
-          </div>
+            <img
+              src={O3Logo}
+              alt=""
+              draggable={false}
+              style={{
+                width: wp(144),
+                height: hp(38),
+                left: wp(-20),
+                top: hp(4),
+                position: 'absolute',
+                objectFit: 'contain',
+              }}
+            />
+            <div
+              style={{
+                left: wp(88),
+                top: hp(6),
+                position: 'absolute',
+                color: 'white',
+                fontSize: scalePx(20),
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+              }}
+            >
+              SATURN
+            </div>
+          </button>
 
           {!isReportWorkspaceVisible && (
             <>

@@ -24,12 +24,19 @@ class Config:
     DEBUG = True
 
     # CORS
-    CORS_ORIGINS = [
+    _default_cors_origins = [
         "http://localhost:3000",
         "http://localhost:5173",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
+        r"^https://.*\.ngrok(-free)?\.(app|dev)$",
     ]
+    _extra_cors_origins = [
+        origin.strip()
+        for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    CORS_ORIGINS = [*_default_cors_origins, *_extra_cors_origins]
 
     # Supported models (single YOLO seg)
     SUPPORTED_MODELS = {

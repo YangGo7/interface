@@ -334,6 +334,25 @@ export function WebReportDrawer({
     setSaveState('idle');
   };
 
+  const handleApplyToReport = async () => {
+    if (!selectedToothId || !sessionId || session?.is_finalized) return;
+    setActionState('regenerating');
+    setError(null);
+    try {
+      const saved = await persistOverrides();
+      if (!saved) return;
+      await regenerateWebReport(sessionId);
+      const refreshed = await fetchWebReportSession(sessionId);
+      setSession(refreshed.session || null);
+      setSaveState('saved');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to apply tooth note to report');
+      setSaveState('error');
+    } finally {
+      setActionState('idle');
+    }
+  };
+
   const toothNoteAutocomplete = useMemo(
     () => getInlinePhraseAutocomplete(reviewForm.note, buildToothNoteAutocompletePhrases(reviewForm), toothNoteCaret),
     [
@@ -1229,7 +1248,28 @@ export function WebReportDrawer({
                   </label>
                 </div>
 
-                <div style={dockSectionTitleStyle}>Tooth Note</div>
+                <div style={{ ...dockSectionTitleStyle, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                  <span>Tooth Note</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleApplyToReport();
+                    }}
+                    disabled={!selectedToothId || !reviewForm.note.trim() || Boolean(session?.is_finalized) || actionState !== 'idle'}
+                    style={{
+                      border: '1px solid #5A5A5A',
+                      background: '#3A3A3A',
+                      color: '#EAEAEA',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '3px 10px',
+                      cursor: !selectedToothId || !reviewForm.note.trim() || Boolean(session?.is_finalized) || actionState !== 'idle' ? 'default' : 'pointer',
+                      opacity: !selectedToothId || !reviewForm.note.trim() || Boolean(session?.is_finalized) || actionState !== 'idle' ? 0.45 : 1,
+                    }}
+                  >
+                    {actionState === 'regenerating' ? 'Applying...' : 'Add'}
+                  </button>
+                </div>
                 <textarea
                   ref={toothNoteTextareaRef}
                   rows={4}
@@ -1346,7 +1386,19 @@ export function WebReportDrawer({
                   </div>
 
                   <label className="block">
-                    <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tooth Note</span>
+                    <div className="mb-1 flex flex-wrap items-center justify-between gap-3">
+                      <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tooth Note</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleApplyToReport();
+                        }}
+                        disabled={!selectedToothId || !reviewForm.note.trim() || Boolean(session?.is_finalized) || actionState !== 'idle'}
+                        className="rounded-full border border-slate-600 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-200 disabled:opacity-40"
+                      >
+                        {actionState === 'regenerating' ? 'Applying...' : 'Add'}
+                      </button>
+                    </div>
                     <textarea
                       ref={toothNoteTextareaRef}
                       rows={3}
