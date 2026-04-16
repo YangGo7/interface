@@ -153,7 +153,7 @@ export default function FolderLeaderVer2Page() {
 
     try {
       const folderStudy: FolderStudy = await materializeServerStudy(selectedStudy);
-      navigate('/chart', {
+      navigate('/renew', {
         state: {
           originalFolderMode: true,
           originalFolderStudies: [folderStudy],

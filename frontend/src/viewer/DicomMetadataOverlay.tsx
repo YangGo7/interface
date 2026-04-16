@@ -7,6 +7,7 @@ type DicomMetadataOverlayProps = {
   left?: number;
   right?: number;
   compact?: boolean;
+  leftPanelAlign?: 'left' | 'right';
 };
 
 const formatDicomDate = (raw?: string) => {
@@ -88,6 +89,7 @@ export function DicomMetadataOverlay({
   left = 16,
   right = 16,
   compact = false,
+  leftPanelAlign = 'left',
 }: DicomMetadataOverlayProps) {
   if (!metadata) return null;
 
@@ -105,10 +107,10 @@ export function DicomMetadataOverlay({
       }}
     >
       <div
-        style={{ position: 'absolute', top, left }}
+        style={leftPanelAlign === 'right' ? { position: 'absolute', top, right } : { position: 'absolute', top, left }}
       >
         <div
-          className="min-w-[220px] max-w-[min(260px,calc(100%-32px))] rounded-xl px-3 py-2 text-[11px] leading-[1.35] text-white/92"
+          className="min-w-[220px] max-w-[min(260px,calc(100%-32px))] rounded-xl px-3 py-2 text-[11px] leading-[1.35] text-white"
           style={{
             background: 'rgba(0, 0, 0, 0.58)',
             border: '1px solid rgba(255,255,255,0.14)',
@@ -117,7 +119,7 @@ export function DicomMetadataOverlay({
             WebkitBackdropFilter: 'blur(10px)',
           }}
         >
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200/90">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white">
             DICOM HUD
           </div>
           <div className="space-y-0.5 font-mono">
@@ -133,7 +135,7 @@ export function DicomMetadataOverlay({
         style={{ position: 'absolute', right, bottom }}
       >
         <div
-          className="min-w-[240px] max-w-[min(320px,calc(100%-32px))] rounded-xl px-3 py-2 text-[10px] leading-[1.35] text-white/88"
+          className="min-w-[240px] max-w-[min(320px,calc(100%-32px))] rounded-xl px-3 py-2 text-[10px] leading-[1.35] text-white"
           style={{
             background: 'rgba(0, 0, 0, 0.58)',
             border: '1px solid rgba(255,255,255,0.12)',
@@ -142,7 +144,7 @@ export function DicomMetadataOverlay({
             WebkitBackdropFilter: 'blur(10px)',
           }}
         >
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-100/85">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white">
             {metadata.modality || 'DICOM'}
           </div>
           <div className="space-y-0.5 font-mono">

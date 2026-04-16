@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Mic, Square } from 'lucide-react';
 import {
   fetchWebReportSession,
   finalizeWebReport,
@@ -146,6 +145,7 @@ export function WebReportDrawer({
   open = true,
   layout = 'modal',
   isInactive = false,
+  positionMode = 'fixed',
 }: {
   sessionId: string;
   selectedToothId?: string | null;
@@ -154,6 +154,7 @@ export function WebReportDrawer({
   open?: boolean;
   layout?: 'modal' | 'dock';
   isInactive?: boolean;
+  positionMode?: 'fixed' | 'absolute';
 }) {
   const [session, setSession] = useState<WebReportSessionResponse['session'] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -205,6 +206,29 @@ export function WebReportDrawer({
     () => buildWebReportKeywords(session?.effective_result || session?.ai_result || {}),
     [session]
   );
+  const keywordGroups = useMemo(() => {
+    const groups: Record<'Caries' | 'Missing' | 'Bone loss', string[]> = {
+      Caries: [],
+      Missing: [],
+      'Bone loss': [],
+    };
+
+    keywords.forEach((keyword) => {
+      const normalized = String(keyword || '').replace(/\r\n/g, '\n');
+      const colonIndex = normalized.indexOf(':');
+      const rawLabel = colonIndex >= 0 ? normalized.slice(0, colonIndex).trim() : normalized.trim();
+      const values =
+        colonIndex >= 0
+          ? normalized.slice(colonIndex + 1).match(/#\d+/g) || []
+          : normalized.match(/#\d+/g) || [];
+
+      if (/caries/i.test(rawLabel)) groups.Caries = values;
+      if (/missing/i.test(rawLabel)) groups.Missing = values;
+      if (/bone/i.test(rawLabel)) groups['Bone loss'] = values;
+    });
+
+    return groups;
+  }, [keywords]);
   const teeth = useMemo(
     () =>
       [...(((effectiveResult?.teeth as any[]) || []).filter((tooth) => tooth?.tooth_label))]
@@ -479,6 +503,10 @@ export function WebReportDrawer({
 
   useEffect(() => stopActiveStream, []);
 
+  /*
+  Voice dictation is intentionally disabled in the current Renew report modal flow.
+  Keep the previous implementation here so it can be restored later if needed.
+
   const handleStartDictation = async () => {
     if (dictationState !== 'idle' || session?.is_finalized) return;
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -545,10 +573,37 @@ export function WebReportDrawer({
     mediaRecorderRef.current?.stop();
   };
 
-  /*
-  const handleStartDictation = async () => { ... };
-  const handleStopDictation = () => { ... };
+  const renderDictationControl = () => {
+    if (session?.is_finalized) return null;
+
+    const isRecording = dictationState === 'recording';
+    const isProcessing = dictationState === 'processing';
+
+    return (
+      <button
+        type="button"
+        onClick={isRecording ? handleStopDictation : handleStartDictation}
+        disabled={isProcessing}
+        className="inline-flex items-center justify-center"
+        style={{
+          width: 42,
+          height: 42,
+          border: '1px solid #7A7A7A',
+          background: '#6E6E6E',
+          color: '#FFFFFF',
+          borderRadius: 0,
+          opacity: isProcessing ? 0.55 : 1,
+        }}
+        title={isRecording ? 'Stop voice input' : 'Start voice input'}
+      >
+        {isRecording ? <Square size={16} /> : <Mic size={18} />}
+      </button>
+    );
+  };
   */
+
+  const handleStartDictation = async () => {};
+  const handleStopDictation = () => {};
   const renderDictationControl = () => null;
 
 
@@ -558,22 +613,43 @@ export function WebReportDrawer({
   const pdfUrl = `/api/web_report/session/${sessionId}/report/pdf`;
   const statusLabel = session?.is_finalized ? 'Final' : 'Draft';
   const isDock = layout === 'dock';
+  const dockBodyShellStyle = isDock
+    ? { margin: '0 6px 6px', background: '#2B2B2B', border: '1px solid #3A3A3A', borderTop: 'none' }
+    : undefined;
+  const dockSectionTitleStyle = { color: '#FFFFFF', fontSize: 14, marginBottom: 8 } as const;
+  const dockMutedLabelStyle = { color: '#BFBFBF', fontSize: 12, marginBottom: 6 } as const;
+  const dockFieldStyle = {
+    width: '100%',
+    background: '#1E1E1E',
+    border: '1px solid #CFCFCF',
+    color: '#FFFFFF',
+    padding: '10px 12px',
+    fontSize: 14,
+    outline: 'none',
+  } as const;
+  const dockCardStyle = {
+    borderTop: '1px solid #5A5A5A',
+    borderBottom: '1px solid #5A5A5A',
+    padding: '14px 14px 16px',
+  } as const;
   const rootClassName = isDock
-    ? 'flex flex-col overflow-hidden rounded-[28px] border text-slate-100 backdrop-blur-xl'
+    ? `${positionMode === 'absolute' ? 'absolute' : 'fixed'} flex flex-col overflow-hidden border text-slate-100`
     : 'fixed bottom-3 left-3 right-3 top-20 z-[220] flex flex-col overflow-hidden rounded-[30px] border text-slate-100 backdrop-blur-xl md:bottom-5 md:left-auto md:right-5 md:top-24 md:w-[540px]';
   const rootStyle = isDock
       ? {
-        position: 'fixed' as const,
+        position: positionMode,
         right: 24,
-        bottom: 120,
-        zIndex: 2147482900,
+        bottom: 112,
+        top: 'auto',
+        left: 'auto',
+        zIndex: positionMode === 'absolute' ? 40 : 2147482900,
         width: 420,
-        maxWidth: 'calc(100vw - 2rem)',
-        height: 520,
-        background: 'linear-gradient(180deg, rgba(12, 28, 52, 0.98), rgba(8, 17, 34, 0.98))',
-        borderColor: 'rgba(103, 232, 249, 0.35)',
-        boxShadow: '0 32px 100px rgba(3, 8, 20, 0.62)',
-        color: '#E2E8F0',
+        maxWidth: positionMode === 'absolute' ? 'calc(100% - 24px)' : 'calc(100vw - 2rem)',
+        height: 498,
+        background: '#4A4F55',
+        borderColor: '#5A5A5A',
+        boxShadow: '0 8px 24px rgba(0,0,0,0.22)',
+        color: '#FFFFFF',
         opacity: open ? 1 : 0,
         transform: open ? 'translateY(0) scale(1)' : 'translateY(12px) scale(0.95)',
         pointerEvents: open ? ('auto' as const) : ('none' as const),
@@ -591,46 +667,94 @@ export function WebReportDrawer({
 
   return (
     <div className={`${rootClassName} ${isInactive ? 'opacity-40 pointer-events-none' : ''}`} style={rootStyle}>
-      <div className={`pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2 ${isDock ? 'right-14 md:left-auto md:translate-x-0' : 'md:left-auto md:right-14 md:translate-x-0'}`}>
-        <div className="h-12 w-44 rounded-full bg-gradient-to-r from-cyan-400 via-sky-400 to-blue-500 opacity-75 blur-[10px]" />
-      </div>
-      <div className="absolute left-5 top-5 rounded-full border border-cyan-300/30 bg-[#09172f] px-4 py-1 text-[10px] font-semibold uppercase tracking-[0.28em] text-cyan-200 shadow-[0_10px_30px_rgba(34,211,238,0.22)]">
-        Report Panel
-      </div>
+      {!isDock && (
+        <>
+          <div className={`pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2 ${isDock ? 'right-14 md:left-auto md:translate-x-0' : 'md:left-auto md:right-14 md:translate-x-0'}`}>
+            <div className="h-12 w-44 rounded-full bg-gradient-to-r from-cyan-400 via-sky-400 to-blue-500 opacity-75 blur-[10px]" />
+          </div>
+          <div className="absolute left-5 top-5 rounded-full border border-cyan-300/30 bg-[#09172f] px-4 py-1 text-[10px] font-semibold uppercase tracking-[0.28em] text-cyan-200 shadow-[0_10px_30px_rgba(34,211,238,0.22)]">
+            Report Modal
+          </div>
+        </>
+      )}
+      {isDock && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: '0 0 auto 0',
+            height: 30,
+            background: '#4A4F55',
+            borderBottom: '1px solid #5A5A5A',
+            zIndex: 2,
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              left: 8,
+              top: 5,
+              color: '#FFFFFF',
+              fontSize: 18,
+              fontWeight: 400,
+            }}
+          >
+            Report
+          </div>
+        </div>
+      )}
       <button
         type="button"
         onClick={onClose}
-        className="absolute right-5 top-5 inline-flex h-8 w-auto shrink-0 items-center justify-center rounded-full border-2 border-white/90 bg-cyan-400 px-3 py-1.5 text-[13px] font-semibold leading-none text-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.22)] hover:bg-cyan-300"
+        className={isDock ? 'absolute right-6 top-6 inline-flex items-center justify-center border text-white' : 'absolute right-5 top-5 inline-flex h-8 w-auto shrink-0 items-center justify-center rounded-full border-2 border-white/90 bg-cyan-400 px-3 py-1.5 text-[13px] font-semibold leading-none text-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.22)] hover:bg-cyan-300'}
         style={{
           position: 'absolute',
-          top: 20,
-          right: 20,
-          width: 'fit-content',
-          minWidth: 0,
+          top: isDock ? 4 : 20,
+          right: isDock ? 8 : 20,
+          width: isDock ? 22 : 'fit-content',
+          height: isDock ? 22 : 32,
+          minWidth: isDock ? 22 : 0,
           margin: 0,
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
           whiteSpace: 'nowrap',
           zIndex: 2,
+          borderRadius: isDock ? 0 : 999,
+          padding: isDock ? 0 : undefined,
+          background: isDock ? '#163D73' : undefined,
+          borderColor: isDock ? '#FFFFFF' : undefined,
+          fontSize: isDock ? 12 : undefined,
+          fontWeight: isDock ? 400 : undefined,
         }}
       >
-        Hide
+        {isDock ? 'X' : 'Hide'}
       </button>
       <div className="hidden" />
 
-      <div className={`flex items-center justify-between border-b border-cyan-300/15 bg-[linear-gradient(180deg,rgba(27,78,113,0.34),rgba(7,16,31,0.12))] ${isDock ? 'px-4 pb-3 pt-12' : 'px-5 pb-4 pt-14 md:px-6'}`}>
+      <div
+        className={`flex items-center justify-between ${isDock ? 'bg-transparent px-6 pb-0 pt-20' : 'border-b border-cyan-300/15 bg-[linear-gradient(180deg,rgba(27,78,113,0.34),rgba(7,16,31,0.12))] px-5 pb-4 pt-14 md:px-6'}`}
+        style={isDock ? {
+          margin: '40px 6px 0',
+          padding: '16px 14px 12px',
+          background: '#2B2B2B',
+          border: '1px solid #3A3A3A',
+          borderBottom: 'none',
+        } : undefined}
+      >
         <div className="flex min-w-0 items-center gap-4">
-          <div className={`flex items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-200 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.15)] ${isDock ? 'h-10 w-10' : 'h-12 w-12'}`}>
+          <div className={`flex items-center justify-center rounded-2xl ${isDock ? 'hidden' : 'bg-cyan-500/15 text-cyan-200 shadow-[inset_0_0_0_1px_rgba(103,232,249,0.15)] h-12 w-12'}`}>
             <span className="text-sm font-bold tracking-[0.18em]">AI</span>
           </div>
           <div className="min-w-0">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.26em] text-cyan-300">AI Note</p>
-            <p className="mt-1 truncate text-[15px] text-slate-200">Session {sessionId.slice(0, 8)} - {statusLabel}</p>
-            <p className="mt-1 text-[13px] text-slate-400">
-              {isDock ? 'Write notes here and keep the draft pinned to this view.' : 'Floating workspace for report actions, notes, and clinical review.'}
-            </p>
-            <br/>
+            <p className={`${isDock ? 'mb-2 text-[16px] font-medium text-white' : 'text-[11px] font-semibold uppercase tracking-[0.26em] text-cyan-300'}`}>AI Note</p>
+            <div>
+              <div>
+                <p className={`mt-1 truncate ${isDock ? 'text-[13px] text-[#BFBFBF]' : 'text-[15px] text-slate-200'}`}>Session {sessionId.slice(0, 8)} - {statusLabel}</p>
+                <p className={`mt-1 ${isDock ? 'text-[12px] leading-6 text-[#9A9A9A]' : 'text-[13px] text-slate-400'}`}>
+              
+                </p>
+              </div>
+            </div>
           </div>
         </div>
         <div className="ml-3 flex items-center gap-2">
@@ -638,23 +762,45 @@ export function WebReportDrawer({
             href={reportPageUrl}
             target="_blank"
             rel="noreferrer"
-            className="rounded-full border border-slate-700 bg-white/5 px-3 py-1.5 text-[13px] text-slate-100 hover:bg-white/10"
+            className={isDock ? 'hidden' : 'rounded-full border border-slate-700 bg-white/5 px-3 py-1.5 text-[13px] text-slate-100 hover:bg-white/10'}
           >
             Open Full
           </a>
         </div>
       </div>
 
-      <div className={`flex items-center gap-2 border-b border-white/10 bg-black/10 ${isDock ? 'px-4 py-2.5' : 'px-6 py-3'}`}>
+      <div
+        className={`flex items-center gap-0 border-b border-white/10 ${isDock ? 'bg-[#2F2E2D] px-6 py-4' : 'bg-black/10 px-6 py-3'}`}
+        style={isDock ? {
+          margin: '0 6px',
+          padding: '0 14px 12px',
+          background: '#2B2B2B',
+          borderLeft: '1px solid #3A3A3A',
+          borderRight: '1px solid #3A3A3A',
+          borderBottom: '1px solid #5A5A5A',
+        } : undefined}
+      >
         {(['keywords', 'review', 'report', 'guide'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
-            className={`rounded-full px-4 py-2 text-[13px] font-medium transition ${
+            className={`${isDock ? 'flex-1 border px-3 py-1 text-[12px] font-light' : 'rounded-full px-4 py-2 text-[13px] font-medium transition'} ${
               activeTab === tab
-                ? 'bg-cyan-400 text-slate-950 shadow-[0_10px_25px_rgba(34,211,238,0.22)]'
-                : 'bg-white/5 text-slate-200 hover:bg-white/10'
+                ? isDock ? 'text-white' : 'bg-cyan-400 text-slate-950 shadow-[0_10px_25px_rgba(34,211,238,0.22)]'
+                : isDock ? 'text-[#F1F1F1]' : 'bg-white/5 text-slate-200 hover:bg-white/10'
             }`}
+            style={
+              isDock
+                ? {
+                    borderRadius: 0,
+                    borderColor: '#6F6F6F',
+                    background: activeTab === tab ? '#8E8E8E' : '#9A9A9A',
+                    boxShadow: activeTab === tab ? 'inset 0 3px 0 #00C0F3' : 'none',
+                    transform: activeTab === tab ? 'translateY(-1px)' : 'none',
+                    transition: 'background 140ms ease, box-shadow 140ms ease, transform 140ms ease',
+                  }
+                : undefined
+            }
           >
             {tab === 'keywords' ? 'Keywords' : tab === 'review' ? 'Review' : tab === 'report' ? 'Report' : 'Guide'}
           </button>
@@ -675,7 +821,83 @@ export function WebReportDrawer({
 
       {activeTab === 'report' ? (
         <div className="flex flex-1 flex-col overflow-hidden">
-          <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
+          <div className={`flex-1 overflow-y-auto ${isDock ? 'px-0 py-0' : 'px-5 py-5 md:px-6'}`} style={dockBodyShellStyle}>
+          {isDock ? (
+            <div style={{ padding: '18px 18px 20px' }}>
+              <div style={dockSectionTitleStyle}>Report</div>
+              <div style={{ ...dockCardStyle, display: 'grid', gap: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div>
+                    <div style={dockMutedLabelStyle}>Current Version</div>
+                    <div style={{ color: '#E5E5E5', fontSize: 13 }}>{session?.report?.version ?? 1}</div>
+                  </div>
+                  <div>
+                    <div style={dockMutedLabelStyle}>Status</div>
+                    <div style={{ color: '#E5E5E5', fontSize: 13 }}>{statusLabel}</div>
+                  </div>
+                </div>
+                <div>
+                  <div style={dockMutedLabelStyle}>Document</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <a
+                      href={reportPageUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ ...dockFieldStyle, width: 'auto', textDecoration: 'none', padding: '6px 12px', background: '#8E8E8E', borderColor: '#6F6F6F' }}
+                    >
+                      Open Report
+                    </a>
+                    <a
+                      href={reportUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ ...dockFieldStyle, width: 'auto', textDecoration: 'none', padding: '6px 12px' }}
+                    >
+                      HTML
+                    </a>
+                    {hasPdf ? (
+                      <a
+                        href={pdfUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ ...dockFieldStyle, width: 'auto', textDecoration: 'none', padding: '6px 12px' }}
+                      >
+                        PDF
+                      </a>
+                    ) : null}
+                  </div>
+                </div>
+                <div>
+                  <div style={dockMutedLabelStyle}>Attached Captures</div>
+                  <div style={{ color: '#9A9A9A', fontSize: 12 }}>
+                    {attachedCapturesDraft.length ? `${attachedCapturesDraft.length} capture(s) attached` : 'No captures attached'}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginTop: 18, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                <div>
+                  <div style={{ color: '#FFFFFF', fontSize: 14 }}>Report Actions</div>
+                  <div style={{ color: '#9A9A9A', fontSize: 11, marginTop: 4 }}>Finalize after report check.</div>
+                </div>
+                <button
+                  onClick={handleFinalize}
+                  disabled={actionState !== 'idle' || Boolean(session?.is_finalized)}
+                  style={{
+                    ...dockFieldStyle,
+                    width: 'auto',
+                    padding: '8px 16px',
+                    background: '#8E8E8E',
+                    borderColor: '#6F6F6F',
+                    color: '#FFFFFF',
+                  }}
+                >
+                  {session?.is_finalized ? 'Finalized' : actionState === 'finalizing' ? 'Finalizing...' : 'Finalize'}
+                </button>
+              </div>
+            </div>
+          ) : (
+          <>
           <div className="rounded-[28px] border border-cyan-400/15 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(14,165,233,0.04))] p-5">
             {/* <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Report Workspace</p>
             <p className="mt-2 text-[15px] leading-6 text-slate-200">
@@ -806,8 +1028,11 @@ export function WebReportDrawer({
             )}
           </div>
           */}
+          </>
+          )}
           </div>
-          <div className={`border-t border-white/10 bg-black/10 ${isDock ? 'px-4 py-2' : 'px-5 py-2.5 md:px-6'}`}>
+          {!isDock && (
+          <div className={`border-t border-white/10 bg-black/10 px-5 py-2.5 md:px-6`}>
             <div className="flex items-center justify-between gap-3 rounded-[18px] border border-white/10 bg-white/5 px-4 py-2.5">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Actions</p>
@@ -823,223 +1048,407 @@ export function WebReportDrawer({
               </button>
             </div>
           </div>
+          )}
         </div>
       ) : activeTab === 'keywords' ? (
-        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
-          <div className="rounded-[26px] border border-cyan-400/15 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(14,165,233,0.04))] p-5">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Model Findings</p>
-            <p className="mt-2 text-sm leading-6 text-slate-300">
-            
-             
-            </p>
-          </div>
-
-          <div className="mt-4 flex flex-wrap gap-2">
-            {keywords.map((keyword) => {
-              const normalizedKeyword = String(keyword || '').replace(/\r\n/g, '\n');
-              const newlineParts = normalizedKeyword.split('\n').filter(Boolean);
-              const colonIndex = normalizedKeyword.indexOf(':');
-              const extractedLabel = colonIndex >= 0 ? normalizedKeyword.slice(0, colonIndex + 1).trim() : newlineParts[0] || normalizedKeyword.trim();
-              const extractedValues = colonIndex >= 0
-                ? (normalizedKeyword.slice(colonIndex + 1).match(/#\d+/g) || [])
-                : newlineParts.slice(1).flatMap((line) => line.match(/#\d+/g) || []);
-              const lines = [extractedLabel, ...extractedValues].filter(Boolean);
-
-              return (
-                <div
-                  key={keyword}
-                  className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[13px] font-medium text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] text-center"
-                >
-                  <div className="flex flex-col items-center">
-                    {lines.map((line, index) => (
-                      <div key={`${keyword}-${line}-${index}`} className={index === 0 ? 'block' : 'mt-0.5 block'}>
-                        {line}
-                      </div>
-                    ))}
+        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-0 py-0' : 'px-5 py-5 md:px-6'}`} style={isDock ? { margin: '0 6px 6px', background: '#2B2B2B', border: '1px solid #3A3A3A', borderTop: 'none' } : undefined}>
+          {isDock ? (
+            <div style={{ padding: '18px 18px 20px' }}>
+              <div style={{ color: '#FFFFFF', fontSize: 14, marginBottom: 16 }}>Model Findings</div>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr 1fr',
+                  gap: 0,
+                  borderTop: '1px solid #5A5A5A',
+                  borderBottom: '1px solid #5A5A5A',
+                }}
+              >
+                {(['Caries', 'Missing', 'Bone loss'] as const).map((title, index) => (
+                  <div
+                    key={title}
+                    style={{
+                      padding: '16px 14px 18px',
+                      borderRight: index < 2 ? '1px solid #5A5A5A' : 'none',
+                      minHeight: 168,
+                    }}
+                  >
+                    <div style={{ color: '#BFBFBF', fontSize: 12, marginBottom: 14 }}>{title}:</div>
+                    <div style={{ display: 'grid', gap: 10 }}>
+                      {(keywordGroups[title].length ? keywordGroups[title] : ['-']).map((value) => (
+                        <div key={`${title}-${value}`} style={{ color: '#E5E5E5', fontSize: 12 }}>
+                          {value}
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                ))}
+              </div>
 
-          <div className="mt-5 rounded-[24px] border border-white/10 bg-white/5 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Note</p>
-              {renderDictationControl()}
+              <div style={{ marginTop: 18, color: '#FFFFFF', fontSize: 14, marginBottom: 8 }}>Report Note</div>
+              <div
+                style={{
+                  border: '1px solid #CFCFCF',
+                  background: '#1E1E1E',
+                  padding: 12,
+                }}
+              >
+                <div className="flex items-end gap-3">
+                  <textarea
+                    rows={5}
+                    value={reportNoteDraft}
+                    disabled={session?.is_finalized}
+                    onChange={(event) => updateReportNoteDraft(event.target.value)}
+                    className="flex-1 bg-transparent text-[14px] leading-6 text-white outline-none placeholder:text-[#9A9A9A]"
+                    style={{ caretColor: '#ffffff', resize: 'none' }}
+                    placeholder="Add a clinician note for the report draft"
+                  />
+                  {renderDictationControl()}
+                </div>
+              </div>
+              {dictationTranscript && (
+                <p style={{ marginTop: 8, color: '#9A9A9A', fontSize: 11 }}>
+                  Transcript captured and summarized into SOAP format.
+                </p>
+              )}
             </div>
-            <textarea
-              rows={4}
-              value={reportNoteDraft}
-              disabled={session?.is_finalized}
-              onChange={(event) => updateReportNoteDraft(event.target.value)}
-              className="mt-3 w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] leading-6 text-white outline-none placeholder:text-slate-400"
-              style={{ border: '1px solid rgba(255,255,255,0.22)', caretColor: '#ffffff' }}
-              placeholder="Add a clinician note for the report draft"
-            />
-            {dictationTranscript && (
-               <p className="mt-2 text-[12px] leading-5 text-slate-500">
-                Transcript captured and summarized into SOAP format.
-              </p>
-            )}
-          </div>
+          ) : (
+            <>
+              <div className="rounded-[26px] border border-cyan-400/15 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(14,165,233,0.04))] p-5">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Model Findings</p>
+                <p className="mt-2 text-sm leading-6 text-slate-300" />
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                {keywords.map((keyword) => {
+                  const normalizedKeyword = String(keyword || '').replace(/\r\n/g, '\n');
+                  const newlineParts = normalizedKeyword.split('\n').filter(Boolean);
+                  const colonIndex = normalizedKeyword.indexOf(':');
+                  const extractedLabel = colonIndex >= 0 ? normalizedKeyword.slice(0, colonIndex + 1).trim() : newlineParts[0] || normalizedKeyword.trim();
+                  const extractedValues = colonIndex >= 0
+                    ? (normalizedKeyword.slice(colonIndex + 1).match(/#\d+/g) || [])
+                    : newlineParts.slice(1).flatMap((line) => line.match(/#\d+/g) || []);
+                  const lines = [extractedLabel, ...extractedValues].filter(Boolean);
+
+                  return (
+                    <div
+                      key={keyword}
+                      className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[13px] font-medium text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] text-center"
+                    >
+                      <div className="flex flex-col items-center">
+                        {lines.map((line, index) => (
+                          <div key={`${keyword}-${line}-${index}`} className={index === 0 ? 'block' : 'mt-0.5 block'}>
+                            {line}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-5 rounded-[24px] border border-white/10 bg-white/5 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Note</p>
+                  {renderDictationControl()}
+                </div>
+                <textarea
+                  rows={4}
+                  value={reportNoteDraft}
+                  disabled={session?.is_finalized}
+                  onChange={(event) => updateReportNoteDraft(event.target.value)}
+                  className="mt-3 w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] leading-6 text-white outline-none placeholder:text-slate-400"
+                  style={{ border: '1px solid rgba(255,255,255,0.22)', caretColor: '#ffffff' }}
+                  placeholder="Add a clinician note for the report draft"
+                />
+                {dictationTranscript && (
+                  <p className="mt-2 text-[12px] leading-5 text-slate-500">
+                    Transcript captured and summarized into SOAP format.
+                  </p>
+                )}
+              </div>
+            </>
+          )}
         </div>
       ) : activeTab === 'review' ? (
         <div className="flex flex-1 flex-col overflow-hidden">
-          <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
-            <div className="mb-4 flex items-center justify-between">
-              <span
-                className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
-                  saveState === 'saving'
-                    ? 'bg-amber-500/15 text-amber-200'
-                    : saveState === 'saved'
-                      ? 'bg-emerald-500/15 text-emerald-200'
-                      : saveState === 'error'
-                        ? 'bg-red-500/15 text-red-200'
-                        : 'bg-slate-800 text-slate-300'
-                }`}
-              >
-                {/* {saveState === 'saving' ? 'Saving' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Error' : 'Idle'} */}
-              </span>
-            </div>
-
-            <div className="space-y-4">
-            <div>
-              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tooth</label>
-              <select
-                value={selectedToothId}
-                onChange={(event) => {
-                  setSelectedToothId(event.target.value);
-                  setEditorDirty(false);
-                  setSaveState('idle');
-                }}
-              className="w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] text-white outline-none"
-              style={{ backgroundColor: '#020617', color: '#f8fafc', colorScheme: 'dark', border: '1px solid rgba(255,255,255,0.22)', WebkitTextFillColor: '#f8fafc' }}
-              >
-                {teeth.map((tooth) => (
-                  <option
-                    key={tooth.tooth_label}
-                    value={String(tooth.tooth_label)}
-                    style={{ backgroundColor: '#020617', color: '#f8fafc' }}
-                  >
-                    Tooth {tooth.tooth_label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-              <label className="block" style={{ flex: 1, minWidth: 0 }}>
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Bone Level</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={4}
-                  value={reviewForm.bone_loss_level}
-                  disabled={session?.is_finalized}
+          <div className={`flex-1 overflow-y-auto ${isDock ? 'px-0 py-0' : 'px-5 py-5 md:px-6'}`} style={dockBodyShellStyle}>
+            {isDock ? (
+              <div style={{ padding: '18px 18px 20px' }}>
+                <div style={dockSectionTitleStyle}>Tooth</div>
+                <select
+                  value={selectedToothId}
                   onChange={(event) => {
-                    setReviewForm((prev) => ({ ...prev, bone_loss_level: Number(event.target.value || 0) }));
-                    setEditorDirty(true);
+                    setSelectedToothId(event.target.value);
+                    setEditorDirty(false);
                     setSaveState('idle');
                   }}
-                  className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] outline-none"
-                  style={{ border: '1px solid #ffffff' }}
-                />
-              </label>
-              <label className="block" style={{ flex: 1, minWidth: 0 }}>
-                <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Bone %</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step={0.01}
-                  value={reviewForm.bone_loss_pct}
-                  disabled={session?.is_finalized}
-                  onChange={(event) => {
-                    const roundedValue = roundToTwoDecimals(Number(event.target.value || 0));
-                    setReviewForm((prev) => ({ ...prev, bone_loss_pct: roundedValue }));
-                    setEditorDirty(true);
-                    setSaveState('idle');
-                  }}
-                  className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] outline-none"
-                  style={{ border: '1px solid #ffffff' }}
-                />
-              </label>
-            </div>
-
-            <label className="block">
-              <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tooth Note</span>
-              <textarea
-                ref={toothNoteTextareaRef}
-                rows={3}
-                value={reviewForm.note}
-                disabled={session?.is_finalized}
-                onChange={(event) => {
-                  updateToothNoteDraft(event.target.value);
-                  setToothNoteCaret(event.target.selectionStart ?? event.target.value.length);
-                }}
-                onClick={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
-                onKeyUp={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
-                onSelect={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Tab' && toothNoteAutocomplete?.ghostText) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    acceptToothNoteAutocomplete();
-                  }
-                }}
-                className="mt-3 w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] leading-6 text-white outline-none placeholder:text-slate-400"
-                style={{ border: '1px solid rgba(255,255,255,0.22)', caretColor: '#ffffff' }}
-                placeholder="Add a note for the selected tooth"
-              />
-              {toothNoteAutocomplete?.ghostText ? (
-                <button
-                  type="button"
-                  onClick={acceptToothNoteAutocomplete}
-                  className="mt-2 block text-left text-[13px] text-slate-500 transition-colors hover:text-slate-300"
+                  style={{ ...dockFieldStyle, marginBottom: 14 }}
                 >
-                  Suggestion: <span className="text-slate-400">{toothNoteAutocomplete.fullText}</span>
-                </button>
-              ) : null}
-            </label>
+                  {teeth.map((tooth) => (
+                    <option key={tooth.tooth_label} value={String(tooth.tooth_label)}>
+                      Tooth {tooth.tooth_label}
+                    </option>
+                  ))}
+                </select>
 
-            <label className="block">
-              <div className="mb-1 flex flex-wrap items-center justify-between gap-3">
-                <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Note</span>
-                {renderDictationControl()}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
+                  <label>
+                    <div style={dockMutedLabelStyle}>Bone Level</div>
+                    <input
+                      type="number"
+                      min={0}
+                      max={4}
+                      value={reviewForm.bone_loss_level}
+                      disabled={session?.is_finalized}
+                      onChange={(event) => {
+                        setReviewForm((prev) => ({ ...prev, bone_loss_level: Number(event.target.value || 0) }));
+                        setEditorDirty(true);
+                        setSaveState('idle');
+                      }}
+                      style={dockFieldStyle}
+                    />
+                  </label>
+                  <label>
+                    <div style={dockMutedLabelStyle}>Bone %</div>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.01}
+                      value={reviewForm.bone_loss_pct}
+                      disabled={session?.is_finalized}
+                      onChange={(event) => {
+                        const roundedValue = roundToTwoDecimals(Number(event.target.value || 0));
+                        setReviewForm((prev) => ({ ...prev, bone_loss_pct: roundedValue }));
+                        setEditorDirty(true);
+                        setSaveState('idle');
+                      }}
+                      style={dockFieldStyle}
+                    />
+                  </label>
+                </div>
+
+                <div style={dockSectionTitleStyle}>Tooth Note</div>
+                <textarea
+                  ref={toothNoteTextareaRef}
+                  rows={4}
+                  value={reviewForm.note}
+                  disabled={session?.is_finalized}
+                  onChange={(event) => {
+                    updateToothNoteDraft(event.target.value);
+                    setToothNoteCaret(event.target.selectionStart ?? event.target.value.length);
+                  }}
+                  onClick={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
+                  onKeyUp={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
+                  onSelect={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Tab' && toothNoteAutocomplete?.ghostText) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      acceptToothNoteAutocomplete();
+                    }
+                  }}
+                  style={{ ...dockFieldStyle, resize: 'none', minHeight: 98, marginBottom: 14 }}
+                  placeholder="Add a note for the selected tooth"
+                />
+
+                <div style={dockSectionTitleStyle}>Report Note</div>
+                <textarea
+                  rows={4}
+                  value={reportNoteDraft}
+                  disabled={session?.is_finalized}
+                  onChange={(event) => updateReportNoteDraft(event.target.value)}
+                  style={{ ...dockFieldStyle, resize: 'none', minHeight: 98 }}
+                  placeholder="Add a clinician note for the report draft"
+                />
               </div>
-              <textarea
-                rows={3}
-                value={reportNoteDraft}
-                disabled={session?.is_finalized}
-                onChange={(event) => updateReportNoteDraft(event.target.value)}
-                className="w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] leading-6 text-white outline-none placeholder:text-slate-400"
-                style={{ border: '1px solid rgba(255,255,255,0.22)', caretColor: '#ffffff' }}
-                placeholder="Add a clinician note for the report draft"
-              />
-            </label>
-            </div>
+            ) : (
+              <>
+                <div className="mb-4 flex items-center justify-between">
+                  <span
+                    className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+                      saveState === 'saving'
+                        ? 'bg-amber-500/15 text-amber-200'
+                        : saveState === 'saved'
+                          ? 'bg-emerald-500/15 text-emerald-200'
+                          : saveState === 'error'
+                            ? 'bg-red-500/15 text-red-200'
+                            : 'bg-slate-800 text-slate-300'
+                    }`}
+                  >
+                    {/* {saveState === 'saving' ? 'Saving' : saveState === 'saved' ? 'Saved' : saveState === 'error' ? 'Error' : 'Idle'} */}
+                  </span>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tooth</label>
+                    <select
+                      value={selectedToothId}
+                      onChange={(event) => {
+                        setSelectedToothId(event.target.value);
+                        setEditorDirty(false);
+                        setSaveState('idle');
+                      }}
+                      className="w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] text-white outline-none"
+                      style={{ backgroundColor: '#020617', color: '#f8fafc', colorScheme: 'dark', border: '1px solid rgba(255,255,255,0.22)', WebkitTextFillColor: '#f8fafc' }}
+                    >
+                      {teeth.map((tooth) => (
+                        <option
+                          key={tooth.tooth_label}
+                          value={String(tooth.tooth_label)}
+                          style={{ backgroundColor: '#020617', color: '#f8fafc' }}
+                        >
+                          Tooth {tooth.tooth_label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                    <label className="block" style={{ flex: 1, minWidth: 0 }}>
+                      <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Bone Level</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={4}
+                        value={reviewForm.bone_loss_level}
+                        disabled={session?.is_finalized}
+                        onChange={(event) => {
+                          setReviewForm((prev) => ({ ...prev, bone_loss_level: Number(event.target.value || 0) }));
+                          setEditorDirty(true);
+                          setSaveState('idle');
+                        }}
+                        className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] outline-none"
+                        style={{ border: '1px solid #ffffff' }}
+                      />
+                    </label>
+                    <label className="block" style={{ flex: 1, minWidth: 0 }}>
+                      <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Bone %</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.01}
+                        value={reviewForm.bone_loss_pct}
+                        disabled={session?.is_finalized}
+                        onChange={(event) => {
+                          const roundedValue = roundToTwoDecimals(Number(event.target.value || 0));
+                          setReviewForm((prev) => ({ ...prev, bone_loss_pct: roundedValue }));
+                          setEditorDirty(true);
+                          setSaveState('idle');
+                        }}
+                        className="w-full rounded-2xl bg-slate-900 px-3 py-2 text-[15px] outline-none"
+                        style={{ border: '1px solid #ffffff' }}
+                      />
+                    </label>
+                  </div>
+
+                  <label className="block">
+                    <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Tooth Note</span>
+                    <textarea
+                      ref={toothNoteTextareaRef}
+                      rows={3}
+                      value={reviewForm.note}
+                      disabled={session?.is_finalized}
+                      onChange={(event) => {
+                        updateToothNoteDraft(event.target.value);
+                        setToothNoteCaret(event.target.selectionStart ?? event.target.value.length);
+                      }}
+                      onClick={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
+                      onKeyUp={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
+                      onSelect={(event) => setToothNoteCaret(event.currentTarget.selectionStart ?? 0)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Tab' && toothNoteAutocomplete?.ghostText) {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          acceptToothNoteAutocomplete();
+                        }
+                      }}
+                      className="mt-3 w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] leading-6 text-white outline-none placeholder:text-slate-400"
+                      style={{ border: '1px solid rgba(255,255,255,0.22)', caretColor: '#ffffff' }}
+                      placeholder="Add a note for the selected tooth"
+                    />
+                    {toothNoteAutocomplete?.ghostText ? (
+                      <button
+                        type="button"
+                        onClick={acceptToothNoteAutocomplete}
+                        className="mt-2 block text-left text-[13px] text-slate-500 transition-colors hover:text-slate-300"
+                      >
+                        Suggestion: <span className="text-slate-400">{toothNoteAutocomplete.fullText}</span>
+                      </button>
+                    ) : null}
+                  </label>
+
+                  <label className="block">
+                    <div className="mb-1 flex flex-wrap items-center justify-between gap-3">
+                      <span className="block text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Report Note</span>
+                      {renderDictationControl()}
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={reportNoteDraft}
+                      disabled={session?.is_finalized}
+                      onChange={(event) => updateReportNoteDraft(event.target.value)}
+                      className="w-full rounded-2xl bg-slate-950 px-3 py-2 text-[15px] leading-6 text-white outline-none placeholder:text-slate-400"
+                      style={{ border: '1px solid rgba(255,255,255,0.22)', caretColor: '#ffffff' }}
+                      placeholder="Add a clinician note for the report draft"
+                    />
+                  </label>
+                </div>
+              </>
+            )}
           </div>
-          <div className={`border-t border-white/10 bg-black/10 ${isDock ? 'px-4 py-3' : 'px-5 py-4 md:px-6'}`}>
-            <div className="flex gap-2">
-              <button
-                onClick={handleResetToAi}
-                disabled={!selectedToothId || Boolean(session?.is_finalized)}
-                className="flex-1 rounded-2xl border border-slate-700 px-3 py-2 text-[15px] font-medium text-slate-100 disabled:opacity-50"
-              >
-                Reset Tooth
-              </button>
-              <button
-                onClick={handleOpenReportActions}
-                disabled={actionState !== 'idle'}
-                className="flex-1 rounded-2xl bg-cyan-500 px-3 py-2 text-[15px] font-medium text-slate-950 disabled:opacity-50"
-              >
-                {actionState === 'regenerating' ? 'Generating...' : 'Open Report Actions'}
-              </button>
+          {!isDock && (
+            <div className="border-t border-white/10 bg-black/10 px-5 py-4 md:px-6">
+              <div className="flex gap-2">
+                <button
+                  onClick={handleResetToAi}
+                  disabled={!selectedToothId || Boolean(session?.is_finalized)}
+                  className="flex-1 rounded-2xl border border-slate-700 px-3 py-2 text-[15px] font-medium text-slate-100 disabled:opacity-50"
+                >
+                  Reset Tooth
+                </button>
+                <button
+                  onClick={handleOpenReportActions}
+                  disabled={actionState !== 'idle'}
+                  className="flex-1 rounded-2xl bg-cyan-500 px-3 py-2 text-[15px] font-medium text-slate-950 disabled:opacity-50"
+                >
+                  {actionState === 'regenerating' ? 'Generating...' : 'Open Report Actions'}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       ) : (
-        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-4 py-4' : 'px-5 py-5 md:px-6'}`}>
+        <div className={`flex-1 overflow-y-auto ${isDock ? 'px-0 py-0' : 'px-5 py-5 md:px-6'}`} style={dockBodyShellStyle}>
+          {isDock ? (
+            <div style={{ padding: '18px 18px 20px' }}>
+              <div style={dockSectionTitleStyle}>Guide</div>
+              <div style={{ ...dockCardStyle, display: 'grid', gap: 10 }}>
+                {[
+                  '1. Review AI keywords and tooth findings.',
+                  '2. Edit labels and report note in Review.',
+                  '3. Open or generate the report from Report.',
+                  '4. Finalize after confirmation.',
+                ].map((step) => (
+                  <div key={step} style={{ color: '#E5E5E5', fontSize: 12 }}>
+                    {step}
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ marginTop: 18, ...dockSectionTitleStyle }}>Session Info</div>
+              <div style={{ ...dockCardStyle, display: 'grid', gap: 10 }}>
+                <div style={{ color: '#BFBFBF', fontSize: 12 }}>Session: <span style={{ color: '#E5E5E5' }}>{sessionId.slice(0, 8)}</span></div>
+                <div style={{ color: '#BFBFBF', fontSize: 12 }}>Language: <span style={{ color: '#E5E5E5' }}>{session?.language || '-'}</span></div>
+                <div style={{ color: '#BFBFBF', fontSize: 12 }}>Status: <span style={{ color: '#E5E5E5' }}>{statusLabel}</span></div>
+                <div style={{ color: '#BFBFBF', fontSize: 12 }}>Reviewed Tooth: <span style={{ color: '#E5E5E5' }}>{selectedToothId || '-'}</span></div>
+              </div>
+            </div>
+          ) : (
+          <>
           <div className="grid gap-4 md:grid-cols-2">
             <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Session Info</p>
@@ -1102,6 +1511,8 @@ export function WebReportDrawer({
               ))}
             </div>
           </div>
+          </>
+          )}
         </div>
       )}
     </div>

@@ -6,9 +6,16 @@ import {
     ZoomTool,
     WindowLevelTool,
     LengthTool,
+    BidirectionalTool,
+    AngleTool,
     ArrowAnnotateTool,
     RectangleROITool,
     EllipticalROITool,
+    CircleROITool,
+    LabelTool,
+    PlanarFreehandROITool,
+    SplineROITool,
+    LivewireContourTool,
     TrackballRotateTool,
     StackScrollTool,
     EraserTool,
@@ -29,9 +36,16 @@ export function addAndGroupTools() {
     addTool(ZoomTool);
     addTool(WindowLevelTool);
     addTool(LengthTool);
+    addTool(BidirectionalTool);
+    addTool(AngleTool);
     addTool(ArrowAnnotateTool);
     addTool(RectangleROITool);
     addTool(EllipticalROITool);
+    addTool(CircleROITool);
+    addTool(LabelTool);
+    addTool(PlanarFreehandROITool);
+    addTool(SplineROITool);
+    addTool(LivewireContourTool);
     addTool(TrackballRotateTool);
     addTool(StackScrollTool);
     addTool(EraserTool);
@@ -49,9 +63,16 @@ export function createOrGetToolGroup() {
             toolGroup.addTool(ZoomTool.toolName);
             toolGroup.addTool(WindowLevelTool.toolName);
             toolGroup.addTool(LengthTool.toolName);
+            toolGroup.addTool(BidirectionalTool.toolName);
+            toolGroup.addTool(AngleTool.toolName);
             toolGroup.addTool(ArrowAnnotateTool.toolName);
             toolGroup.addTool(RectangleROITool.toolName);
             toolGroup.addTool(EllipticalROITool.toolName);
+            toolGroup.addTool(CircleROITool.toolName);
+            toolGroup.addTool(LabelTool.toolName);
+            toolGroup.addTool(PlanarFreehandROITool.toolName);
+            toolGroup.addTool(SplineROITool.toolName);
+            toolGroup.addTool(LivewireContourTool.toolName);
             toolGroup.addTool(StackScrollTool.toolName);
             toolGroup.addTool(EraserTool.toolName);
             toolGroup.addTool(TrackballRotateTool.toolName);
@@ -113,9 +134,16 @@ export function setActiveTool(toolName: string) {
         ZoomTool.toolName,
         WindowLevelTool.toolName,
         LengthTool.toolName,
+        BidirectionalTool.toolName,
+        AngleTool.toolName,
         ArrowAnnotateTool.toolName,
         RectangleROITool.toolName,
         EllipticalROITool.toolName,
+        CircleROITool.toolName,
+        LabelTool.toolName,
+        PlanarFreehandROITool.toolName,
+        SplineROITool.toolName,
+        LivewireContourTool.toolName,
         TrackballRotateTool.toolName,
         EraserTool.toolName,
         StackScrollTool.toolName

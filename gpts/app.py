@@ -527,6 +527,12 @@ def detect_status(job_id):
             "filling_by_tooth_best": result.get("filling_by_tooth_best", {}),
             "implant_metrics": result.get("implant_metrics", {}),
             "mm_per_px": result.get("mm_per_px"),
+            "image_width": result.get("image_width"),
+            "image_height": result.get("image_height"),
+            "overlay_width": result.get("overlay_width"),
+            "overlay_height": result.get("overlay_height"),
+            "preview_width": result.get("preview_width"),
+            "preview_height": result.get("preview_height"),
             "nerve_contours": result.get("nerve_contours", []),
             "sinus_contours": result.get("sinus_contours", []),
         }

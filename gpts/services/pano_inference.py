@@ -893,10 +893,15 @@ class PanoPipeline:
             # Save a 2D preview as PNG for the frontend fallback/summary
             cv2.imwrite(str(out_dir / "preview.png"), img)
             preview_rel = to_relative(out_dir / "preview.png")
+            h, w = img.shape[:2]
             return {
                 "image_path": to_relative(image_path),
                 "overlay_path": to_relative(image_path), 
                 "preview_url": preview_rel,
+                "image_width": int(w),
+                "image_height": int(h),
+                "preview_width": int(w),
+                "preview_height": int(h),
                 "is_volume": True,
                 "teeth": [], "teeth_objects": [], "caries": [], "caries_objects": [],
                 "periapical": [], "periapical_objects": [], "missing_teeth": [],
@@ -937,6 +942,12 @@ class PanoPipeline:
             "image_path": to_relative(image_path),
             "overlay_path": to_relative(out_dir / "overlay.png"),
             "heatmap_overlay_path": to_relative(out_dir / "heatmap_overlay.png"),
+            "image_width": int(w),
+            "image_height": int(h),
+            "overlay_width": int(overlay.shape[1]),
+            "overlay_height": int(overlay.shape[0]),
+            "heatmap_width": int(risk_overlay.shape[1]),
+            "heatmap_height": int(risk_overlay.shape[0]),
             "teeth": processed_results['final_teeth_objects'],
             "teeth_objects": processed_results['final_teeth_objects'], 
             "caries": processed_results['final_caries_objects'],

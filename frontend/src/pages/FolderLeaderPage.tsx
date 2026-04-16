@@ -107,7 +107,7 @@ export default function FolderLeaderPage() {
 
     try {
       const folderStudy: FolderStudy = await materializeServerStudy(study);
-      navigate('/chart', {
+      navigate('/chart-legacy', {
         state: {
           originalFolderMode: true,
           originalFolderStudies: [folderStudy],
@@ -129,7 +129,7 @@ export default function FolderLeaderPage() {
   };
 
   const openImage = (image: ServerFolderImage) => {
-    navigate('/chart', {
+    navigate('/chart-legacy', {
       state: {
         previewUrl: image.downloadUrl,
         imageUrl: image.downloadUrl,

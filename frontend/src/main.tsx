@@ -4,7 +4,8 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import './index.css';
 import App from './App';
 
-const ChartPage = lazy(() => import('./pages/ChartPage').then((module) => ({ default: module.ChartPage })));
+const ChartPage = lazy(() => import('./pages/RenewPage').then((module) => ({ default: module.RenewPage })));
+const LegacyChartPage = lazy(() => import('./pages/ChartPage').then((module) => ({ default: module.ChartPage })));
 const TestPage = lazy(() => import('./pages/TestPage').then((module) => ({ default: module.TestPage })));
 const ReportPage = lazy(() => import('./pages/ReportPage').then((module) => ({ default: module.ReportPage })));
 const CornerstonePage = lazy(() => import('./pages/CornerstonePage').then((module) => ({ default: module.CornerstonePage })));
@@ -87,6 +88,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="/folder_leader_ver_2" element={<RouteErrorBoundary routeLabel="/folder_leader_ver_2"><FolderLeaderVer2Page /></RouteErrorBoundary>} />
           <Route path="/upload" element={<RouteErrorBoundary routeLabel="/upload"><UploadPage /></RouteErrorBoundary>} />
           <Route path="/chart" element={<RouteErrorBoundary routeLabel="/chart"><ChartPage /></RouteErrorBoundary>} />
+          <Route path="/chart-legacy" element={<RouteErrorBoundary routeLabel="/chart-legacy"><LegacyChartPage /></RouteErrorBoundary>} />
           <Route path="/chart/:sessionId" element={<RouteErrorBoundary routeLabel="/chart/:sessionId"><WebChartPage /></RouteErrorBoundary>} />
           <Route path="/renew" element={<RouteErrorBoundary routeLabel="/renew"><RenewPage /></RouteErrorBoundary>} />
           <Route path="/test" element={<RouteErrorBoundary routeLabel="/test"><TestPage /></RouteErrorBoundary>} />

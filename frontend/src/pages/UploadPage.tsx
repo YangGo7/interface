@@ -19,7 +19,7 @@ export default function UploadPage() {
     if (!selection.primaryFile) return alert('Select an image or DICOM file first.');
     if (selection.folderMode) {
       const firstSeries = folderStudies.flatMap((study) => study.series)[0];
-      navigate('/chart', {
+      navigate('/chart-legacy', {
         state: {
           originalFolderMode: true,
           originalFolderStudies: folderStudies,
@@ -33,7 +33,7 @@ export default function UploadPage() {
     setLoading(true);
     try {
       const state = await requestAsyncDetection(selection.primaryFile, folderFiles);
-      navigate('/chart', { state });
+      navigate('/chart-legacy', { state });
     } catch (error: any) {
       console.error(error);
       alert(`Error: ${error?.message || 'unknown error'}`);

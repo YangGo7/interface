@@ -1,13 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import dicomParser from 'dicom-parser';
 import O3Logo from '../assets/O3_logo_only.png';
-import { StudiesWorkspacePanel } from '../components/chart/StudiesWorkspacePanel';
+import { DentalChartLegendOverlay } from '../components/chart/DentalChartLegendOverlay';
+import { OutputCapturePanel } from '../components/chart/OutputCapturePanel';
+import { RenewReportWorkspacePanel } from '../components/chart/RenewReportWorkspacePanel';
+import { RenewStudiesDock } from '../components/chart/RenewStudiesDock';
+import { RenewToolSubmenu } from '../components/chart/RenewToolSubmenu';
+import { ReportWorkspaceControls } from '../components/chart/ReportWorkspaceControls';
+import { ToothHoverHud } from '../components/chart/ToothHoverHud';
 import { WebReportDrawer } from '../components/WebReportDrawer';
 import { createWebReportFromChart } from '../lib/webReportApi';
 import { fetchServerFolderIndex, materializeServerStudy } from '../lib/folderLeaderApi';
 import type { FolderStudy } from '../features/upload/dicomFolderStudies';
+import { requestAsyncDetection } from '../features/upload/uploadApi';
 import { clearAllAnnotations, setActiveTool as setCornerstoneActiveTool } from '../viewer/cornerstone/tools';
+import { estimateAutoWindowFromPixelData } from '../viewer/cornerstone/autoWindow';
+import { parseDicomMetadataFromDataSet, type DicomOverlayMetadata } from '../viewer/cornerstone/dicomMetadata';
+import { inspectLocalDicomFile } from '../viewer/cornerstone/dicomDebug';
+import { DicomMetadataOverlay } from '../viewer/DicomMetadataOverlay';
 
 const DESIGN_WIDTH = 1920;
 const DESIGN_HEIGHT = 1080;
@@ -16,9 +27,101 @@ const wp = (value: number) => `${value}px`;
 const hp = (value: number) => `${value}px`;
 const scalePx = (value: number) => `${value}px`;
 const relativePercent = (value: number, total: number) => `${(value / total) * 100}%`;
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const buildSmoothPath = (pts: ImagePoint[], close = false) => {
+  if (pts.length === 0) return '';
+  if (pts.length === 1) return `M ${pts[0].x} ${pts[0].y}`;
+  if (pts.length === 2) {
+    const d = `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`;
+    return close ? `${d} Z` : d;
+  }
+
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 1; i < pts.length - 1; i += 1) {
+    const midX = (pts[i].x + pts[i + 1].x) / 2;
+    const midY = (pts[i].y + pts[i + 1].y) / 2;
+    d += ` Q ${pts[i].x} ${pts[i].y} ${midX} ${midY}`;
+  }
+
+  const last = pts[pts.length - 1];
+  d += ` T ${last.x} ${last.y}`;
+  return close ? `${d} Z` : d;
+};
+const DIRECT_API_BASE =
+  ((import.meta as any)?.env?.VITE_API_BASE_URL as string | undefined)?.trim() ||
+  'http://localhost:5000';
 
 const assetPath = (relativePath: string) => encodeURI(`/imgs/${relativePath}`);
-const headerMarkerIcon = assetPath('7 7.png');
+const headerMarkerIconRelativePath = '7 7.png';
+const headerMarkerIcon = assetPath(headerMarkerIconRelativePath);
+const PANO_LENS_SIZE = 240;
+const PANO_LENS_ZOOM = 2.25;
+const PANO_LENS_EDGE_PADDING = 10;
+const AI_CONFIDENCE_THRESHOLD = 0.35;
+const PANO_DEFAULT_BRIGHTNESS = 88;
+const PANO_DEFAULT_CONTRAST = 100;
+
+const loadImageFromUrl = (src: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const nextImage = new Image();
+    nextImage.decoding = 'async';
+    nextImage.onload = () => resolve(nextImage);
+    nextImage.onerror = () => reject(new Error('Failed to load overlay image'));
+    nextImage.src = src;
+  });
+
+const withDirectApiBase = (path: string) => {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${DIRECT_API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+};
+
+const isDicomPath = (url?: string | null) => !!url && /\.(dcm|dicom)(?:$|[?#])/i.test(url);
+
+const deriveDisplayWindowFromControls = (
+  baseCenter: number,
+  baseWidth: number,
+  brightnessPercent: number,
+  contrastPercent: number
+) => {
+  const safeBaseWidth = Math.max(1, baseWidth || 1);
+  const safeContrast = Math.max(1, contrastPercent || 100);
+  const windowWidth = Math.max(1, Math.round(safeBaseWidth * (100 / safeContrast)));
+  const windowCenter = Math.round(baseCenter + ((brightnessPercent - 100) / 100) * safeBaseWidth);
+  return { windowCenter, windowWidth };
+};
+
+const deriveControlsForWindow = (
+  baseCenter: number,
+  baseWidth: number,
+  targetCenter: number,
+  targetWidth: number
+) => {
+  const safeBaseWidth = Math.max(1, baseWidth || 1);
+  const safeTargetWidth = Math.max(1, targetWidth || 1);
+  const contrastPercent = Math.max(1, Math.min(300, Math.round((safeBaseWidth / safeTargetWidth) * 100)));
+  const brightnessPercent = Math.max(0, Math.min(300, Math.round(100 + ((targetCenter - baseCenter) / safeBaseWidth) * 100)));
+  return { brightnessPercent, contrastPercent };
+};
+
+const readJsonOrThrow = async <T,>(response: Response): Promise<T> => {
+  const contentType = response.headers.get('content-type') || '';
+  const raw = await response.text();
+  const trimmed = raw.trim();
+
+  if (!contentType.includes('application/json') && trimmed.startsWith('<')) {
+    throw new Error(
+      `Expected JSON but received HTML from ${response.url || 'request'}. Check the API route/proxy.`
+    );
+  }
+
+  try {
+    return (raw ? JSON.parse(raw) : {}) as T;
+  } catch {
+    throw new Error(
+      `Failed to parse JSON from ${response.url || 'request'} (${contentType || 'unknown content-type'}).`
+    );
+  }
+};
 
 const reportButtonIcons = {
   inactive: assetPath('메인-비활성화 아이콘/report버튼 (94 94).png'),
@@ -104,11 +207,11 @@ const displayReportButtonIcons = {
 };
 
 const legendItems = [
-  { label: 'Urgent Priority', color: '#FF0037', top: 834 },
-  { label: 'Treatment Required', color: '#FCFF2A', top: 867 },
-  { label: 'Implant', color: '#003DFF', top: 900 },
-  { label: 'Missing Tooth', color: '#3F3F3F', top: 933 },
-  { label: 'Healthy Tooth', color: '#FFFFFF', top: 966 },
+  { key: 'warning', label: 'Urgent Priority', color: '#FF0037', top: 834 },
+  { key: 'requires', label: 'Treatment Required', color: '#FCFF2A', top: 867 },
+  { key: 'implant', label: 'Implant', color: '#003DFF', top: 900 },
+  { key: 'missing', label: 'Missing Tooth', color: '#3F3F3F', top: 933 },
+  { key: 'healthy', label: 'Healthy Tooth', color: '#FFFFFF', top: 966 },
 ] as const;
 
 const upperSizes = ['23 79', '20 75', '22 82', '25 74', '25 67', '38 58', '36 54', '35 49'];
@@ -121,6 +224,26 @@ const upperTeeth = [18, 17, 16, 15, 14, 13, 12, 11] as const;
 const upperRightTeeth = [21, 22, 23, 24, 25, 26, 27, 28] as const;
 const lowerTeeth = [48, 47, 46, 45, 44, 43, 42, 41] as const;
 const lowerRightTeeth = [31, 32, 33, 34, 35, 36, 37, 38] as const;
+const odontogramTeeth = [
+  ...upperTeeth,
+  ...upperRightTeeth,
+  ...lowerTeeth,
+  ...lowerRightTeeth,
+] as const;
+type NumberingSystem = 'fdi' | 'univ';
+const UNIVERSAL_TOOTH_MAP: Record<number, number> = {
+  18: 1, 17: 2, 16: 3, 15: 4, 14: 5, 13: 6, 12: 7, 11: 8,
+  21: 9, 22: 10, 23: 11, 24: 12, 25: 13, 26: 14, 27: 15, 28: 16,
+  38: 17, 37: 18, 36: 19, 35: 20, 34: 21, 33: 22, 32: 23, 31: 24,
+  41: 25, 42: 26, 43: 27, 44: 28, 45: 29, 46: 30, 47: 31, 48: 32,
+};
+
+const formatToothNumber = (toothFdi: string | number, numberingSystem: NumberingSystem) => {
+  const numeric = Number(toothFdi);
+  if (numberingSystem !== 'univ' || !Number.isFinite(numeric)) return String(toothFdi);
+  return String(UNIVERSAL_TOOTH_MAP[numeric] || numeric);
+};
+
 const outerToInnerOffsets = [390.5, 332.5, 274.5, 216.5, 166.5, 116.5, 66.5, 22.5] as const;
 const innerToOuterOffsets = [22.5, 66.5, 116.5, 166.5, 216.5, 274.5, 332.5, 390.5] as const;
 const upperBaseline = 935;
@@ -135,6 +258,387 @@ const chartLegendHeight = 151;
 const RAIL_ICON_WIDTH = 61;
 const RAIL_ICON_HEIGHT = 68;
 const TOOL_ICON_SIZE = 43;
+
+const buildLowerContourRuns = (contour: any[], lowerRatio = 0.25) => {
+  if (!Array.isArray(contour) || contour.length < 3) return [];
+
+  const points = contour
+    .map((pt: any) =>
+      Array.isArray(pt) && pt.length >= 2
+        ? { x: Number(pt[0]), y: Number(pt[1]) }
+        : null
+    )
+    .filter((pt): pt is { x: number; y: number } => pt !== null && Number.isFinite(pt.x) && Number.isFinite(pt.y));
+
+  if (points.length < 3) return [];
+
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  points.forEach((pt) => {
+    if (pt.y < minY) minY = pt.y;
+    if (pt.y > maxY) maxY = pt.y;
+  });
+
+  const height = maxY - minY;
+  if (height <= 0) return [];
+
+  const cutoffY = maxY - height * lowerRatio;
+  const runs: Array<Array<{ x: number; y: number }>> = [];
+  let currentRun: Array<{ x: number; y: number }> = [];
+
+  points.forEach((pt) => {
+    if (pt.y >= cutoffY) {
+      currentRun.push(pt);
+      return;
+    }
+
+    if (currentRun.length >= 2) runs.push(currentRun);
+    currentRun = [];
+  });
+
+  if (currentRun.length >= 2) runs.push(currentRun);
+
+  if (runs.length > 1) {
+    const first = runs[0];
+    const last = runs[runs.length - 1];
+    if (first[0] && last[last.length - 1] && points[0].y >= cutoffY && points[points.length - 1].y >= cutoffY) {
+      runs[0] = [...last, ...first];
+      runs.pop();
+    }
+  }
+
+  return runs;
+};
+
+const warmPastelPalette = [
+  { fill: 'rgba(255, 216, 194, 0.26)', stroke: 'rgba(255, 182, 151, 0.30)' },
+  { fill: 'rgba(255, 226, 203, 0.26)', stroke: 'rgba(241, 174, 129, 0.30)' },
+  { fill: 'rgba(255, 212, 209, 0.26)', stroke: 'rgba(234, 153, 150, 0.30)' },
+  { fill: 'rgba(246, 224, 198, 0.26)', stroke: 'rgba(221, 171, 118, 0.30)' },
+  { fill: 'rgba(255, 229, 214, 0.26)', stroke: 'rgba(232, 163, 121, 0.30)' },
+  { fill: 'rgba(255, 239, 221, 0.26)', stroke: 'rgba(227, 180, 126, 0.30)' },
+] as const;
+
+type ImagePoint = { x: number; y: number };
+
+type ToothGeometry = {
+  fdi: string;
+  contour: ImagePoint[];
+  centroid: ImagePoint;
+  bounds: { x1: number; y1: number; x2: number; y2: number };
+};
+
+type ToothCondition = 'healthy' | 'requires' | 'warning' | 'implant' | 'missing';
+
+type NormalizedDetection = {
+  id: string;
+  type: string;
+  label: string;
+  confidence: number;
+  toothFdi: string | null;
+  contour: ImagePoint[] | null;
+  bounds: { x1: number; y1: number; x2: number; y2: number };
+  center: ImagePoint;
+  source: any;
+};
+
+type ToothHoverAnchor = {
+  toothFdi: string;
+  x: number;
+  y: number;
+};
+
+type ToothHoverPanelData = {
+  toothFdi: string;
+  title: string;
+  kind: 'finding' | 'implant' | 'planning';
+  status: string;
+  pblPct?: number | null;
+  level?: number | string | null;
+  cariesProb?: number | null;
+  periapicalProb?: number | null;
+  primaryLabel?: string | null;
+  primaryProb?: number | null;
+  diameterMm?: number | null;
+  lengthMm?: number | null;
+  gapMm?: number | null;
+  centerToNerveMm?: number | null;
+};
+
+const toImagePoint = (value: any): ImagePoint | null => {
+  if (Array.isArray(value) && value.length >= 2) {
+    const x = Number(value[0]);
+    const y = Number(value[1]);
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  }
+
+  if (value && typeof value === 'object') {
+    const x = Number(value.x ?? value.cx ?? value.left);
+    const y = Number(value.y ?? value.cy ?? value.top);
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  }
+
+  return null;
+};
+
+const normalizeContourPoints = (value: any): ImagePoint[] => {
+  if (!Array.isArray(value)) return [];
+  return value.map(toImagePoint).filter((point): point is ImagePoint => point !== null);
+};
+
+const boundsFromPoints = (points: ImagePoint[]) => {
+  if (!points.length) return null;
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  return {
+    x1: Math.min(...xs),
+    y1: Math.min(...ys),
+    x2: Math.max(...xs),
+    y2: Math.max(...ys),
+  };
+};
+
+const centroidFromPoints = (points: ImagePoint[]) => {
+  if (!points.length) return { x: 0, y: 0 };
+  const total = points.reduce(
+    (acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }),
+    { x: 0, y: 0 }
+  );
+  return { x: total.x / points.length, y: total.y / points.length };
+};
+
+const centerFromBounds = (bounds: { x1: number; y1: number; x2: number; y2: number }) => ({
+  x: (bounds.x1 + bounds.x2) / 2,
+  y: (bounds.y1 + bounds.y2) / 2,
+});
+
+const estimateImplantMetricsFromContour = (contour: any, mmPerPx: number) => {
+  if (!Array.isArray(contour) || contour.length < 3 || !Number.isFinite(mmPerPx) || mmPerPx <= 0) {
+    return { diameterMm: null, lengthMm: null };
+  }
+
+  const points = contour
+    .map((pt: any) => Array.isArray(pt) && pt.length >= 2 ? [Number(pt[0]), Number(pt[1])] : null)
+    .filter((pt: number[] | null): pt is number[] => {
+      if (!pt) return false;
+      return Number.isFinite(pt[0]) && Number.isFinite(pt[1]);
+    });
+
+  if (points.length < 3) {
+    return { diameterMm: null, lengthMm: null };
+  }
+
+  const meanX = points.reduce((sum, [x]) => sum + x, 0) / points.length;
+  const meanY = points.reduce((sum, [, y]) => sum + y, 0) / points.length;
+  let xx = 0;
+  let xy = 0;
+  let yy = 0;
+  points.forEach(([x, y]) => {
+    const dx = x - meanX;
+    const dy = y - meanY;
+    xx += dx * dx;
+    xy += dx * dy;
+    yy += dy * dy;
+  });
+
+  const trace = xx + yy;
+  const det = xx * yy - xy * xy;
+  const eigen = trace / 2 + Math.sqrt(Math.max(0, (trace * trace) / 4 - det));
+  let axisX = xy;
+  let axisY = eigen - xx;
+  if (Math.abs(axisX) < 1e-6 && Math.abs(axisY) < 1e-6) {
+    axisX = xx >= yy ? 1 : 0;
+    axisY = xx >= yy ? 0 : 1;
+  }
+  const axisNorm = Math.hypot(axisX, axisY) || 1;
+  const ux = axisX / axisNorm;
+  const uy = axisY / axisNorm;
+  const vx = -uy;
+  const vy = ux;
+
+  const axisProjections = points.map(([x, y]) => x * ux + y * uy);
+  const perpProjections = points.map(([x, y]) => x * vx + y * vy);
+  const lengthPx = Math.max(...axisProjections) - Math.min(...axisProjections);
+  const diameterPx = Math.max(...perpProjections) - Math.min(...perpProjections);
+
+  if (lengthPx <= 0 || diameterPx <= 0) {
+    return { diameterMm: null, lengthMm: null };
+  }
+
+  return {
+    diameterMm: diameterPx * mmPerPx,
+    lengthMm: lengthPx * mmPerPx,
+  };
+};
+
+const normalizeBounds = (value: any) => {
+  if (Array.isArray(value) && value.length >= 4) {
+    const [x1, y1, x2, y2] = value.map(Number);
+    if ([x1, y1, x2, y2].every(Number.isFinite)) {
+      return {
+        x1: Math.min(x1, x2),
+        y1: Math.min(y1, y2),
+        x2: Math.max(x1, x2),
+        y2: Math.max(y1, y2),
+      };
+    }
+  }
+
+  if (value && typeof value === 'object') {
+    const x = Number(value.x ?? value.left);
+    const y = Number(value.y ?? value.top);
+    const width = Number(value.width ?? value.w);
+    const height = Number(value.height ?? value.h);
+    if ([x, y, width, height].every(Number.isFinite)) {
+      return { x1: x, y1: y, x2: x + width, y2: y + height };
+    }
+  }
+
+  return null;
+};
+
+const flattenContourPoints = (contours: any): ImagePoint[] =>
+  (Array.isArray(contours) ? contours : []).flatMap((contour: any) => normalizeContourPoints(contour));
+
+const distanceBetweenPoints = (a: ImagePoint, b: ImagePoint) => Math.hypot(a.x - b.x, a.y - b.y);
+
+const pointInPolygon = (point: ImagePoint, polygon: ImagePoint[]) => {
+  let isInside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersect =
+      yi > point.y !== yj > point.y &&
+      point.x < ((xj - xi) * (point.y - yi)) / Math.max(yj - yi, 1e-6) + xi;
+    if (intersect) isInside = !isInside;
+  }
+  return isInside;
+};
+
+const squaredDistance = (a: ImagePoint, b: ImagePoint) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+
+const boundsArea = (bounds: { x1: number; y1: number; x2: number; y2: number }) =>
+  Math.max(0, bounds.x2 - bounds.x1) * Math.max(0, bounds.y2 - bounds.y1);
+
+const intersectionArea = (
+  a: { x1: number; y1: number; x2: number; y2: number },
+  b: { x1: number; y1: number; x2: number; y2: number }
+) => {
+  const width = Math.max(0, Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1));
+  const height = Math.max(0, Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1));
+  return width * height;
+};
+
+const distancePointToSegment = (point: ImagePoint, start: ImagePoint, end: ImagePoint) => {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return distanceBetweenPoints(point, start);
+  const t = clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / (dx * dx + dy * dy), 0, 1);
+  const projection = { x: start.x + t * dx, y: start.y + t * dy };
+  return distanceBetweenPoints(point, projection);
+};
+
+const getToothLabel = (value: any) => {
+  const raw = String(
+    value?.assigned_tooth ??
+      value?.tooth_label ??
+      value?.tooth ??
+      value?.fdi ??
+      value?.label ??
+      ''
+  ).trim();
+  return /^\d{2}$/.test(raw) ? raw : null;
+};
+
+const getDetectionConfidence = (value: any) => {
+  const confidence = Number(value?.conf ?? value?.confidence ?? value?.score ?? value?.probability ?? 0);
+  return Number.isFinite(confidence) ? confidence : 0;
+};
+
+const getBestConfidence = (bestMap: any, rawMap: any, key: string) => {
+  const item = bestMap?.[key] || rawMap?.[key];
+  const confidence = Number(item?.conf ?? item?.confidence);
+  return Number.isFinite(confidence) ? confidence : null;
+};
+
+const readOverlayDimension = (source: any, keys: string[]) => {
+  for (const key of keys) {
+    const value = Number(source?.[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return null;
+};
+
+const getToothId = (value: any) => {
+  if (typeof value === 'number' || typeof value === 'string') {
+    const raw = String(value).trim();
+    return /^\d{2}$/.test(raw) ? raw : null;
+  }
+
+  if (value && typeof value === 'object') {
+    return getToothLabel(value);
+  }
+
+  return null;
+};
+
+const inferToothFdi = (
+  explicitTooth: string | null,
+  center: ImagePoint,
+  toothGeometries: ToothGeometry[],
+  contour?: ImagePoint[] | null,
+  bounds?: { x1: number; y1: number; x2: number; y2: number } | null
+) => {
+  if (explicitTooth) return explicitTooth;
+  if (!toothGeometries.length) return null;
+
+  if (contour && contour.length >= 3) {
+    const bestOverlapTooth = toothGeometries.reduce(
+      (best, tooth) => {
+        const insideCount = contour.reduce((count, point) => count + (pointInPolygon(point, tooth.contour) ? 1 : 0), 0);
+        const overlapRatio =
+          bounds && tooth.bounds
+            ? intersectionArea(bounds, tooth.bounds) / Math.max(1, boundsArea(bounds))
+            : 0;
+        if (insideCount <= 0 && overlapRatio <= 0) return best;
+        const score = insideCount * 1000 + overlapRatio * 100 - squaredDistance(center, tooth.centroid) * 0.0001;
+        if (!best || score > best.score) {
+          return { tooth, score };
+        }
+        return best;
+      },
+      null as { tooth: ToothGeometry; score: number } | null
+    );
+
+    if (bestOverlapTooth) return bestOverlapTooth.tooth.fdi;
+  }
+
+  const containingTooth = toothGeometries.find((tooth) => pointInPolygon(center, tooth.contour));
+  if (containingTooth) return containingTooth.fdi;
+
+  if (bounds) {
+    const bestBoundsTooth = toothGeometries.reduce(
+      (best, tooth) => {
+        const overlap = intersectionArea(bounds, tooth.bounds);
+        if (overlap <= 0) return best;
+        if (!best || overlap > best.overlap) {
+          return { tooth, overlap };
+        }
+        return best;
+      },
+      null as { tooth: ToothGeometry; overlap: number } | null
+    );
+
+    if (bestBoundsTooth) return bestBoundsTooth.tooth.fdi;
+  }
+
+  return toothGeometries.reduce((closest, tooth) => {
+    if (!closest) return tooth;
+    return squaredDistance(center, tooth.centroid) < squaredDistance(center, closest.centroid) ? tooth : closest;
+  }, null as ToothGeometry | null)?.fdi ?? null;
+};
 
 type ToolbarKey =
   | 'pointer'
@@ -153,6 +657,33 @@ type ToolbarKey =
   | 'output-save'
   | 'task-original'
   | 'task-heatmap';
+
+type MeasureMenuKey = 'measure' | 'annotate';
+
+type MeasureSubtoolKey =
+  | 'length'
+  | 'bidirectional'
+  | 'angle'
+  | 'text'
+  | 'arrow'
+  | 'ellipse'
+  | 'rect'
+  | 'circle'
+  | 'roi-free'
+  | 'spline-roi'
+  | 'livewire';
+
+type MeasureShape = {
+  type: MeasureSubtoolKey;
+  points: ImagePoint[];
+  text?: string;
+};
+
+type OutputCaptureItem = {
+  id: string;
+  dataUrl: string;
+  createdAt: number;
+};
 
 function getToothAsset(tooth: number) {
   const index = (tooth % 10) - 1;
@@ -182,6 +713,9 @@ function ToolIcon({
   return (
     <button
       type="button"
+      onPointerDown={(event) => {
+        event.stopPropagation();
+      }}
       onClick={onClick}
       aria-pressed={active}
       aria-label={label}
@@ -241,43 +775,106 @@ function ToothImage({
   );
 }
 
-function getHealthToothAsset(arch: 'U' | 'L', order: number) {
+function getToothStatusAsset(arch: 'U' | 'L', order: number, status: ToothCondition) {
   const size = arch === 'U' ? upperSizes[order - 1] : lowerSizes[order - 1];
+  if (status === 'implant') {
+    return assetPath('teeth/implant (003dff)/28 54.png');
+  }
+  if (status === 'warning') {
+    return assetPath(`teeth/warning (ff0037)/${arch}-${order} (${size})_2.png`);
+  }
+  if (status === 'requires') {
+    return assetPath(`teeth/notice (fcff2a)/${arch}-${order} (${size})_3.png`);
+  }
+  if (status === 'missing' && arch === 'U') {
+    return assetPath(`teeth/missing (3f3f3f)/U-${order}.png`);
+  }
+  if (status === 'missing' && arch === 'L') {
+    return assetPath(`teeth/missing (3f3f3f)/${arch}-${order} (${size})@4x.png`);
+  }
   return assetPath(`teeth/health(ffffff)/${arch}-${order} (${size})_4.png`);
 }
 
 function ToothSlotImage({
   arch,
   order,
+  toothFdi,
+  status,
   left,
   top,
   width,
   height,
   flipX = false,
+  active = false,
+  hasDetection = false,
+  dimmed = false,
+  onClick,
+  onHoverChange,
 }: {
   arch: 'U' | 'L';
   order: number;
+  toothFdi: string;
+  status: ToothCondition;
   left: number;
   top: number;
   width: number;
   height: number;
   flipX?: boolean;
+  active?: boolean;
+  hasDetection?: boolean;
+  dimmed?: boolean;
+  onClick?: (toothFdi: string) => void;
+  onHoverChange?: (value: ToothHoverAnchor | null) => void;
 }) {
+  const imageSrc = getToothStatusAsset(arch, order, status);
+  const glowFilter = active
+    ? 'drop-shadow(0 0 8px rgba(0, 192, 243, 0.95)) drop-shadow(0 0 14px rgba(0, 192, 243, 0.65))'
+    : hasDetection
+      ? 'drop-shadow(0 0 6px rgba(255, 182, 0, 0.45))'
+      : 'none';
   return (
-    <img
-      src={getHealthToothAsset(arch, order)}
-      alt=""
-      draggable={false}
+    <button
+      type="button"
+      onClick={() => onClick?.(toothFdi)}
+      onMouseEnter={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        onHoverChange?.({
+          toothFdi,
+          x: rect.left + rect.width / 2,
+          y: rect.top - 10,
+        });
+      }}
+      onMouseLeave={() => onHoverChange?.(null)}
+      aria-pressed={active}
+      aria-label={`Tooth ${toothFdi}`}
       style={{
         width: wp(width),
         height: hp(height),
         left: wp(left),
         top: hp(top),
         position: 'absolute',
-        transform: flipX ? `translate(${width}px, 0) scaleX(-1)` : undefined,
-        transformOrigin: flipX ? 'top left' : undefined,
+        background: 'transparent',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        zIndex: active ? 15 : 12,
+        opacity: dimmed ? 0.36 : 1,
       }}
-    />
+    >
+      <img
+        src={imageSrc}
+        alt=""
+        draggable={false}
+        style={{
+          width: '100%',
+          height: '100%',
+          display: 'block',
+          transform: flipX ? `translate(${width}px, 0) scaleX(-1)` : undefined,
+          transformOrigin: flipX ? 'top left' : undefined,
+          filter: glowFilter,
+        }}
+      />
+    </button>
   );
 }
 
@@ -306,7 +903,9 @@ function useViewportSize() {
 export function RenewPage() {
   const location = useLocation();
   const locationState = (location.state as any) || {};
-  const result = locationState?.result;
+  const [result, setResult] = useState<any>(locationState?.result || null);
+  const [jobId, setJobId] = useState<string | null>(locationState?.jobId || null);
+  const [isProcessing, setIsProcessing] = useState(!locationState?.result && !!locationState?.jobId);
   const [activeFolderStudies, setActiveFolderStudies] = useState<FolderStudy[]>(() => {
     const raw = (locationState.originalFolderStudies as FolderStudy[] | undefined) || [];
     const seen = new Set<string>();
@@ -322,16 +921,96 @@ export function RenewPage() {
   const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'report' | 'none'>('studies');
   const [selectedToolbarButton, setSelectedToolbarButton] = useState<ToolbarKey>('pointer');
   const [flashToolbarButton, setFlashToolbarButton] = useState<ToolbarKey | null>(null);
+  const [activeMeasureSubtool, setActiveMeasureSubtool] = useState<MeasureSubtoolKey>('length');
+  const [toolSubmenu, setToolSubmenu] = useState<{
+    menu: MeasureMenuKey;
+    left: number;
+    top: number;
+  } | null>(null);
+  const [measureShapes, setMeasureShapes] = useState<MeasureShape[]>([]);
+  const [pendingMeasurePoints, setPendingMeasurePoints] = useState<ImagePoint[]>([]);
+  const [measurePreviewPoint, setMeasurePreviewPoint] = useState<ImagePoint | null>(null);
+  const [capturedOutputs, setCapturedOutputs] = useState<OutputCaptureItem[]>([]);
+  const [isCapturePanelCollapsed, setIsCapturePanelCollapsed] = useState(true);
   const [reportSessionId, setReportSessionId] = useState<string | null>(locationState?.reportSessionId || null);
   const [reportDrawerOpen, setReportDrawerOpen] = useState(false);
   const [reportStartState, setReportStartState] = useState<'idle' | 'creating'>('idle');
   const [reportError, setReportError] = useState<string | null>(null);
   const [inverted, setInverted] = useState(false);
   const [flipped, setFlipped] = useState(false);
-  const [viewMode, setViewMode] = useState<'original' | 'heatmap'>('original');
+  const [numberingSystem, setNumberingSystem] = useState<NumberingSystem>('fdi');
+  const [viewMode, setViewMode] = useState<'original' | 'overlay' | 'heatmap'>(() => {
+    const initialResult = locationState?.result;
+    const hasInitialStructuredOverlay = Boolean(
+      (Array.isArray(initialResult?.sinus_contours) && initialResult.sinus_contours.length > 0) ||
+      (Array.isArray(initialResult?.nerve_contours) && initialResult.nerve_contours.length > 0) ||
+      (Array.isArray(initialResult?.teeth) && initialResult.teeth.length > 0) ||
+      (Array.isArray(initialResult?.teeth_objects) && initialResult.teeth_objects.length > 0)
+    );
+    return hasInitialStructuredOverlay ? 'overlay' : 'original';
+  });
+  const [panoZoom, setPanoZoom] = useState(1);
+  const [panoOffset, setPanoOffset] = useState({ x: 0, y: 0 });
+  const [panoBrightness, setPanoBrightness] = useState(PANO_DEFAULT_BRIGHTNESS);
+  const [panoContrast, setPanoContrast] = useState(PANO_DEFAULT_CONTRAST);
+  const [panoDisplaySize, setPanoDisplaySize] = useState({ width: 0, height: 0 });
+  const [panoNaturalSize, setPanoNaturalSize] = useState({ width: 0, height: 0 });
+  const [panoMagnifier, setPanoMagnifier] = useState({
+    visible: false,
+    clientX: 0,
+    clientY: 0,
+    viewerX: 0,
+    viewerY: 0,
+    imgX: 0,
+    imgY: 0,
+  });
+  const [activeTooth, setActiveTooth] = useState<string | null>(null);
+  const [activeDetectionId, setActiveDetectionId] = useState<string | null>(null);
+  const [hoveredToothAnchor, setHoveredToothAnchor] = useState<ToothHoverAnchor | null>(null);
+  const [activeLegendFilter, setActiveLegendFilter] = useState<ToothCondition | null>(null);
   const [selectedFolderSeriesId, setSelectedFolderSeriesId] = useState<string | null>(
     locationState.folderSelectedSeriesId || activeFolderStudies.flatMap((study) => study.series)[0]?.id || null
   );
+  const originalFolderMode = Boolean(locationState.originalFolderMode);
+  const originalFile = locationState.originalFile as File | undefined;
+  const selectedFolderSeries = useMemo(
+    () => activeFolderStudies.flatMap((study) => study.series).find((series) => series.id === selectedFolderSeriesId) || null,
+    [activeFolderStudies, selectedFolderSeriesId]
+  );
+  const originalIsDicom = Boolean(
+    (originalFolderMode && selectedFolderSeries) ||
+    locationState.originalIsDicom ||
+    (originalFile && isDicomPath(originalFile.name)) ||
+    isDicomPath(result?.image_url)
+  );
+  const panoViewportRef = useRef<HTMLDivElement | null>(null);
+  const panoImageRef = useRef<HTMLImageElement | null>(null);
+  const panoDisplayRef = useRef<HTMLDivElement | null>(null);
+  const panoLensCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const panoOverlaySvgRef = useRef<SVGSVGElement | null>(null);
+  const panoMeasureSvgRef = useRef<SVGSVGElement | null>(null);
+  const autoAnalyzeTriggeredRef = useRef(false);
+  const pollStartedAtRef = useRef<number | null>(null);
+  const status404CountRef = useRef(0);
+  const autoWindowAppliedRef = useRef<string | null>(null);
+  const previousSelectedFolderSeriesIdRef = useRef<string | null>(selectedFolderSeriesId);
+  const panoDragRef = useRef<{
+    mode: 'pan' | 'wlww' | null;
+    startX: number;
+    startY: number;
+    startOffsetX: number;
+    startOffsetY: number;
+    startBrightness: number;
+    startContrast: number;
+  }>({
+    mode: null,
+    startX: 0,
+    startY: 0,
+    startOffsetX: 0,
+    startOffsetY: 0,
+    startBrightness: 100,
+    startContrast: 100,
+  });
   const viewport = useViewportSize();
   const cacheBuster = useMemo(() => Date.now(), []);
   const scale = Math.min(viewport.width / DESIGN_WIDTH, viewport.height / DESIGN_HEIGHT);
@@ -344,11 +1023,11 @@ export function RenewPage() {
   const viewerWidth = 1676 + viewerExtraWidth;
   const topBarWidth = viewerWidth;
   const rightEdge = viewerLeft + viewerWidth;
-  const chartSectionLeft = 239;
+  const chartSectionLeft = 238;
   const chartSectionWidth = rightEdge - chartSectionLeft;
   const chartLegendDividerX = chartSectionLeft + chartSectionWidth * 0.15;
   const chartLegendWidth = chartLegendDividerX - chartLegendLeft - 28;
-  const reportLeft = rightEdge - 106;
+  const reportLeft = rightEdge - 95;
   const odontoFrameLeft = chartLegendDividerX + 36;
   const odontoFrameRight = reportLeft - 58;
   const chartOdontoCenterX = (odontoFrameLeft + odontoFrameRight) / 2;
@@ -373,7 +1052,7 @@ export function RenewPage() {
   const lLabelLeft = rightEdge - 29;
   const chartHeaderHideLeft = rightEdge - 28;
   const panoChartToggleLeft = viewerLeft + 8;
-  const panoChartToggleTop = 1044;
+  const panoChartToggleTop = 49 + 1019 - 18;
   const panoLabelTop = Math.round(49 + panoFrameHeight / 2 - 7);
   const isChartBodyVisible = isChartVisible;
   const panoBodyTop = 68;
@@ -382,19 +1061,130 @@ export function RenewPage() {
   const studiesPanelLeft = viewerLeft + 16;
   const studiesPanelTop = 74;
   const studiesPanelWidth = 252;
-  const studiesPanelHeight = 356;
+  const studiesPanelHeight = Math.max(420, panoFrameHeight - 36);
+  const hasHeatmapAsset = Boolean(result?.heatmap_overlay_url);
+  const [dicomHudMetadata, setDicomHudMetadata] = useState<DicomOverlayMetadata | null>(null);
+  const [dicomPreviewDataUrl, setDicomPreviewDataUrl] = useState<string | null>(null);
+  const [dicomAutoWindow, setDicomAutoWindow] = useState<{ level: number; width: number } | null>(null);
+  const hasStructuredOverlayData = Boolean(
+    (Array.isArray(result?.sinus_contours) && result.sinus_contours.length > 0) ||
+    (Array.isArray(result?.nerve_contours) && result.nerve_contours.length > 0) ||
+    (Array.isArray(result?.teeth) && result.teeth.length > 0) ||
+    (Array.isArray(result?.teeth_objects) && result.teeth_objects.length > 0)
+  );
+  const dicomHudFile =
+    originalFolderMode && selectedFolderSeries?.files?.length
+      ? selectedFolderSeries.files[0]
+      : originalFile && originalIsDicom
+        ? originalFile
+        : null;
   const getUrlWithCacheBuster = (url?: string | null) => {
     if (!url) return null;
     if (url.startsWith('blob:') || url.startsWith('data:')) return url;
     return `${url}${url.includes('?') ? '&' : '?'}t=${cacheBuster}`;
   };
-  const originalPanoUrl = getUrlWithCacheBuster(
-    result?.preview_url || locationState.previewUrl || result?.image_url || locationState.imageUrl || null
+  const originalRasterUrl = getUrlWithCacheBuster(
+    dicomPreviewDataUrl || result?.preview_url || locationState.previewUrl || locationState.imageUrl || null
   );
+  const originalAnalysisUrl = getUrlWithCacheBuster(result?.image_url || locationState.imageUrl || null);
+  const originalPanoUrl = originalIsDicom
+    ? (originalRasterUrl || originalAnalysisUrl)
+    : (originalAnalysisUrl || originalRasterUrl);
   const heatmapPanoUrl = getUrlWithCacheBuster(
-    result?.heatmap_overlay_url || result?.overlay_url || result?.preview_url || locationState.previewUrl || null
+    result?.heatmap_overlay_url || result?.overlay_url || result?.image_url || result?.preview_url || locationState.previewUrl || null
   );
-  const panoViewerUrl = viewMode === 'heatmap' ? heatmapPanoUrl || originalPanoUrl : originalPanoUrl;
+  const panoUsesPreviewRaster = Boolean(
+    originalIsDicom &&
+    originalRasterUrl &&
+    originalPanoUrl &&
+    originalRasterUrl === originalPanoUrl
+  );
+  const panoViewerUrl = originalPanoUrl || heatmapPanoUrl;
+  const effectiveScale = Math.max(
+    ((panoDisplaySize.width || panoBodyWidth || 1) / Math.max(1, panoNaturalSize.width || panoBodyWidth || 1)) * panoZoom,
+    0.001
+  );
+  const fitPanoImage = () => {
+    const img = panoImageRef.current;
+    if (!img?.naturalWidth || !img?.naturalHeight) return;
+    setPanoNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+    const fitScale = Math.min(panoBodyWidth / img.naturalWidth, panoBodyHeight / img.naturalHeight);
+    setPanoDisplaySize({
+      width: img.naturalWidth * fitScale,
+      height: img.naturalHeight * fitScale,
+    });
+  };
+
+  const drawSvgOverlayOnContext = async (
+    context: CanvasRenderingContext2D,
+    svgElement: SVGSVGElement | null,
+    drawLeft: number,
+    drawTop: number,
+    drawWidth: number,
+    drawHeight: number,
+    useCenteredTransform = false
+  ) => {
+    if (!svgElement || !overlayCoordinateSize.width || !overlayCoordinateSize.height) return;
+    const svgClone = svgElement.cloneNode(true) as SVGSVGElement;
+    svgClone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    svgClone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+    svgClone.setAttribute('width', String(overlayCoordinateSize.width));
+    svgClone.setAttribute('height', String(overlayCoordinateSize.height));
+    svgClone.setAttribute('viewBox', `0 0 ${overlayCoordinateSize.width} ${overlayCoordinateSize.height}`);
+    const serialized = new XMLSerializer().serializeToString(svgClone);
+    const svgBlob = new Blob([`<?xml version="1.0" encoding="UTF-8"?>${serialized}`], { type: 'image/svg+xml;charset=utf-8' });
+    const svgUrl = URL.createObjectURL(svgBlob);
+    try {
+      const overlayImage = await loadImageFromUrl(svgUrl);
+      if (useCenteredTransform) {
+        context.drawImage(overlayImage, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      } else {
+        context.drawImage(overlayImage, drawLeft, drawTop, drawWidth, drawHeight);
+      }
+    } finally {
+      URL.revokeObjectURL(svgUrl);
+    }
+  };
+
+  const buildPanoCaptureCanvas = async () => {
+    const img = panoImageRef.current;
+    if (!img || !panoDisplaySize.width || !panoDisplaySize.height) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(panoBodyWidth));
+    canvas.height = Math.max(1, Math.round(panoBodyHeight));
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+
+    context.fillStyle = '#000000';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.save();
+    context.filter = `invert(${inverted ? 1 : 0}) brightness(${panoBrightness}%) contrast(${panoContrast}%)`;
+
+    const drawWidth = panoDisplaySize.width * panoZoom;
+    const drawHeight = panoDisplaySize.height * panoZoom;
+    const drawLeft = (canvas.width - drawWidth) / 2 + panoOffset.x;
+    const drawTop = (canvas.height - drawHeight) / 2 + panoOffset.y;
+
+    if (flipped) {
+      context.translate(drawLeft + drawWidth / 2, drawTop + drawHeight / 2);
+      context.scale(-1, 1);
+      context.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      if (viewMode !== 'original') {
+        await drawSvgOverlayOnContext(context, panoOverlaySvgRef.current, drawLeft, drawTop, drawWidth, drawHeight, true);
+      }
+      await drawSvgOverlayOnContext(context, panoMeasureSvgRef.current, drawLeft, drawTop, drawWidth, drawHeight, true);
+    } else {
+      context.drawImage(img, drawLeft, drawTop, drawWidth, drawHeight);
+      if (viewMode !== 'original') {
+        await drawSvgOverlayOnContext(context, panoOverlaySvgRef.current, drawLeft, drawTop, drawWidth, drawHeight);
+      }
+      await drawSvgOverlayOnContext(context, panoMeasureSvgRef.current, drawLeft, drawTop, drawWidth, drawHeight);
+    }
+    context.restore();
+    return canvas;
+  };
+
   const combinedStudies = useMemo(() => {
     const activeIds = new Set(activeFolderStudies.map((study) => study.id));
     const activeFingerprints = new Set(activeFolderStudies.map((study) => `${study.label}::${study.description}::${study.patientId}`));
@@ -412,6 +1202,1177 @@ export function RenewPage() {
       return true;
     });
   }, [activeFolderStudies, serverStudies]);
+
+  const toothGeometries = useMemo(() => {
+    const toothList = Array.isArray(result?.teeth)
+      ? result.teeth
+      : Array.isArray(result?.teeth_objects)
+        ? result.teeth_objects
+        : [];
+
+    return toothList
+      .map((tooth: any) => {
+        const fdi = getToothLabel(tooth);
+        const contour = normalizeContourPoints(tooth?.contour);
+        if (!fdi || contour.length < 3) return null;
+        const bounds = boundsFromPoints(contour);
+        if (!bounds) return null;
+        return {
+          fdi,
+          contour,
+          centroid: centroidFromPoints(contour),
+          bounds,
+        } satisfies ToothGeometry;
+      })
+      .filter((tooth): tooth is ToothGeometry => tooth !== null);
+  }, [result?.teeth, result?.teeth_objects]);
+
+  const normalizedDetections = useMemo(() => {
+    if (!result) return [] as NormalizedDetection[];
+
+    const items: NormalizedDetection[] = [];
+    const seenIds = new Set<string>();
+    const cariesBestMap = result?.caries_by_tooth_best || result?.analysis_result?.caries_by_tooth_best || {};
+    const periapicalBestMap =
+      result?.periapical_by_tooth_best || result?.analysis_result?.periapical_by_tooth_best || {};
+    const pushDetection = (
+      type: string,
+      source: any,
+      fallbackTooth?: string | null,
+      fallbackLabel?: string,
+      options?: { trustConfidence?: boolean }
+    ) => {
+      const contour = normalizeContourPoints(source?.contour ?? source?.polygon ?? source?.points);
+      const bounds =
+        normalizeBounds(source?.box ?? source?.bbox ?? source?.bounds) ??
+        (contour.length >= 2 ? boundsFromPoints(contour) : null);
+      if (!bounds) return;
+
+      const confidence = getDetectionConfidence(source);
+      if (!options?.trustConfidence && confidence < AI_CONFIDENCE_THRESHOLD) return;
+
+      const center = contour.length ? centroidFromPoints(contour) : centerFromBounds(bounds);
+      const explicitTooth = fallbackTooth ?? getToothLabel(source);
+      const toothFdi = inferToothFdi(explicitTooth, center, toothGeometries, contour, bounds);
+      const label = fallbackLabel ?? source?.class_name ?? source?.name ?? source?.label ?? type;
+      const id = String(source?.id ?? `${type}:${label}:${toothFdi ?? 'none'}:${Math.round(center.x)}:${Math.round(center.y)}`);
+      if (seenIds.has(id)) return;
+      seenIds.add(id);
+
+      items.push({
+        id,
+        type,
+        label: String(label),
+        confidence,
+        toothFdi,
+        contour: contour.length >= 3 ? contour : null,
+        bounds,
+        center,
+        source,
+      });
+    };
+
+    Object.entries(cariesBestMap).forEach(([tooth, data]) => {
+      pushDetection('caries', data, String(tooth), 'Caries', { trustConfidence: true });
+    });
+
+    Object.entries(periapicalBestMap).forEach(([tooth, data]) => {
+      pushDetection('periapical', data, String(tooth), 'Periapical', { trustConfidence: true });
+    });
+
+    toothGeometries.forEach((tooth) => {
+      const boneLevel = Number(result?.bonelevel?.[tooth.fdi]?.percent ?? 0);
+      if (boneLevel >= 15) {
+        pushDetection(
+          'bonelevel',
+          {
+            id: `bonelevel:${tooth.fdi}`,
+            confidence: Math.min(0.99, boneLevel / 100),
+            contour: tooth.contour.map((point) => [point.x, point.y]),
+            label: 'Bone level',
+          },
+          tooth.fdi,
+          'Bone level'
+        );
+      }
+    });
+
+    [
+      ...(Array.isArray(result?.data) ? result.data : []),
+      ...(Array.isArray(result?.analysis_result?.data) ? result.analysis_result.data : []),
+    ].forEach((item: any) => {
+      pushDetection(String(item?.class_name ?? item?.type ?? item?.label ?? 'finding').toLowerCase(), item);
+    });
+
+    return items.sort((left, right) => right.confidence - left.confidence);
+  }, [
+    result,
+    result?.caries_by_tooth_best,
+    result?.periapical_by_tooth_best,
+    result?.analysis_result?.caries_by_tooth_best,
+    result?.analysis_result?.periapical_by_tooth_best,
+    result?.bonelevel,
+    result?.data,
+    result?.analysis_result?.data,
+    toothGeometries,
+  ]);
+
+  const detectionsByTooth = useMemo(() => {
+    return normalizedDetections.reduce<Record<string, NormalizedDetection[]>>((acc, detection) => {
+      if (!detection.toothFdi) return acc;
+      if (!acc[detection.toothFdi]) acc[detection.toothFdi] = [];
+      acc[detection.toothFdi].push(detection);
+      return acc;
+    }, {});
+  }, [normalizedDetections]);
+
+  const primaryDetectionByTooth = useMemo(() => {
+    return Object.entries(detectionsByTooth).reduce<Record<string, NormalizedDetection>>((acc, [tooth, detections]) => {
+      const primary = [...detections].sort((left, right) => right.confidence - left.confidence)[0];
+      if (primary) acc[tooth] = primary;
+      return acc;
+    }, {});
+  }, [detectionsByTooth]);
+
+  const findingSignalByTooth = useMemo(() => {
+    const map: Record<string, boolean> = {};
+    const markKeys = (record: any) => {
+      Object.keys(record || {}).forEach((key) => {
+        if (/^\d{2}$/.test(String(key))) map[String(key)] = true;
+      });
+    };
+    const markList = (items: any) => {
+      (Array.isArray(items) ? items : []).forEach((item: any) => {
+        const key = getToothId(item);
+        if (key) map[key] = true;
+      });
+    };
+
+    markKeys(result?.caries_by_tooth_best);
+    markKeys(result?.periapical_by_tooth_best);
+    markKeys(result?.analysis_result?.caries_by_tooth_best);
+    markKeys(result?.analysis_result?.periapical_by_tooth_best);
+    markList(result?.caries);
+    markList(result?.periapical);
+    markList(result?.analysis_result?.caries);
+    markList(result?.analysis_result?.periapical);
+
+    return map;
+  }, [
+    result?.caries_by_tooth_best,
+    result?.periapical_by_tooth_best,
+    result?.analysis_result?.caries_by_tooth_best,
+    result?.analysis_result?.periapical_by_tooth_best,
+    result?.caries,
+    result?.periapical,
+    result?.analysis_result?.caries,
+    result?.analysis_result?.periapical,
+  ]);
+
+  const toothRecords = useMemo(() => {
+    const records: Record<string, any> = {};
+    const sources = [
+      Array.isArray(result?.data) ? result.data : [],
+      Array.isArray(result?.teeth) ? result.teeth : Object.values(result?.teeth || {}),
+      Array.isArray(result?.missing_teeth) ? result.missing_teeth : [],
+      Array.isArray(result?.teeth_missing) ? result.teeth_missing : [],
+      Array.isArray(result?.analysis_result?.data) ? result.analysis_result.data : [],
+      Array.isArray(result?.analysis_result?.teeth)
+        ? result.analysis_result.teeth
+        : Object.values(result?.analysis_result?.teeth || {}),
+      Array.isArray(result?.analysis_result?.missing_teeth) ? result.analysis_result.missing_teeth : [],
+      Array.isArray(result?.analysis_result?.teeth_missing) ? result.analysis_result.teeth_missing : [],
+    ];
+
+    sources.forEach((items: any[]) => {
+      items.forEach((item: any) => {
+        const key = getToothId(item);
+        if (!key) return;
+        records[key] = { ...(records[key] || {}), ...item };
+      });
+    });
+
+    return records;
+  }, [result]);
+
+  const implantMetricsByTooth = useMemo(() => {
+    const map: Record<string, any> = {};
+    const metricSources = [
+      Array.isArray(result?.implant_metrics) ? result.implant_metrics : Object.values(result?.implant_metrics || {}),
+      Array.isArray(result?.analysis_result?.implant_metrics)
+        ? result.analysis_result.implant_metrics
+        : Object.values(result?.analysis_result?.implant_metrics || {}),
+    ];
+
+    metricSources.forEach((metrics: any[]) => {
+      metrics.forEach((item: any) => {
+        const key = getToothId(item?.label || item?.tooth_label || item?.tooth || item?.id);
+        if (key && key !== 'undefined') {
+          map[key] = { ...(map[key] || {}), ...item };
+        }
+      });
+    });
+
+    return map;
+  }, [result]);
+
+  const overlayCoordinateInfo = useMemo(() => {
+    const explicitWidth =
+      readOverlayDimension(result, ['overlay_width', 'image_width', 'original_width', 'source_width', 'canvas_width', 'preview_width', 'width']) ??
+      readOverlayDimension(result?.analysis_result, ['overlay_width', 'image_width', 'original_width', 'source_width', 'canvas_width', 'preview_width', 'width']);
+    const explicitHeight =
+      readOverlayDimension(result, ['overlay_height', 'image_height', 'original_height', 'source_height', 'canvas_height', 'preview_height', 'height']) ??
+      readOverlayDimension(result?.analysis_result, ['overlay_height', 'image_height', 'original_height', 'source_height', 'canvas_height', 'preview_height', 'height']);
+
+    const naturalWidth = panoNaturalSize.width || 1;
+    const naturalHeight = panoNaturalSize.height || 1;
+
+    let maxX = 0;
+    let maxY = 0;
+    const considerPoint = (point: ImagePoint | null) => {
+      if (!point) return;
+      if (Number.isFinite(point.x)) maxX = Math.max(maxX, point.x);
+      if (Number.isFinite(point.y)) maxY = Math.max(maxY, point.y);
+    };
+
+    (Array.isArray(result?.sinus_contours) ? result.sinus_contours : []).forEach((contour: any) => {
+      normalizeContourPoints(contour).forEach(considerPoint);
+    });
+    (Array.isArray(result?.nerve_contours) ? result.nerve_contours : []).forEach((contour: any) => {
+      normalizeContourPoints(contour).forEach(considerPoint);
+    });
+    toothGeometries.forEach((tooth) => tooth.contour.forEach(considerPoint));
+    normalizedDetections.forEach((detection) => {
+      if (detection.contour?.length) {
+        detection.contour.forEach(considerPoint);
+      } else {
+        considerPoint({ x: detection.bounds.x1, y: detection.bounds.y1 });
+        considerPoint({ x: detection.bounds.x2, y: detection.bounds.y2 });
+      }
+    });
+
+    const inferredWidth = maxX > 0 ? maxX + 16 : null;
+    const inferredHeight = maxY > 0 ? maxY + 16 : null;
+    const hasExplicitSize = Boolean(explicitWidth && explicitHeight);
+    const hasNaturalSize = naturalWidth > 1 && naturalHeight > 1;
+
+    if (hasExplicitSize) {
+      return {
+        width: Math.max(1, explicitWidth as number),
+        height: Math.max(1, explicitHeight as number),
+        source: 'backend-explicit' as const,
+        inferredWidth,
+        inferredHeight,
+      };
+    }
+
+    if (hasNaturalSize) {
+      return {
+        width: Math.max(1, naturalWidth),
+        height: Math.max(1, naturalHeight),
+        source: 'image-natural' as const,
+        inferredWidth,
+        inferredHeight,
+      };
+    }
+
+    return {
+      width: Math.max(1, inferredWidth || naturalWidth),
+      height: Math.max(1, inferredHeight || naturalHeight),
+      source: 'inferred-fallback' as const,
+      inferredWidth,
+      inferredHeight,
+    };
+  }, [normalizedDetections, panoNaturalSize.height, panoNaturalSize.width, result, toothGeometries]);
+  const overlayCoordinateSize = useMemo(
+    () => ({ width: overlayCoordinateInfo.width, height: overlayCoordinateInfo.height }),
+    [overlayCoordinateInfo.height, overlayCoordinateInfo.width]
+  );
+
+  const toothStatusByFdi = useMemo(() => {
+    const map = odontogramTeeth.reduce<Record<string, ToothCondition>>((acc, tooth) => {
+      acc[String(tooth)] = 'healthy';
+      return acc;
+    }, {});
+
+    const markList = (items: any, status: ToothCondition) => {
+      (Array.isArray(items) ? items : []).forEach((item: any) => {
+        const key = getToothId(item);
+        if (key) map[key] = status;
+      });
+    };
+
+    const markKeys = (record: any, status: ToothCondition) => {
+      Object.keys(record || {}).forEach((key) => {
+        if (/^\d{2}$/.test(String(key))) {
+          map[String(key)] = status;
+        }
+      });
+    };
+
+    markList(result?.missing_teeth || result?.teeth_missing || result?.analysis_result?.missing_teeth || [], 'missing');
+    markKeys(result?.implant_by_tooth, 'implant');
+    markKeys(result?.implant_by_tooth_best, 'implant');
+    markKeys(result?.analysis_result?.implant_by_tooth, 'implant');
+    markKeys(result?.analysis_result?.implant_by_tooth_best, 'implant');
+
+    markList(result?.caries || result?.analysis_result?.caries || [], 'requires');
+    markKeys(result?.caries_by_tooth, 'requires');
+    markKeys(result?.caries_by_tooth_best, 'requires');
+    markKeys(result?.analysis_result?.caries_by_tooth, 'requires');
+    markKeys(result?.analysis_result?.caries_by_tooth_best, 'requires');
+
+    markList(result?.periapical || result?.analysis_result?.periapical || [], 'requires');
+    markKeys(result?.periapical_by_tooth, 'requires');
+    markKeys(result?.periapical_by_tooth_best, 'requires');
+    markKeys(result?.analysis_result?.periapical_by_tooth, 'requires');
+    markKeys(result?.analysis_result?.periapical_by_tooth_best, 'requires');
+
+    const boneLevelSources = [result?.bonelevel || {}, result?.analysis_result?.bonelevel || {}];
+    boneLevelSources.forEach((source) => {
+      Object.entries(source).forEach(([key, value]: any) => {
+        if (!/^\d{2}$/.test(String(key))) return;
+        const percent = Number(value?.percent ?? value?.bone_loss_pct ?? 0);
+        if (percent >= 60) map[String(key)] = 'warning';
+        else if (percent >= 15 && map[String(key)] === 'healthy') map[String(key)] = 'requires';
+      });
+    });
+
+    const urgentSources = [
+      result?.extraction_candidates || [],
+      result?.analysis_result?.extraction_candidates || [],
+      result?.implant_site_candidates || [],
+      result?.analysis_result?.implant_site_candidates || [],
+    ];
+
+    urgentSources.forEach((items) => {
+      (Array.isArray(items) ? items : []).forEach((item: any) => {
+        const key = getToothId(item?.site_fdi || item?.tooth || item?.tooth_label || item);
+        if (key && map[key] !== 'missing' && map[key] !== 'implant') {
+          map[key] = 'warning';
+        }
+      });
+    });
+
+    Object.entries(toothRecords).forEach(([key, tooth]) => {
+      const implantType = String(tooth?.type || '').toLowerCase();
+      const boneLossLevel = Number(tooth?.bone_loss_level ?? 0);
+      const boneLossPct = Number(tooth?.bone_loss_pct ?? 0);
+      const isHopeless = Boolean(tooth?.hopeless) || boneLossLevel >= 4 || boneLossPct >= 60;
+      const hasTreatmentFinding = Boolean(
+        tooth?.caries || tooth?.periodontitis || tooth?.periapical || boneLossLevel >= 3 || boneLossPct >= 15
+      );
+      const isImplant = Boolean(tooth?.implant || implantType.includes('implant') || implantType.includes('fixture'));
+      const isMissing = Boolean(tooth?.missing);
+
+      if (isMissing) map[key] = 'missing';
+      else if (isImplant) map[key] = 'implant';
+      else if (isHopeless) map[key] = 'warning';
+      else if (hasTreatmentFinding && map[key] === 'healthy') map[key] = 'requires';
+    });
+
+    return map;
+  }, [result, toothRecords]);
+
+  const nervePoints = useMemo(
+    () => [
+      ...flattenContourPoints(result?.nerve_contours),
+      ...flattenContourPoints(result?.analysis_result?.nerve_contours),
+    ],
+    [result]
+  );
+
+  const toothHoverPanelByFdi = useMemo(() => {
+    return odontogramTeeth.reduce<Record<string, ToothHoverPanelData>>((acc, tooth) => {
+      const toothFdi = String(tooth);
+      const record = toothRecords[toothFdi] || {};
+      const status = toothStatusByFdi[toothFdi] || 'healthy';
+      const implantMetric = implantMetricsByTooth[toothFdi] || {};
+      const implantGuide = record?.implant_guide || {};
+      const mmPerPx = Number(result?.mm_per_px || 0.1);
+      const contourMetrics = estimateImplantMetricsFromContour(record?.contour, mmPerPx);
+      const primaryDetection = primaryDetectionByTooth[toothFdi] || null;
+      const boneLevelSource = result?.bonelevel?.[toothFdi] || result?.analysis_result?.bonelevel?.[toothFdi] || {};
+      const boneLossLevel = Number(record?.bone_loss_level ?? boneLevelSource?.level ?? 0);
+      const boneLossPct = Number(record?.bone_loss_pct ?? boneLevelSource?.percent ?? boneLevelSource?.bone_loss_pct ?? 0);
+      const diameterMm = Number(
+        implantMetric?.diameter_mm ??
+        implantMetric?.diameter ??
+        record?.implant_meta?.diameter ??
+        contourMetrics.diameterMm ??
+        0
+      );
+      const lengthMm = Number(
+        implantMetric?.length_mm ??
+        implantMetric?.length ??
+        record?.implant_meta?.length ??
+        contourMetrics.lengthMm ??
+        0
+      );
+      const gapMm = Number(
+        record?.mesiodistal_gap_mm ??
+        implantGuide?.mesiodistal_gap_mm ??
+        implantMetric?.mesiodistal_gap_mm ??
+        0
+      );
+      const isUpperTooth = toothFdi.startsWith('1') || toothFdi.startsWith('2');
+      const centerToNerveMmRaw = Number(
+        implantGuide?.dist_mm ??
+        record?.center_to_nerve_dist_mm ??
+        implantMetric?.dist_mm ??
+        record?.nerve_dist_mm ??
+        0
+      );
+      const centerToNerveMm = isUpperTooth ? 0 : centerToNerveMmRaw;
+      const toothNumber = Number(toothFdi);
+      const lastDigit = toothNumber % 10;
+      const isLowerPosteriorMissingPlanning =
+        status === 'missing' &&
+        (toothFdi.startsWith('3') || toothFdi.startsWith('4')) &&
+        [6, 7, 8].includes(lastDigit);
+      const missingBounds = normalizeBounds(record?.box);
+      const fallbackGapMm =
+        isLowerPosteriorMissingPlanning && !gapMm && missingBounds
+          ? Math.max(0, (missingBounds.x2 - missingBounds.x1) * mmPerPx)
+          : 0;
+      const fallbackCenterToNerveMm =
+        isLowerPosteriorMissingPlanning && !centerToNerveMmRaw && missingBounds && nervePoints.length
+          ? Math.min(
+              ...nervePoints.map((point) => distanceBetweenPoints(centerFromBounds(missingBounds), point))
+            ) * mmPerPx
+          : 0;
+      const isExistingImplant = Boolean(status === 'implant' && (diameterMm > 0 || lengthMm > 0));
+      const kind: ToothHoverPanelData['kind'] = isExistingImplant
+        ? 'implant'
+        : isLowerPosteriorMissingPlanning
+          ? 'planning'
+          : 'finding';
+      let statusLabel = 'Healthy';
+      if (status === 'missing') statusLabel = 'Missing';
+      else if (status === 'implant') statusLabel = 'Implant';
+      else if (status === 'warning') statusLabel = 'Urgent Priority';
+      else if (status === 'requires') statusLabel = 'Treatment Required';
+      const cariesProb = getBestConfidence(
+        result?.caries_by_tooth_best || result?.analysis_result?.caries_by_tooth_best,
+        result?.caries_by_tooth || result?.analysis_result?.caries_by_tooth,
+        toothFdi
+      );
+      const periapicalProb = getBestConfidence(
+        result?.periapical_by_tooth_best || result?.analysis_result?.periapical_by_tooth_best,
+        result?.periapical_by_tooth || result?.analysis_result?.periapical_by_tooth,
+        toothFdi
+      );
+      const primaryLabel = primaryDetection?.label || (status === 'healthy' ? 'Normal' : null);
+
+      acc[toothFdi] = {
+        toothFdi,
+        title: `Tooth #${formatToothNumber(toothFdi, numberingSystem)}`,
+        kind,
+        status: statusLabel,
+        pblPct: Number.isFinite(boneLossPct) && boneLossPct > 0 ? boneLossPct : null,
+        level: Number.isFinite(boneLossLevel) && boneLossLevel > 0 ? boneLossLevel : null,
+        cariesProb,
+        periapicalProb,
+        primaryLabel,
+        primaryProb: primaryDetection?.confidence ?? null,
+        diameterMm: diameterMm > 0 ? diameterMm : null,
+        lengthMm: lengthMm > 0 ? lengthMm : null,
+        gapMm: isLowerPosteriorMissingPlanning && (gapMm > 0 || fallbackGapMm > 0) ? (gapMm > 0 ? gapMm : fallbackGapMm) : null,
+        centerToNerveMm:
+          isLowerPosteriorMissingPlanning && (centerToNerveMm > 0 || fallbackCenterToNerveMm > 0)
+            ? (centerToNerveMm > 0 ? centerToNerveMm : fallbackCenterToNerveMm)
+            : null,
+      };
+      return acc;
+    }, {});
+  }, [implantMetricsByTooth, nervePoints, numberingSystem, odontogramTeeth, primaryDetectionByTooth, result, toothRecords, toothStatusByFdi]);
+
+  const hoveredToothPanel = hoveredToothAnchor ? toothHoverPanelByFdi[hoveredToothAnchor.toothFdi] || null : null;
+
+  const legendCounts = useMemo(() => {
+    return odontogramTeeth.reduce<Record<ToothCondition, number>>(
+      (acc, tooth) => {
+        const status = toothStatusByFdi[String(tooth)] || 'healthy';
+        acc[status] += 1;
+        return acc;
+      },
+      {
+        healthy: 0,
+        requires: 0,
+        warning: 0,
+        implant: 0,
+        missing: 0,
+      }
+    );
+  }, [toothStatusByFdi]);
+
+  const activeDetection = useMemo(
+    () => normalizedDetections.find((detection) => detection.id === activeDetectionId) ?? null,
+    [activeDetectionId, normalizedDetections]
+  );
+
+  const mmPerPixel = Number(result?.mm_per_pixel ?? result?.mm_per_px ?? result?.analysis_result?.mm_per_pixel ?? result?.analysis_result?.mm_per_px ?? 0.1);
+  const isCustomMeasureTool =
+    selectedToolbarButton === 'measure-length' &&
+    (activeMeasureSubtool === 'length' || activeMeasureSubtool === 'bidirectional' || activeMeasureSubtool === 'angle');
+  const isCustomDrawTool =
+    selectedToolbarButton === 'measure-draw' &&
+    (activeMeasureSubtool === 'text' ||
+      activeMeasureSubtool === 'arrow' ||
+      activeMeasureSubtool === 'ellipse' ||
+      activeMeasureSubtool === 'rect' ||
+      activeMeasureSubtool === 'circle' ||
+      activeMeasureSubtool === 'roi-free' ||
+      activeMeasureSubtool === 'spline-roi' ||
+      activeMeasureSubtool === 'livewire');
+  const isCustomOverlayTool = isCustomMeasureTool || isCustomDrawTool;
+  const isFreeformDrawTool =
+    activeMeasureSubtool === 'roi-free' || activeMeasureSubtool === 'spline-roi' || activeMeasureSubtool === 'livewire';
+
+  const requiredPointsForMeasureTool = (tool: MeasureSubtoolKey) => {
+    if (tool === 'angle') return 3;
+    if (
+      tool === 'length' ||
+      tool === 'bidirectional' ||
+      tool === 'arrow' ||
+      tool === 'ellipse' ||
+      tool === 'rect' ||
+      tool === 'circle'
+    ) {
+      return 2;
+    }
+    if (tool === 'text') return 1;
+    return 0;
+  };
+
+  const clientToOverlayPoint = (clientX: number, clientY: number): ImagePoint | null => {
+    const displayRect = panoDisplayRef.current?.getBoundingClientRect();
+    if (!displayRect || !overlayCoordinateSize.width || !overlayCoordinateSize.height) return null;
+    if (
+      clientX < displayRect.left ||
+      clientX > displayRect.right ||
+      clientY < displayRect.top ||
+      clientY > displayRect.bottom
+    ) {
+      return null;
+    }
+
+    const normalizedX = clamp((clientX - displayRect.left) / Math.max(1, displayRect.width), 0, 1);
+    const normalizedY = clamp((clientY - displayRect.top) / Math.max(1, displayRect.height), 0, 1);
+
+    return {
+      x: (flipped ? 1 - normalizedX : normalizedX) * overlayCoordinateSize.width,
+      y: normalizedY * overlayCoordinateSize.height,
+    };
+  };
+
+  const focusedCondition = useMemo(() => {
+    if (activeTooth) return toothStatusByFdi[activeTooth] || 'healthy';
+    if (activeDetection?.toothFdi) return toothStatusByFdi[activeDetection.toothFdi] || 'healthy';
+    return null;
+  }, [activeDetection?.toothFdi, activeTooth, toothStatusByFdi]);
+
+  const finalizeFreeformShape = (finalPoint?: ImagePoint | null) => {
+    if (!isCustomDrawTool || !isFreeformDrawTool || pendingMeasurePoints.length === 0) return false;
+
+    const nextPoints = [...pendingMeasurePoints];
+    if (finalPoint) {
+      const lastPoint = nextPoints[nextPoints.length - 1];
+      if (!lastPoint || Math.hypot(finalPoint.x - lastPoint.x, finalPoint.y - lastPoint.y) > 1.5) {
+        nextPoints.push(finalPoint);
+      }
+    }
+
+    if (nextPoints.length >= 2) {
+      setMeasureShapes((current) => [...current, { type: activeMeasureSubtool, points: nextPoints }]);
+    }
+    setPendingMeasurePoints([]);
+    setMeasurePreviewPoint(null);
+    return true;
+  };
+
+  const renderMeasureShape = (shape: MeasureShape, isTemp = false) => {
+    const points = isTemp && measurePreviewPoint ? [...shape.points, measurePreviewPoint] : shape.points;
+    if (!points.length) return null;
+
+    const stroke = 'rgba(0, 192, 243, 0.95)';
+    const glow = 'rgba(255, 255, 255, 0.9)';
+    const strokeWidth = 1.2 / effectiveScale;
+    const distance = (a: ImagePoint, b: ImagePoint) => Math.hypot(b.x - a.x, b.y - a.y);
+
+    const renderLabel = (x: number, y: number, lines: string[]) => (
+      <g>
+        <rect
+          x={x - 6 / effectiveScale}
+          y={y - 14 / effectiveScale}
+          width={Math.max(...lines.map((line) => line.length), 1) * (5.2 / effectiveScale) + 12 / effectiveScale}
+          height={lines.length * (12 / effectiveScale) + 8 / effectiveScale}
+          fill="rgba(0, 0, 0, 0.7)"
+          rx={3 / effectiveScale}
+        />
+        {lines.map((line, index) => (
+          <text
+            key={`${line}-${index}`}
+            x={x}
+            y={y + index * (11 / effectiveScale)}
+            fill="#FFFFFF"
+            fontSize={9 / effectiveScale}
+            fontWeight="700"
+          >
+            {line}
+          </text>
+        ))}
+      </g>
+    );
+
+    if (shape.type === 'length' && points.length >= 2) {
+      const value = `${(distance(points[0], points[1]) * mmPerPixel).toFixed(2)} mm`;
+      return (
+        <g>
+          <line x1={points[0].x} y1={points[0].y} x2={points[1].x} y2={points[1].y} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <line x1={points[0].x} y1={points[0].y} x2={points[1].x} y2={points[1].y} stroke={stroke} strokeWidth={strokeWidth} />
+          {!isTemp ? renderLabel((points[0].x + points[1].x) / 2, (points[0].y + points[1].y) / 2 - 8 / effectiveScale, [value]) : null}
+        </g>
+      );
+    }
+
+    if (shape.type === 'bidirectional' && points.length >= 2) {
+      const x = Math.min(points[0].x, points[1].x);
+      const y = Math.min(points[0].y, points[1].y);
+      const w = Math.abs(points[1].x - points[0].x);
+      const h = Math.abs(points[1].y - points[0].y);
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      return (
+        <g>
+          <rect x={x} y={y} width={w} height={h} fill="rgba(0, 192, 243, 0.08)" stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <rect x={x} y={y} width={w} height={h} fill="rgba(0, 192, 243, 0.08)" stroke={stroke} strokeWidth={strokeWidth} />
+          <line x1={x} y1={cy} x2={x + w} y2={cy} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <line x1={x} y1={cy} x2={x + w} y2={cy} stroke={stroke} strokeWidth={strokeWidth} />
+          <line x1={cx} y1={y} x2={cx} y2={y + h} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <line x1={cx} y1={y} x2={cx} y2={y + h} stroke={stroke} strokeWidth={strokeWidth} />
+          {!isTemp
+            ? renderLabel(x + w + 12 / effectiveScale, y + h - 4 / effectiveScale, [
+                `W ${(w * mmPerPixel).toFixed(2)} mm`,
+                `H ${(h * mmPerPixel).toFixed(2)} mm`,
+              ])
+            : null}
+        </g>
+      );
+    }
+
+    if (shape.type === 'angle' && points.length >= 2) {
+      if (points.length === 2) {
+        return (
+          <g>
+            <line x1={points[0].x} y1={points[0].y} x2={points[1].x} y2={points[1].y} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+            <line x1={points[0].x} y1={points[0].y} x2={points[1].x} y2={points[1].y} stroke={stroke} strokeWidth={strokeWidth} />
+          </g>
+        );
+      }
+      const a = distance(points[1], points[0]);
+      const b = distance(points[1], points[2]);
+      const c = distance(points[0], points[2]);
+      const val = (a * a + b * b - c * c) / Math.max(2 * a * b, 1e-6);
+      const deg = Math.acos(Math.max(-1, Math.min(1, val))) * (180 / Math.PI);
+      return (
+        <g>
+          <polyline
+            points={points.map((point) => `${point.x},${point.y}`).join(' ')}
+            fill="none"
+            stroke={glow}
+            strokeWidth={strokeWidth + 1 / effectiveScale}
+          />
+          <polyline
+            points={points.map((point) => `${point.x},${point.y}`).join(' ')}
+            fill="none"
+            stroke={stroke}
+            strokeWidth={strokeWidth}
+          />
+          {!isTemp ? renderLabel(points[1].x, points[1].y - 8 / effectiveScale, [`${deg.toFixed(1)}°`]) : null}
+        </g>
+      );
+    }
+
+    return null;
+  };
+
+  const renderCustomShape = (shape: MeasureShape, isTemp = false) => {
+    if (
+      shape.type === 'length' ||
+      shape.type === 'bidirectional' ||
+      shape.type === 'angle'
+    ) {
+      return renderMeasureShape(shape, isTemp);
+    }
+
+    const points = isTemp && measurePreviewPoint ? [...shape.points, measurePreviewPoint] : shape.points;
+    if (!points.length) return null;
+
+    const stroke = 'rgba(0, 192, 243, 0.95)';
+    const glow = 'rgba(255, 255, 255, 0.9)';
+    const strokeWidth = 1.2 / effectiveScale;
+    const fill = 'rgba(0, 192, 243, 0.12)';
+    const distance = (a: ImagePoint, b: ImagePoint) => Math.hypot(b.x - a.x, b.y - a.y);
+
+    const renderLabel = (x: number, y: number, lines: string[]) => (
+      <g>
+        <rect
+          x={x - 6 / effectiveScale}
+          y={y - 14 / effectiveScale}
+          width={Math.max(...lines.map((line) => line.length), 1) * (5.2 / effectiveScale) + 12 / effectiveScale}
+          height={lines.length * (12 / effectiveScale) + 8 / effectiveScale}
+          fill="rgba(0, 0, 0, 0.7)"
+          rx={3 / effectiveScale}
+        />
+        {lines.map((line, index) => (
+          <text
+            key={`${line}-${index}`}
+            x={x}
+            y={y + index * (11 / effectiveScale)}
+            fill="#FFFFFF"
+            fontSize={9 / effectiveScale}
+            fontWeight="700"
+          >
+            {line}
+          </text>
+        ))}
+      </g>
+    );
+
+    if (shape.type === 'text') {
+      return renderLabel(points[0].x + 12 / effectiveScale, points[0].y - 8 / effectiveScale, [shape.text || 'Note']);
+    }
+
+    if (shape.type === 'arrow' && points.length >= 2) {
+      return (
+        <g>
+          <line
+            x1={points[0].x}
+            y1={points[0].y}
+            x2={points[1].x}
+            y2={points[1].y}
+            stroke={glow}
+            strokeWidth={strokeWidth + 1 / effectiveScale}
+            markerEnd="url(#renewMeasureArrowGlow)"
+          />
+          <line
+            x1={points[0].x}
+            y1={points[0].y}
+            x2={points[1].x}
+            y2={points[1].y}
+            stroke={stroke}
+            strokeWidth={strokeWidth}
+            markerEnd="url(#renewMeasureArrow)"
+          />
+        </g>
+      );
+    }
+
+    if (shape.type === 'rect' && points.length >= 2) {
+      const x = Math.min(points[0].x, points[1].x);
+      const y = Math.min(points[0].y, points[1].y);
+      const w = Math.abs(points[1].x - points[0].x);
+      const h = Math.abs(points[1].y - points[0].y);
+      return (
+        <g>
+          <rect x={x} y={y} width={w} height={h} fill={fill} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <rect x={x} y={y} width={w} height={h} fill={fill} stroke={stroke} strokeWidth={strokeWidth} />
+        </g>
+      );
+    }
+
+    if (shape.type === 'ellipse' && points.length >= 2) {
+      const x = Math.min(points[0].x, points[1].x);
+      const y = Math.min(points[0].y, points[1].y);
+      const w = Math.abs(points[1].x - points[0].x);
+      const h = Math.abs(points[1].y - points[0].y);
+      return (
+        <g>
+          <ellipse
+            cx={x + w / 2}
+            cy={y + h / 2}
+            rx={w / 2}
+            ry={h / 2}
+            fill={fill}
+            stroke={glow}
+            strokeWidth={strokeWidth + 1 / effectiveScale}
+          />
+          <ellipse cx={x + w / 2} cy={y + h / 2} rx={w / 2} ry={h / 2} fill={fill} stroke={stroke} strokeWidth={strokeWidth} />
+        </g>
+      );
+    }
+
+    if (shape.type === 'circle' && points.length >= 2) {
+      const radius = distance(points[0], points[1]);
+      return (
+        <g>
+          <circle cx={points[0].x} cy={points[0].y} r={radius} fill={fill} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <circle cx={points[0].x} cy={points[0].y} r={radius} fill={fill} stroke={stroke} strokeWidth={strokeWidth} />
+        </g>
+      );
+    }
+
+    if ((shape.type === 'roi-free' || shape.type === 'livewire') && points.length >= 2) {
+      const polygonPoints = points.map((point) => `${point.x},${point.y}`).join(' ');
+      return isTemp || points.length < 3 ? (
+        <g>
+          <polyline points={polygonPoints} fill="none" stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <polyline points={polygonPoints} fill="none" stroke={stroke} strokeWidth={strokeWidth} />
+        </g>
+      ) : (
+        <g>
+          <polygon points={polygonPoints} fill={fill} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <polygon points={polygonPoints} fill={fill} stroke={stroke} strokeWidth={strokeWidth} />
+        </g>
+      );
+    }
+
+    if (shape.type === 'spline-roi' && points.length >= 2) {
+      const path = buildSmoothPath(points, !isTemp);
+      return (
+        <g>
+          <path d={path} fill={isTemp ? 'none' : fill} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <path d={path} fill={isTemp ? 'none' : fill} stroke={stroke} strokeWidth={strokeWidth} />
+        </g>
+      );
+    }
+
+    return null;
+  };
+
+  const isPointNearShape = (point: ImagePoint, shape: MeasureShape) => {
+    const tolerance = 14 / effectiveScale;
+    const points = shape.points;
+    if (!points.length) return false;
+
+    if (shape.type === 'text') {
+      return distanceBetweenPoints(point, points[0]) <= 28 / effectiveScale;
+    }
+
+    if (shape.type === 'length' || shape.type === 'arrow') {
+      return points.length >= 2 && distancePointToSegment(point, points[0], points[1]) <= tolerance;
+    }
+
+    if (shape.type === 'bidirectional' || shape.type === 'rect') {
+      if (points.length < 2) return false;
+      const x1 = Math.min(points[0].x, points[1].x);
+      const y1 = Math.min(points[0].y, points[1].y);
+      const x2 = Math.max(points[0].x, points[1].x);
+      const y2 = Math.max(points[0].y, points[1].y);
+      const expanded = { x1: x1 - tolerance, y1: y1 - tolerance, x2: x2 + tolerance, y2: y2 + tolerance };
+      return point.x >= expanded.x1 && point.x <= expanded.x2 && point.y >= expanded.y1 && point.y <= expanded.y2;
+    }
+
+    if (shape.type === 'ellipse') {
+      if (points.length < 2) return false;
+      const cx = (points[0].x + points[1].x) / 2;
+      const cy = (points[0].y + points[1].y) / 2;
+      const rx = Math.abs(points[1].x - points[0].x) / 2;
+      const ry = Math.abs(points[1].y - points[0].y) / 2;
+      if (rx < 1 || ry < 1) return false;
+      const normalized = ((point.x - cx) ** 2) / ((rx + tolerance) ** 2) + ((point.y - cy) ** 2) / ((ry + tolerance) ** 2);
+      return normalized <= 1.05;
+    }
+
+    if (shape.type === 'circle') {
+      if (points.length < 2) return false;
+      return distanceBetweenPoints(point, points[0]) <= distanceBetweenPoints(points[0], points[1]) + tolerance;
+    }
+
+    if (shape.type === 'angle') {
+      if (points.length < 2) return false;
+      if (points.length === 2) return distancePointToSegment(point, points[0], points[1]) <= tolerance;
+      return (
+        distancePointToSegment(point, points[1], points[0]) <= tolerance ||
+        distancePointToSegment(point, points[1], points[2]) <= tolerance
+      );
+    }
+
+    if (shape.type === 'roi-free' || shape.type === 'livewire' || shape.type === 'spline-roi') {
+      if (points.length >= 3 && pointInPolygon(point, points)) return true;
+      for (let index = 1; index < points.length; index += 1) {
+        if (distancePointToSegment(point, points[index - 1], points[index]) <= tolerance) return true;
+      }
+      if ((shape.type === 'livewire' || shape.type === 'spline-roi') && points.length >= 3) {
+        if (distancePointToSegment(point, points[points.length - 1], points[0]) <= tolerance) return true;
+      }
+    }
+
+    return false;
+  };
+
+  const renderAIDetections = () => {
+    if (viewMode !== 'overlay' || !result) return null;
+
+    const items: any[] = [];
+    const matchesFilter = (toothFdi: string | null | undefined) => {
+      if (!activeLegendFilter) return true;
+      if (!toothFdi) return false;
+      return (toothStatusByFdi[toothFdi] || 'healthy') === activeLegendFilter;
+    };
+    const matchesToothSelection = (toothFdi: string | null | undefined) => {
+      if (!activeTooth) return true;
+      return toothFdi === activeTooth;
+    };
+
+    if (Array.isArray(result.sinus_contours)) {
+      result.sinus_contours.forEach((contour: any, idx: number) => {
+        if (!Array.isArray(contour)) return;
+        const runs = buildLowerContourRuns(contour, 0.25);
+        runs.forEach((run, runIdx) => {
+          const points = run.map((pt) => `${pt.x},${pt.y}`).join(' ');
+          items.push(
+            <polyline
+              key={`renew-sinus-${idx}-${runIdx}`}
+              points={points}
+              fill="none"
+              stroke="#ff4444"
+              strokeWidth={1.2 / effectiveScale}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          );
+        });
+      });
+    }
+
+    if (Array.isArray(result.nerve_contours)) {
+      result.nerve_contours.forEach((contour: any, idx: number) => {
+        if (!Array.isArray(contour) || contour.length < 2) return;
+        const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
+        items.push(
+          <polyline
+            key={`renew-nerve-${idx}`}
+            points={points}
+            fill="none"
+            stroke="rgba(255, 0, 255, 0.32)"
+            strokeWidth={1 / effectiveScale}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        );
+      });
+    }
+
+    toothGeometries.forEach((tooth, idx) => {
+      if (!matchesFilter(tooth.fdi) || !matchesToothSelection(tooth.fdi)) return;
+      const paletteIndex = Number.isFinite(Number(tooth.fdi)) ? Math.abs(Number(tooth.fdi)) % warmPastelPalette.length : 0;
+      const style = warmPastelPalette[paletteIndex];
+      const isActive = activeTooth === tooth.fdi;
+      const hasDetection = Boolean(detectionsByTooth[tooth.fdi]?.length);
+      const points = tooth.contour.map((point) => `${point.x},${point.y}`).join(' ');
+      const fillColor = isActive ? style.fill.replace('0.26', '0.45') : style.fill;
+
+      items.push(
+        <g
+          key={`renew-tooth-${tooth.fdi}-${idx}`}
+          style={{ pointerEvents: 'auto', cursor: 'pointer' }}
+          onClick={() => handleToothSelect(tooth.fdi)}
+        >
+          <polygon
+            points={points}
+            fill={fillColor}
+            stroke={isActive ? 'rgba(0, 192, 243, 0.18)' : hasDetection ? 'rgba(255, 215, 102, 0.2)' : style.stroke}
+            strokeWidth={(isActive ? 0.14 : hasDetection ? 0.8 : 2) / effectiveScale}
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+          />
+          <g transform={`translate(${tooth.contour[0].x}, ${tooth.contour[0].y - 15 / effectiveScale})`}>
+            <rect
+              x={-10 / effectiveScale}
+              y={-10 / effectiveScale}
+              width={20 / effectiveScale}
+              height={14 / effectiveScale}
+              rx={4 / effectiveScale}
+              fill={isActive ? 'rgba(0, 192, 243, 0.88)' : 'rgba(0,0,0,0.62)'}
+            />
+            <text textAnchor="middle" fill="#ffffff" fontSize={10 / effectiveScale} fontWeight="bold">
+              {formatToothNumber(tooth.fdi, numberingSystem)}
+            </text>
+          </g>
+        </g>
+      );
+    });
+
+    normalizedDetections.forEach((detection) => {
+      if (!matchesFilter(detection.toothFdi) || !matchesToothSelection(detection.toothFdi)) return;
+      const isActive = activeDetectionId === detection.id;
+      const matchesTooth = Boolean(activeTooth && detection.toothFdi === activeTooth);
+      const strokeColor =
+        detection.type === 'caries'
+          ? '#ff4444'
+          : detection.type === 'periapical'
+            ? '#ff9800'
+            : detection.type === 'bonelevel'
+              ? '#FFD766'
+              : '#FFD766';
+
+      if (detection.contour && detection.contour.length >= 3) {
+        items.push(
+          <polygon
+            key={detection.id}
+            points={detection.contour.map((point) => `${point.x},${point.y}`).join(' ')}
+            fill={isActive ? 'rgba(0, 192, 243, 0.02)' : matchesTooth ? 'rgba(255, 215, 102, 0.03)' : 'transparent'}
+            stroke={isActive ? 'rgba(0, 192, 243, 0.55)' : strokeColor}
+            strokeWidth={(isActive ? 1.4 : matchesTooth ? 1.4 : 1.0) / effectiveScale}
+            vectorEffect="non-scaling-stroke"
+            style={{ pointerEvents: 'auto', cursor: 'pointer' }}
+            onClick={() => handleDetectionSelect(detection)}
+          />
+        );
+        return;
+      }
+
+      const width = detection.bounds.x2 - detection.bounds.x1;
+      const height = detection.bounds.y2 - detection.bounds.y1;
+      const tagHeight = 14 / effectiveScale;
+      const tagPadding = 6 / effectiveScale;
+      const labelText = `${detection.label} ${detection.toothFdi ?? ''}`.trim();
+      const fontSize = 9 / effectiveScale;
+      const tagWidth = labelText.length * (fontSize * 0.6) + tagPadding * 2;
+
+      items.push(
+        <g
+          key={detection.id}
+          style={{ pointerEvents: 'auto', cursor: 'pointer' }}
+          onClick={() => handleDetectionSelect(detection)}
+        >
+          <rect
+            x={detection.bounds.x1}
+            y={detection.bounds.y1}
+            width={width}
+            height={height}
+            fill={isActive ? 'rgba(0, 192, 243, 0.03)' : 'transparent'}
+            stroke={isActive ? '#00C0F3' : strokeColor}
+            strokeWidth={(isActive ? 2.4 : matchesTooth ? 1.6 : 0.9) / effectiveScale}
+            strokeDasharray={detection.type === 'bonelevel' ? undefined : `${3 / effectiveScale} ${2 / effectiveScale}`}
+            vectorEffect="non-scaling-stroke"
+          />
+          <rect
+            x={detection.bounds.x1}
+            y={detection.bounds.y1 - tagHeight}
+            width={tagWidth}
+            height={tagHeight}
+            rx={3 / effectiveScale}
+            ry={3 / effectiveScale}
+            fill={isActive ? '#00C0F3' : strokeColor}
+            fillOpacity={0.92}
+          />
+          <text
+            x={detection.bounds.x1 + tagPadding}
+            y={detection.bounds.y1 - tagHeight / 2 + fontSize / 3}
+            fill="#fff"
+            fontSize={fontSize}
+            fontWeight="bold"
+          >
+            {labelText}
+          </text>
+        </g>
+      );
+    });
+
+    return <g id="renew-ai-overlay-layer">{items}</g>;
+  };
+
+  const renderRiskDetections = () => {
+    if (viewMode !== 'heatmap' || !result) return null;
+
+    const items: any[] = [];
+    const cariesEntries = Object.entries(result.caries_by_tooth_best || result.analysis_result?.caries_by_tooth_best || {});
+    const periapicalEntries = Object.entries(result.periapical_by_tooth_best || result.analysis_result?.periapical_by_tooth_best || {});
+    const teeth = Array.isArray(result.teeth)
+      ? result.teeth
+      : Array.isArray(result.teeth_objects)
+        ? result.teeth_objects
+        : [];
+    const matchesFilter = (toothFdi: string | null | undefined) => {
+      if (!activeLegendFilter) return true;
+      if (!toothFdi) return false;
+      return (toothStatusByFdi[toothFdi] || 'healthy') === activeLegendFilter;
+    };
+    const matchesToothSelection = (toothFdi: string | null | undefined) => {
+      if (!activeTooth) return true;
+      return toothFdi === activeTooth;
+    };
+
+    cariesEntries.forEach(([tooth, data]: any, idx) => {
+      const toothFdi = String(tooth);
+      if (!matchesFilter(toothFdi) || !matchesToothSelection(toothFdi)) return;
+      const box = data?.box;
+      if (!box || box.length < 4) return;
+      const conf = Number(data?.conf || 0.65);
+      const [x1, y1, x2, y2] = box;
+      const cx = (x1 + x2) / 2;
+      const cy = (y1 + y2) / 2;
+      const rx = Math.max((x2 - x1) * 0.85, 18);
+      const ry = Math.max((y2 - y1) * 0.85, 18);
+      const opacity = Math.min(0.5, 0.18 + conf * 0.22);
+      items.push(
+        <g
+          key={`renew-risk-caries-${tooth}-${idx}`}
+          filter="url(#renewRiskBlurStrong)"
+          style={{ mixBlendMode: 'normal', opacity: 0.62 }}
+        >
+          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#renewCariesGlow)" fillOpacity={opacity} />
+        </g>
+      );
+    });
+
+    periapicalEntries.forEach(([tooth, data]: any, idx) => {
+      const toothFdi = String(tooth);
+      if (!matchesFilter(toothFdi) || !matchesToothSelection(toothFdi)) return;
+      const box = data?.box;
+      if (!box || box.length < 4) return;
+      const conf = Number(data?.conf || 0.72);
+      const [x1, y1, x2, y2] = box;
+      const cx = (x1 + x2) / 2;
+      const cy = (y1 + y2) / 2;
+      const rx = Math.max((x2 - x1) * 0.95, 22);
+      const ry = Math.max((y2 - y1) * 0.95, 22);
+      const opacity = Math.min(0.52, 0.2 + conf * 0.22);
+      items.push(
+        <g
+          key={`renew-risk-peri-${tooth}-${idx}`}
+          filter="url(#renewRiskBlurStrong)"
+          style={{ mixBlendMode: 'normal', opacity: 0.6 }}
+        >
+          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#renewPeriGlow)" fillOpacity={opacity} />
+        </g>
+      );
+    });
+
+    teeth.forEach((tooth: any, idx: number) => {
+      const label = String(tooth?.tooth_label || tooth?.label || tooth?.tooth || '');
+      if (!matchesFilter(label) || !matchesToothSelection(label)) return;
+      const boneLossPct = Number(
+        result?.bonelevel?.[label]?.percent ??
+        tooth?.bone_loss_pct ??
+        0
+      );
+      if (!label || boneLossPct < 15) return;
+      const severity = Math.min(1, Math.max(0, (boneLossPct - 15) / 30));
+      const opacity = Math.min(0.32, 0.12 + severity * 0.16);
+      const green = Math.round(224 - severity * 140);
+      const fill = `rgba(255,${green},71,${opacity})`;
+      const contour = tooth?.contour;
+      if (!Array.isArray(contour) || contour.length < 3) return;
+      const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
+      items.push(
+        <g
+          key={`renew-risk-bone-${label}-${idx}`}
+          filter="url(#renewRiskBlurSoft)"
+          style={{ mixBlendMode: 'normal', opacity: 0.48 }}
+        >
+          <polygon points={points} fill={fill} />
+        </g>
+      );
+    });
+
+    return <g id="renew-risk-overlay-layer">{items}</g>;
+  };
 
   const handleOpenStudies = () => {
     setWorkspaceSection((current) => (current === 'studies' ? 'none' : 'studies'));
@@ -456,6 +2417,594 @@ export function RenewPage() {
     }
   }, [locationState.folderSource]);
 
+  useEffect(() => {
+    if (!originalFolderMode) return;
+    if (previousSelectedFolderSeriesIdRef.current === selectedFolderSeriesId) return;
+
+    previousSelectedFolderSeriesIdRef.current = selectedFolderSeriesId;
+    autoAnalyzeTriggeredRef.current = false;
+    pollStartedAtRef.current = null;
+    status404CountRef.current = 0;
+    setResult(null);
+    setJobId(null);
+    setIsProcessing(false);
+    setReportSessionId(null);
+    setReportDrawerOpen(false);
+    setIsReportActive(false);
+    setReportError(null);
+    setWorkspaceSection('none');
+    setViewMode('original');
+    setDicomHudMetadata(null);
+    setDicomPreviewDataUrl(null);
+    setDicomAutoWindow(null);
+  }, [originalFolderMode, selectedFolderSeriesId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!originalIsDicom || !dicomHudFile) {
+      setDicomHudMetadata(null);
+      setDicomPreviewDataUrl(null);
+      setDicomAutoWindow(null);
+      return;
+    }
+
+    const loadHudMetadata = async () => {
+      try {
+        const [arrayBuffer, inspection] = await Promise.all([
+          dicomHudFile.arrayBuffer(),
+          inspectLocalDicomFile(dicomHudFile).catch(() => null),
+        ]);
+        const byteArray = new Uint8Array(arrayBuffer);
+        const dataSet = dicomParser.parseDicom(byteArray, { untilTag: 'x7fe00010' });
+        const pixelElement = dataSet.elements.x7fe00010;
+        const rows = dataSet.uint16('x00280010') || 0;
+        const columns = dataSet.uint16('x00280011') || 0;
+        const samplesPerPixel = dataSet.uint16('x00280002') || 1;
+        const bitsAllocated = dataSet.uint16('x00280100') || 16;
+        const pixelRepresentation = dataSet.uint16('x00280103') || 0;
+        const rescaleSlope = Number(dataSet.string('x00281053') || '1') || 1;
+        const rescaleIntercept = Number(dataSet.string('x00281052') || '0') || 0;
+        let nextAutoWindow: { level: number; width: number } | null = null;
+
+        if (pixelElement && rows > 0 && columns > 0 && samplesPerPixel === 1 && (bitsAllocated === 8 || bitsAllocated === 16)) {
+          const bytesPerPixel = Math.max(1, bitsAllocated / 8);
+          const singleFrameBytes = rows * columns * samplesPerPixel * bytesPerPixel;
+          let frameOffset = pixelElement.dataOffset;
+          if (pixelElement.length > singleFrameBytes && singleFrameBytes > 0) {
+            const numberOfFrames = Math.floor(pixelElement.length / singleFrameBytes);
+            frameOffset += Math.floor(numberOfFrames / 2) * singleFrameBytes;
+          }
+
+          const pixelBytes = dataSet.byteArray.slice(frameOffset, frameOffset + singleFrameBytes);
+          let scalarData: Uint8Array | Int8Array | Uint16Array | Int16Array | null = null;
+          if (bitsAllocated === 8) {
+            scalarData = pixelRepresentation === 1
+              ? new Int8Array(pixelBytes.buffer, pixelBytes.byteOffset, pixelBytes.byteLength)
+              : pixelBytes;
+          } else if (bitsAllocated === 16) {
+            scalarData = pixelRepresentation === 1
+              ? new Int16Array(pixelBytes.buffer, pixelBytes.byteOffset, pixelBytes.byteLength / 2)
+              : new Uint16Array(pixelBytes.buffer, pixelBytes.byteOffset, pixelBytes.byteLength / 2);
+          }
+
+          const autoWindow = scalarData
+            ? estimateAutoWindowFromPixelData(scalarData, rescaleSlope, rescaleIntercept)
+            : null;
+          nextAutoWindow = autoWindow
+            ? { level: Math.round(autoWindow.level), width: Math.round(autoWindow.width) }
+            : null;
+        }
+
+        if (!cancelled) {
+          setDicomHudMetadata(parseDicomMetadataFromDataSet(dataSet, dicomHudFile.name));
+          setDicomPreviewDataUrl(inspection?.previewDataUrl || null);
+          setDicomAutoWindow(nextAutoWindow);
+        }
+      } catch (error) {
+        console.warn('Failed to parse RenewPage DICOM HUD metadata', error);
+        if (!cancelled) {
+          setDicomHudMetadata(null);
+          setDicomPreviewDataUrl(null);
+          setDicomAutoWindow(null);
+        }
+      }
+    };
+
+    void loadHudMetadata();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dicomHudFile, originalIsDicom]);
+
+  useEffect(() => {
+    if (autoAnalyzeTriggeredRef.current) return;
+    if (result || jobId) return;
+
+    const autoAnalyzeFile =
+      originalFolderMode
+        ? (selectedFolderSeries?.files?.[0] || null)
+        : (locationState.originalIsDicom ? (originalFile || null) : null);
+
+    if (!autoAnalyzeFile) return;
+
+    autoAnalyzeTriggeredRef.current = true;
+    setIsProcessing(true);
+    setReportError(null);
+
+    void requestAsyncDetection(autoAnalyzeFile, [])
+      .then((state) => {
+        setJobId(state.jobId);
+      })
+      .catch((error) => {
+        console.error('RenewPage auto analysis request failed', error);
+        setIsProcessing(false);
+        setReportError(error?.message || 'Failed to request analysis');
+        autoAnalyzeTriggeredRef.current = false;
+      });
+  }, [
+    jobId,
+    locationState.originalIsDicom,
+    originalFile,
+    originalFolderMode,
+    result,
+    selectedFolderSeries,
+  ]);
+
+  useEffect(() => {
+    let timer: number | undefined;
+
+    if (jobId && !result) {
+      setIsProcessing(true);
+      if (pollStartedAtRef.current === null) {
+        pollStartedAtRef.current = Date.now();
+        status404CountRef.current = 0;
+      }
+      timer = window.setInterval(async () => {
+        try {
+          let response = await fetch(`/api/detect/status/${jobId}`);
+          const contentType = response.headers.get('content-type') || '';
+          if (!contentType.includes('application/json')) {
+            response = await fetch(withDirectApiBase(`/api/detect/status/${jobId}`));
+          }
+
+          if (!response.ok) {
+            if (response.status === 404) {
+              status404CountRef.current += 1;
+              const startedAt = pollStartedAtRef.current ?? Date.now();
+              const elapsed = Date.now() - startedAt;
+              if (status404CountRef.current >= 20 || elapsed > 90000) {
+                window.clearInterval(timer);
+                setIsProcessing(false);
+                setReportError('Analysis status was not found. Please try again.');
+                setJobId(null);
+                pollStartedAtRef.current = null;
+                status404CountRef.current = 0;
+              }
+            }
+            return;
+          }
+
+          status404CountRef.current = 0;
+
+          const data = await readJsonOrThrow<any>(response);
+          if (data.success && data.status === 'done' && data.result) {
+            window.clearInterval(timer);
+            setResult(data.result);
+            setJobId(null);
+            setIsProcessing(false);
+            pollStartedAtRef.current = null;
+            status404CountRef.current = 0;
+          } else if (data.status === 'failed') {
+            window.clearInterval(timer);
+            setJobId(null);
+            setIsProcessing(false);
+            setReportError(data.error || 'Analysis failed');
+            pollStartedAtRef.current = null;
+            status404CountRef.current = 0;
+          }
+        } catch (error) {
+          console.error('RenewPage polling error:', error);
+        }
+      }, 1500);
+    }
+
+    return () => {
+      if (timer) window.clearInterval(timer);
+    };
+  }, [jobId, result]);
+
+  useEffect(() => {
+    if (!result) return;
+
+    const nextHasStructuredOverlay = Boolean(
+      (Array.isArray(result?.sinus_contours) && result.sinus_contours.length > 0) ||
+      (Array.isArray(result?.nerve_contours) && result.nerve_contours.length > 0) ||
+      (Array.isArray(result?.teeth) && result.teeth.length > 0) ||
+      (Array.isArray(result?.teeth_objects) && result.teeth_objects.length > 0)
+    );
+
+    if (nextHasStructuredOverlay) {
+      setViewMode((current) => (current === 'original' ? 'overlay' : current));
+    }
+  }, [result]);
+
+  useEffect(() => {
+    setPanoZoom(1);
+    setPanoOffset({ x: 0, y: 0 });
+    setPanoBrightness(PANO_DEFAULT_BRIGHTNESS);
+    setPanoContrast(PANO_DEFAULT_CONTRAST);
+    setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
+    setActiveTooth(null);
+    setActiveDetectionId(null);
+    setActiveLegendFilter(null);
+    autoWindowAppliedRef.current = null;
+  }, [panoViewerUrl]);
+
+  useEffect(() => {
+    if (activeDetectionId && !normalizedDetections.some((detection) => detection.id === activeDetectionId)) {
+      setActiveDetectionId(null);
+    }
+  }, [activeDetectionId, normalizedDetections]);
+
+  useEffect(() => {
+    if (activeTooth && activeDetectionId) {
+      const activeDetection = normalizedDetections.find((detection) => detection.id === activeDetectionId);
+      if (activeDetection?.toothFdi && activeDetection.toothFdi !== activeTooth) {
+        setActiveTooth(activeDetection.toothFdi);
+      }
+    }
+  }, [activeDetectionId, activeTooth, normalizedDetections]);
+
+  useEffect(() => {
+    fitPanoImage();
+  }, [panoBodyWidth, panoBodyHeight, panoViewerUrl]);
+
+  const overlayScaleX = overlayCoordinateSize.width / Math.max(1, panoNaturalSize.width || overlayCoordinateSize.width);
+  const overlayScaleY = overlayCoordinateSize.height / Math.max(1, panoNaturalSize.height || overlayCoordinateSize.height);
+  const displayDicomHudMetadata = (() => {
+    if (!dicomHudMetadata) return null;
+    if (!originalIsDicom) return dicomHudMetadata;
+    const nextWindow = deriveDisplayWindowFromControls(
+      dicomHudMetadata.windowCenter,
+      dicomHudMetadata.windowWidth,
+      panoBrightness,
+      panoContrast
+    );
+    return {
+      ...dicomHudMetadata,
+      windowCenter: nextWindow.windowCenter,
+      windowWidth: nextWindow.windowWidth,
+    };
+  })();
+
+  const handleDetectionSelect = (detection: NormalizedDetection) => {
+    const isSameDetection = activeDetectionId === detection.id;
+    setActiveDetectionId(isSameDetection ? null : detection.id);
+    setActiveTooth(isSameDetection ? null : detection.toothFdi ?? null);
+    if (!isSameDetection) {
+      setViewMode('overlay');
+    }
+  };
+
+  const handleToothSelect = (toothFdi: string) => {
+    const nextTooth = activeTooth === toothFdi ? null : toothFdi;
+    setActiveTooth(nextTooth);
+    setActiveDetectionId(nextTooth ? primaryDetectionByTooth[nextTooth]?.id ?? null : null);
+    if (nextTooth && primaryDetectionByTooth[nextTooth]) {
+      setViewMode('overlay');
+    }
+  };
+
+  const handleLegendToggle = (condition: ToothCondition) => {
+    setActiveLegendFilter((current) => (current === condition ? null : condition));
+    setActiveTooth(null);
+    setActiveDetectionId(null);
+    setViewMode((current) => (current === 'original' ? 'overlay' : current));
+  };
+
+  const handlePanoWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!panoViewerUrl) return;
+    if (selectedToolbarButton !== 'pan') return;
+    event.preventDefault();
+    const delta = event.deltaY < 0 ? 0.12 : -0.12;
+    setPanoZoom((current) => clamp(Number((current + delta).toFixed(2)), 0.35, 5));
+  };
+
+  const handlePanoPointerDown = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!panoViewerUrl) return;
+    if (selectedToolbarButton === 'measure-eraser') {
+      const point = clientToOverlayPoint(event.clientX, event.clientY);
+      if (!point) return;
+      event.preventDefault();
+      setMeasureShapes((current) => {
+        const targetIndex = [...current]
+          .map((shape, index) => ({ shape, index }))
+          .reverse()
+          .find(({ shape }) => isPointNearShape(point, shape))?.index;
+        if (targetIndex == null) return current;
+        return current.filter((_, index) => index !== targetIndex);
+      });
+      setPendingMeasurePoints([]);
+      setMeasurePreviewPoint(null);
+      return;
+    }
+    if (isCustomOverlayTool) {
+      if (event.button !== 0) return;
+      const point = clientToOverlayPoint(event.clientX, event.clientY);
+      if (!point) return;
+      event.preventDefault();
+
+      if (activeMeasureSubtool === 'text') {
+        const text = window.prompt('Text Annotation:', 'Note')?.trim();
+        if (text) {
+          setMeasureShapes((current) => [...current, { type: 'text', points: [point], text }]);
+        }
+        setPendingMeasurePoints([]);
+        setMeasurePreviewPoint(null);
+        return;
+      }
+
+      if (isFreeformDrawTool) {
+        const nextPoints = [...pendingMeasurePoints, point];
+        setPendingMeasurePoints(nextPoints);
+        setMeasurePreviewPoint(point);
+        return;
+      }
+
+      const nextPoints = [...pendingMeasurePoints, point];
+      const required = requiredPointsForMeasureTool(activeMeasureSubtool);
+      if (required > 0 && nextPoints.length >= required) {
+        setMeasureShapes((current) => [...current, { type: activeMeasureSubtool, points: nextPoints }]);
+        setPendingMeasurePoints([]);
+        setMeasurePreviewPoint(null);
+      } else {
+        setPendingMeasurePoints(nextPoints);
+        setMeasurePreviewPoint(point);
+      }
+      return;
+    }
+
+    if (selectedToolbarButton === 'pan') {
+      panoDragRef.current = {
+        mode: 'pan',
+        startX: event.clientX,
+        startY: event.clientY,
+        startOffsetX: panoOffset.x,
+        startOffsetY: panoOffset.y,
+        startBrightness: panoBrightness,
+        startContrast: panoContrast,
+      };
+      return;
+    }
+
+    if (selectedToolbarButton === 'wlww') {
+      panoDragRef.current = {
+        mode: 'wlww',
+        startX: event.clientX,
+        startY: event.clientY,
+        startOffsetX: panoOffset.x,
+        startOffsetY: panoOffset.y,
+        startBrightness: panoBrightness,
+        startContrast: panoContrast,
+      };
+      return;
+    }
+  };
+
+  const handlePanoPointerMove = (event: React.MouseEvent<HTMLDivElement>) => {
+    const dragState = panoDragRef.current;
+    if (isCustomOverlayTool && pendingMeasurePoints.length > 0) {
+      const point = clientToOverlayPoint(event.clientX, event.clientY);
+      setMeasurePreviewPoint(point);
+      return;
+    }
+
+    if (dragState.mode === 'pan') {
+      const dx = event.clientX - dragState.startX;
+      const dy = event.clientY - dragState.startY;
+      setPanoOffset({
+        x: dragState.startOffsetX + dx,
+        y: dragState.startOffsetY + dy,
+      });
+      return;
+    }
+
+    if (dragState.mode === 'wlww') {
+      const dx = event.clientX - dragState.startX;
+      const dy = event.clientY - dragState.startY;
+      setPanoContrast(clamp(Math.round(dragState.startContrast + dx * 0.35), 40, 220));
+      setPanoBrightness(clamp(Math.round(dragState.startBrightness - dy * 0.35), 40, 220));
+      return;
+    }
+
+    if (selectedToolbarButton === 'magnifier') {
+      const viewerRect = panoViewportRef.current?.getBoundingClientRect();
+      const displayRect = panoDisplayRef.current?.getBoundingClientRect();
+      if (!viewerRect || !displayRect || !panoNaturalSize.width || !panoNaturalSize.height) return;
+      if (
+        event.clientX < displayRect.left ||
+        event.clientX > displayRect.right ||
+        event.clientY < displayRect.top ||
+        event.clientY > displayRect.bottom
+      ) {
+        setPanoMagnifier((current) =>
+          current.visible
+            ? { visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 }
+            : current
+        );
+        return;
+      }
+      const normalizedX = clamp((event.clientX - displayRect.left) / Math.max(1, displayRect.width), 0, 1);
+      const normalizedY = clamp((event.clientY - displayRect.top) / Math.max(1, displayRect.height), 0, 1);
+      const imgX = (flipped ? 1 - normalizedX : normalizedX) * panoNaturalSize.width;
+      const imgY = normalizedY * panoNaturalSize.height;
+      setPanoMagnifier({
+        visible: true,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        viewerX: clamp(event.clientX - viewerRect.left, 0, viewerRect.width),
+        viewerY: clamp(event.clientY - viewerRect.top, 0, viewerRect.height),
+        imgX,
+        imgY,
+      });
+    }
+  };
+
+  const handlePanoPointerUp = () => {
+    panoDragRef.current.mode = null;
+  };
+
+  const handlePanoPointerLeave = () => {
+    panoDragRef.current.mode = null;
+    setPanoMagnifier((current) =>
+      current.visible ? { visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 } : current
+    );
+    if (isCustomOverlayTool) {
+      setMeasurePreviewPoint(null);
+    }
+  };
+
+  const handlePanoDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isCustomDrawTool || !isFreeformDrawTool) return;
+    event.preventDefault();
+    const point = clientToOverlayPoint(event.clientX, event.clientY);
+    finalizeFreeformShape(point);
+  };
+
+  const handlePanoContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isCustomDrawTool || !isFreeformDrawTool) return;
+    event.preventDefault();
+    const point = clientToOverlayPoint(event.clientX, event.clientY);
+    finalizeFreeformShape(point);
+  };
+
+  const panoMagnifierViewport = (() => {
+    if (
+      selectedToolbarButton !== 'magnifier' ||
+      !panoViewerUrl ||
+      !panoMagnifier.visible ||
+      !panoNaturalSize.width ||
+      !panoNaturalSize.height
+    ) {
+      return null;
+    }
+
+    const viewerWidth = panoBodyWidth;
+    const viewerHeight = panoBodyHeight;
+    const sampleSize = Math.max(PANO_LENS_SIZE / PANO_LENS_ZOOM, 1);
+    const sampleLeft = clamp(
+      panoMagnifier.imgX - sampleSize / 2,
+      0,
+      Math.max(0, panoNaturalSize.width - sampleSize)
+    );
+    const sampleTop = clamp(
+      panoMagnifier.imgY - sampleSize / 2,
+      0,
+      Math.max(0, panoNaturalSize.height - sampleSize)
+    );
+
+    let lensLeft = panoMagnifier.viewerX - PANO_LENS_SIZE / 2;
+    let lensTop = panoMagnifier.viewerY - PANO_LENS_SIZE / 2;
+
+    lensLeft = clamp(
+      lensLeft,
+      PANO_LENS_EDGE_PADDING,
+      Math.max(PANO_LENS_EDGE_PADDING, viewerWidth - PANO_LENS_SIZE - PANO_LENS_EDGE_PADDING)
+    );
+    lensTop = clamp(
+      lensTop,
+      PANO_LENS_EDGE_PADDING,
+      Math.max(PANO_LENS_EDGE_PADDING, viewerHeight - PANO_LENS_SIZE - PANO_LENS_EDGE_PADDING)
+    );
+
+    return {
+      lensLeft,
+      lensTop,
+      sampleLeft,
+      sampleTop,
+      sampleSize,
+    };
+  })();
+
+  useEffect(() => {
+    if (!panoMagnifierViewport || !panoLensCanvasRef.current || !panoImageRef.current) return;
+
+    let frameId = 0;
+    frameId = window.requestAnimationFrame(() => {
+      const canvas = panoLensCanvasRef.current;
+      const image = panoImageRef.current;
+      if (!canvas || !image) return;
+
+      canvas.width = PANO_LENS_SIZE;
+      canvas.height = PANO_LENS_SIZE;
+      const context = canvas.getContext('2d');
+      if (!context) return;
+
+      context.clearRect(0, 0, PANO_LENS_SIZE, PANO_LENS_SIZE);
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = 'high';
+      context.save();
+      context.filter = `invert(${inverted ? 1 : 0}) brightness(${panoBrightness}%) contrast(${panoContrast}%)`;
+      if (flipped) {
+        context.translate(PANO_LENS_SIZE, 0);
+        context.scale(-1, 1);
+      }
+      context.drawImage(
+        image,
+        panoMagnifierViewport.sampleLeft,
+        panoMagnifierViewport.sampleTop,
+        panoMagnifierViewport.sampleSize,
+        panoMagnifierViewport.sampleSize,
+        0,
+        0,
+        PANO_LENS_SIZE,
+        PANO_LENS_SIZE
+      );
+      context.restore();
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [panoMagnifierViewport, panoBrightness, panoContrast, inverted, flipped]);
+
+  const handleOutputCapture = async () => {
+    const canvas = await buildPanoCaptureCanvas();
+    if (!canvas) return;
+
+    const dataUrl = canvas.toDataURL('image/png');
+    setCapturedOutputs((current) => [
+      {
+        id: `capture-${Date.now()}`,
+        dataUrl,
+        createdAt: Date.now(),
+      },
+      ...current,
+    ].slice(0, 8));
+
+    try {
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('Failed to generate capture image');
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'image/png': blob,
+        }),
+      ]);
+    } catch (error) {
+      console.error('Failed to copy pano capture', error);
+    }
+  };
+
+  const handleOutputSave = async () => {
+    const canvas = await buildPanoCaptureCanvas();
+    if (!canvas) return;
+
+    const link = document.createElement('a');
+    link.href = canvas.toDataURL('image/png');
+    link.download = `renew-pano-${Date.now()}.png`;
+    link.click();
+  };
+
   const flashToolbarActive = (button: ToolbarKey) => {
     setFlashToolbarButton(button);
     window.setTimeout(() => {
@@ -463,18 +3012,96 @@ export function RenewPage() {
     }, 180);
   };
 
+  const closeToolSubmenu = () => {
+    setToolSubmenu(null);
+  };
+
+  const activateMeasureSubtool = (tool: MeasureSubtoolKey) => {
+    closeToolSubmenu();
+    setActiveMeasureSubtool(tool);
+    setPendingMeasurePoints([]);
+    setMeasurePreviewPoint(null);
+
+    switch (tool) {
+      case 'length':
+        setCornerstoneActiveTool('Length');
+        setSelectedToolbarButton('measure-length');
+        return;
+      case 'bidirectional':
+        setCornerstoneActiveTool('Bidirectional');
+        setSelectedToolbarButton('measure-length');
+        return;
+      case 'angle':
+        setCornerstoneActiveTool('Angle');
+        setSelectedToolbarButton('measure-length');
+        return;
+      case 'text':
+        setCornerstoneActiveTool('Label');
+        setSelectedToolbarButton('measure-draw');
+        return;
+      case 'arrow':
+        setCornerstoneActiveTool('ArrowAnnotate');
+        setSelectedToolbarButton('measure-draw');
+        return;
+      case 'ellipse':
+        setCornerstoneActiveTool('EllipticalROI');
+        setSelectedToolbarButton('measure-draw');
+        return;
+      case 'rect':
+        setCornerstoneActiveTool('RectangleROI');
+        setSelectedToolbarButton('measure-draw');
+        return;
+      case 'circle':
+        setCornerstoneActiveTool('CircleROI');
+        setSelectedToolbarButton('measure-draw');
+        return;
+      case 'roi-free':
+        setCornerstoneActiveTool('PlanarFreehandROI');
+        setSelectedToolbarButton('measure-draw');
+        return;
+      case 'spline-roi':
+        setCornerstoneActiveTool('SplineROI');
+        setSelectedToolbarButton('measure-draw');
+        return;
+      case 'livewire':
+        setCornerstoneActiveTool('LivewireContour');
+        setSelectedToolbarButton('measure-draw');
+        return;
+    }
+  };
+
+  const toggleToolSubmenu = (menu: MeasureMenuKey, left: number, top: number) => {
+    setToolSubmenu((current) =>
+      current && current.menu === menu
+        ? null
+        : {
+            menu,
+            left,
+            top,
+          }
+    );
+  };
+
   const handleToolSelection = (button: ToolbarKey) => {
+    if (button !== 'measure-length' && button !== 'measure-draw') {
+      closeToolSubmenu();
+      setPendingMeasurePoints([]);
+      setMeasurePreviewPoint(null);
+    }
     switch (button) {
       case 'pointer':
         setCornerstoneActiveTool('Pan');
+        setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
         setSelectedToolbarButton('pointer');
         return;
       case 'pan':
         setCornerstoneActiveTool('Pan');
+        setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
         setSelectedToolbarButton('pan');
         return;
       case 'wlww':
         setCornerstoneActiveTool('WindowLevel');
+        setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
         setSelectedToolbarButton('wlww');
         return;
       case 'invert':
@@ -483,19 +3110,22 @@ export function RenewPage() {
         return;
       case 'magnifier':
         setCornerstoneActiveTool('Pan');
-        setSelectedToolbarButton((current) => (current === 'magnifier' ? 'pointer' : 'magnifier'));
+        setSelectedToolbarButton((current) => {
+          const next = current === 'magnifier' ? 'pointer' : 'magnifier';
+          if (next !== 'magnifier') {
+            setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
+          }
+          return next;
+        });
         return;
       case 'flip':
+        setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
         setFlipped((current) => !current);
         setSelectedToolbarButton((current) => (current === 'flip' ? 'pointer' : 'flip'));
         return;
       case 'measure-length':
-        setCornerstoneActiveTool('Length');
-        setSelectedToolbarButton('measure-length');
         return;
       case 'measure-draw':
-        setCornerstoneActiveTool('ArrowAnnotate');
-        setSelectedToolbarButton('measure-draw');
         return;
       case 'measure-eraser':
         setCornerstoneActiveTool('Eraser');
@@ -503,59 +3133,99 @@ export function RenewPage() {
         return;
       case 'measure-clear':
         clearAllAnnotations();
+        setMeasureShapes([]);
+        setPendingMeasurePoints([]);
+        setMeasurePreviewPoint(null);
         flashToolbarActive('measure-clear');
         setSelectedToolbarButton('pointer');
+        setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
         return;
       case 'measure-rotate':
-        setCornerstoneActiveTool('TrackballRotate');
-        setSelectedToolbarButton('measure-rotate');
+        flashToolbarActive('measure-rotate');
         return;
       case 'measure-reset':
         clearAllAnnotations();
+        setMeasureShapes([]);
+        setPendingMeasurePoints([]);
+        setMeasurePreviewPoint(null);
         setInverted(false);
         setFlipped(false);
         setViewMode('original');
+        setActiveTooth(null);
+        setActiveDetectionId(null);
+        setActiveLegendFilter(null);
+        setPanoZoom(1);
+        setPanoOffset({ x: 0, y: 0 });
+        setPanoBrightness(PANO_DEFAULT_BRIGHTNESS);
+        setPanoContrast(PANO_DEFAULT_CONTRAST);
+        setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
         flashToolbarActive('measure-reset');
         setSelectedToolbarButton('pointer');
         setReportError(null);
         setCornerstoneActiveTool('Pan');
         return;
       case 'output-capture':
+        flashToolbarActive('output-capture');
+        void handleOutputCapture();
+        return;
       case 'output-save':
-        setSelectedToolbarButton(button);
+        flashToolbarActive('output-save');
+        void handleOutputSave();
         return;
       case 'task-original':
-        setViewMode('original');
-        setSelectedToolbarButton('task-original');
+        setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
+        if (viewMode === 'overlay') {
+          setViewMode('original');
+          setActiveDetectionId(null);
+          setSelectedToolbarButton('pointer');
+        } else {
+          setViewMode('overlay');
+          setActiveDetectionId(null);
+          setSelectedToolbarButton('task-original');
+        }
         return;
       case 'task-heatmap':
-        setViewMode('heatmap');
-        setSelectedToolbarButton('task-heatmap');
+        setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
+        if (viewMode === 'heatmap') {
+          setViewMode('original');
+          setSelectedToolbarButton('pointer');
+        } else {
+          setViewMode('heatmap');
+          setSelectedToolbarButton('task-heatmap');
+        }
         return;
       default:
         return;
     }
   };
 
-  const handleStartReport = async () => {
-    setWorkspaceSection('report');
+  useEffect(() => {
+    if (!toolSubmenu) return;
 
-    if (reportStartState === 'creating') return;
+    const handlePointerDown = () => {
+      setToolSubmenu(null);
+    };
 
-    if (reportSessionId) {
-      setReportDrawerOpen((current) => {
-        const next = !current;
-        setIsReportActive(next);
-        setWorkspaceSection(next ? 'report' : 'none');
-        return next;
-      });
-      setReportError(null);
-      return;
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+    };
+  }, [toolSubmenu]);
+
+  useEffect(() => {
+    if (!isCustomMeasureTool) {
+      setPendingMeasurePoints([]);
+      setMeasurePreviewPoint(null);
     }
+  }, [isCustomMeasureTool]);
+
+  const ensureReportSession = async () => {
+    if (reportStartState === 'creating') return;
+    if (reportSessionId) return reportSessionId;
 
     if (!result) {
       setReportError('Analysis result is not ready yet.');
-      return;
+      return null;
     }
 
     setReportStartState('creating');
@@ -568,15 +3238,58 @@ export function RenewPage() {
         language: 'English',
       });
       setReportSessionId(response.session_id);
-      setReportDrawerOpen(true);
-      setIsReportActive(true);
+      return response.session_id;
     } catch (error: any) {
       setReportError(error?.message || 'Failed to start report workspace');
-      setIsReportActive(false);
+      return null;
     } finally {
       setReportStartState('idle');
     }
   };
+
+  const handleStartReport = async () => {
+    if (reportSessionId) {
+      setWorkspaceSection((current) => {
+        const next = current === 'report' ? 'none' : 'report';
+        setIsReportActive(next === 'report');
+        return next;
+      });
+      setReportDrawerOpen(false);
+      setReportError(null);
+      return;
+    }
+
+    const nextSessionId = await ensureReportSession();
+    if (!nextSessionId) {
+      setIsReportActive(false);
+      return;
+    }
+
+    setWorkspaceSection('report');
+    setReportDrawerOpen(false);
+    setIsReportActive(true);
+  };
+
+  const handleOpenReportPanel = async () => {
+    if (reportDrawerOpen) {
+      setReportDrawerOpen(false);
+      setIsReportActive(false);
+      return;
+    }
+
+    const nextSessionId = await ensureReportSession();
+    if (!nextSessionId) {
+      setIsReportActive(false);
+      return;
+    }
+
+    setReportDrawerOpen(true);
+    setIsReportActive(true);
+    setReportError(null);
+  };
+
+  const isReportWorkspaceVisible =
+    workspaceSection === 'report' && (reportStartState === 'creating' || Boolean(reportSessionId) || Boolean(reportError));
 
   return (
     <div
@@ -644,68 +3357,260 @@ export function RenewPage() {
             SATURN
           </div>
 
-          <div style={{ width: wp(topBarWidth), height: hp(18), left: wp(topBarLeft), top: hp(49), position: 'absolute', background: '#5C5C5C', zIndex: 1 }} />
-          <div style={{ width: wp(viewerWidth), height: hp(1018), left: wp(viewerLeft), top: hp(50), position: 'absolute', background: 'black' }} />
-          {isChartVisible && (
-            <div style={{ width: wp(viewerWidth), height: hp(18), left: wp(viewerLeft), top: hp(804), position: 'absolute', background: '#5C5C5C', zIndex: 1 }} />
-          )}
-          <div style={{ width: wp(viewerWidth), height: hp(panoFrameHeight), left: wp(viewerLeft), top: hp(49), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
-          {isChartVisible && (
-            <div
-              style={{
-                width: wp(viewerWidth),
-                height: hp(264),
-                left: wp(viewerLeft),
-                top: hp(804),
-                position: 'absolute',
-                border: `${scalePx(1)} solid #4C4C4C`,
-                pointerEvents: 'none',
-              }}
-            />
-          )}
-          <div style={{ width: scalePx(1), height: hp(1019), left: wp(viewerLeft), top: hp(49), position: 'absolute', background: '#4C4C4C' }} />
-          <div
-            style={{
-              width: wp(panoBodyWidth),
-              height: hp(panoBodyHeight),
-              left: wp(viewerLeft + 1),
-              top: hp(panoBodyTop),
-              position: 'absolute',
-              overflow: 'hidden',
-              background: '#000000',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            {panoViewerUrl ? (
-              <img
-                src={panoViewerUrl}
-                alt="Panorama"
-                draggable={false}
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'contain',
-                  filter: `invert(${inverted ? 1 : 0})`,
-                  transform: flipped ? 'scaleX(-1)' : 'none',
-                  transformOrigin: 'center',
-                  opacity: viewMode === 'heatmap' ? 0.96 : 1,
-                }}
-              />
-            ) : (
+          {!isReportWorkspaceVisible && (
+            <>
+              <div style={{ width: wp(topBarWidth), height: hp(18), left: wp(topBarLeft), top: hp(49), position: 'absolute', background: '#5C5C5C', zIndex: 1 }} />
+              <div style={{ width: wp(viewerWidth), height: hp(1018), left: wp(viewerLeft), top: hp(50), position: 'absolute', background: 'black' }} />
+              {isChartVisible && (
+                <div style={{ width: wp(viewerWidth), height: hp(18), left: wp(viewerLeft), top: hp(804), position: 'absolute', background: '#5C5C5C', zIndex: 1 }} />
+              )}
+              <div style={{ width: wp(viewerWidth), height: hp(panoFrameHeight), left: wp(viewerLeft), top: hp(49), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
+              {isChartVisible && (
+                <div
+                  style={{
+                    width: wp(viewerWidth),
+                    height: hp(264),
+                    left: wp(viewerLeft),
+                    top: hp(804),
+                    position: 'absolute',
+                    border: `${scalePx(1)} solid #4C4C4C`,
+                    pointerEvents: 'none',
+                  }}
+                />
+              )}
+              <div style={{ width: scalePx(1), height: hp(1019), left: wp(viewerLeft), top: hp(49), position: 'absolute', background: '#4C4C4C' }} />
               <div
                 style={{
-                  color: '#7A7A7A',
-                  fontSize: scalePx(14),
-                  fontWeight: 700,
-                  letterSpacing: '0.04em',
+                  width: wp(panoBodyWidth),
+                  height: hp(panoBodyHeight),
+                  left: wp(viewerLeft + 1),
+                  top: hp(panoBodyTop),
+                  position: 'absolute',
+                  overflow: 'hidden',
+                  background: '#000000',
+                  cursor:
+                    selectedToolbarButton === 'pan'
+                      ? 'grab'
+                      : selectedToolbarButton === 'wlww'
+                        ? 'ew-resize'
+                        : selectedToolbarButton === 'magnifier'
+                          ? 'zoom-in'
+                          : selectedToolbarButton === 'measure-eraser' || isCustomOverlayTool
+                            ? 'crosshair'
+                          : 'default',
                 }}
+                ref={panoViewportRef}
+                onMouseDown={handlePanoPointerDown}
+                onMouseMove={handlePanoPointerMove}
+                onMouseUp={handlePanoPointerUp}
+                onMouseLeave={handlePanoPointerLeave}
+                onDoubleClick={handlePanoDoubleClick}
+                onContextMenu={handlePanoContextMenu}
+                onWheel={handlePanoWheel}
               >
-                No panorama source
+                {panoViewerUrl ? (
+                  <div
+                    style={{
+                      width: wp(panoDisplaySize.width || panoBodyWidth),
+                      height: hp(panoDisplaySize.height || panoBodyHeight),
+                      position: 'absolute',
+                      left: wp((panoBodyWidth - (panoDisplaySize.width || panoBodyWidth)) / 2),
+                      top: hp((panoBodyHeight - (panoDisplaySize.height || panoBodyHeight)) / 2),
+                      transform: `translate(${panoOffset.x}px, ${panoOffset.y}px) scale(${panoZoom}) scaleX(${flipped ? -1 : 1})`,
+                      transformOrigin: 'center',
+                      isolation: 'isolate',
+                    }}
+                    ref={panoDisplayRef}
+                  >
+                    <img
+                      ref={panoImageRef}
+                      src={panoViewerUrl}
+                      alt="Panorama"
+                      draggable={false}
+                      onLoad={fitPanoImage}
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'contain',
+                        filter: `invert(${inverted ? 1 : 0}) brightness(${panoBrightness}%) contrast(${panoContrast}%)`,
+                        opacity: 1,
+                        userSelect: 'none',
+                        pointerEvents: 'none',
+                        position: 'relative',
+                        zIndex: 1,
+                      }}
+                    />
+                    {viewMode !== 'original' && overlayCoordinateSize.width > 0 && overlayCoordinateSize.height > 0 && (
+                      <svg
+                        ref={panoOverlaySvgRef}
+                        viewBox={`0 0 ${overlayCoordinateSize.width} ${overlayCoordinateSize.height}`}
+                        preserveAspectRatio="none"
+                        style={{
+                          position: 'absolute',
+                          inset: 0,
+                          width: '100%',
+                          height: '100%',
+                          pointerEvents: viewMode === 'overlay' ? 'auto' : 'none',
+                          zIndex: 5,
+                        }}
+                      >
+                        <defs>
+                          <radialGradient id="renewCariesGlow" cx="50%" cy="50%" r="50%">
+                            <stop offset="0%" stopColor="rgba(255, 60, 60, 0.95)" />
+                            <stop offset="100%" stopColor="rgba(255, 60, 60, 0)" />
+                          </radialGradient>
+                          <radialGradient id="renewPeriGlow" cx="50%" cy="50%" r="50%">
+                            <stop offset="0%" stopColor="rgba(255, 166, 0, 0.92)" />
+                            <stop offset="100%" stopColor="rgba(255, 166, 0, 0)" />
+                          </radialGradient>
+                          <filter id="renewRiskBlurStrong" x="-25%" y="-25%" width="150%" height="150%">
+                            <feGaussianBlur stdDeviation={10 / effectiveScale} />
+                          </filter>
+                          <filter id="renewRiskBlurSoft" x="-20%" y="-20%" width="140%" height="140%">
+                            <feGaussianBlur stdDeviation={5 / effectiveScale} />
+                          </filter>
+                        </defs>
+                        {renderAIDetections()}
+                        {renderRiskDetections()}
+                      </svg>
+                    )}
+                    {overlayCoordinateSize.width > 0 && overlayCoordinateSize.height > 0 && (
+                      <svg
+                        ref={panoMeasureSvgRef}
+                        viewBox={`0 0 ${overlayCoordinateSize.width} ${overlayCoordinateSize.height}`}
+                        preserveAspectRatio="none"
+                        style={{
+                          position: 'absolute',
+                          inset: 0,
+                          width: '100%',
+                          height: '100%',
+                          pointerEvents: isCustomOverlayTool ? 'auto' : 'none',
+                          zIndex: 6,
+                        }}
+                      >
+                        <defs>
+                          <marker id="renewMeasureArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(0, 192, 243, 0.95)" />
+                          </marker>
+                          <marker id="renewMeasureArrowGlow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(255, 255, 255, 0.9)" />
+                          </marker>
+                        </defs>
+                        {measureShapes.map((shape, index) => (
+                          <g key={`measure-shape-${index}`}>{renderCustomShape(shape)}</g>
+                        ))}
+                        {isCustomOverlayTool && pendingMeasurePoints.length > 0
+                          ? renderCustomShape(
+                              {
+                                type: activeMeasureSubtool,
+                                points: pendingMeasurePoints,
+                              },
+                              true
+                            )
+                          : null}
+                      </svg>
+                    )}
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      color: '#7A7A7A',
+                      fontSize: scalePx(14),
+                      fontWeight: 700,
+                      letterSpacing: '0.04em',
+                    }}
+                  >
+                    No panorama source
+                  </div>
+                )}
+                {displayDicomHudMetadata && (
+                  <DicomMetadataOverlay
+                    metadata={displayDicomHudMetadata}
+                    top={12}
+                    right={12}
+                    bottom={12}
+                    leftPanelAlign="right"
+                  />
+                )}
+                {selectedToolbarButton === 'magnifier' && panoMagnifierViewport && (
+                  <div
+                    style={{
+                      width: wp(PANO_LENS_SIZE),
+                      height: hp(PANO_LENS_SIZE),
+                      left: wp(panoMagnifierViewport.lensLeft),
+                      top: hp(panoMagnifierViewport.lensTop),
+                      position: 'absolute',
+                      overflow: 'hidden',
+                      border: `${scalePx(2)} solid rgba(255, 255, 255, 0.75)`,
+                      boxShadow: '0 14px 40px rgba(0, 0, 0, 0.4)',
+                      pointerEvents: 'none',
+                      zIndex: 8,
+                      background: 'rgba(0,0,0,0.22)',
+                    }}
+                  >
+                    <canvas ref={panoLensCanvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+                    {viewMode !== 'original' && overlayCoordinateSize.width > 0 && overlayCoordinateSize.height > 0 && (
+                      <svg
+                        viewBox={`${
+                          panoMagnifierViewport.sampleLeft * overlayScaleX
+                        } ${
+                          panoMagnifierViewport.sampleTop * overlayScaleY
+                        } ${
+                          panoMagnifierViewport.sampleSize * overlayScaleX
+                        } ${
+                          panoMagnifierViewport.sampleSize * overlayScaleY
+                        }`}
+                        preserveAspectRatio="none"
+                        style={{
+                          position: 'absolute',
+                          inset: 0,
+                          width: '100%',
+                          height: '100%',
+                          transform: flipped ? 'scaleX(-1)' : undefined,
+                          transformOrigin: 'center',
+                        }}
+                      >
+                        <defs>
+                          <radialGradient id="renewCariesGlow" cx="50%" cy="50%" r="50%">
+                            <stop offset="0%" stopColor="rgba(255, 60, 60, 0.95)" />
+                            <stop offset="100%" stopColor="rgba(255, 60, 60, 0)" />
+                          </radialGradient>
+                          <radialGradient id="renewPeriGlow" cx="50%" cy="50%" r="50%">
+                            <stop offset="0%" stopColor="rgba(255, 166, 0, 0.92)" />
+                            <stop offset="100%" stopColor="rgba(255, 166, 0, 0)" />
+                          </radialGradient>
+                          <filter id="renewRiskBlurStrong" x="-25%" y="-25%" width="150%" height="150%">
+                            <feGaussianBlur stdDeviation={10 / effectiveScale} />
+                          </filter>
+                          <filter id="renewRiskBlurSoft" x="-20%" y="-20%" width="140%" height="140%">
+                            <feGaussianBlur stdDeviation={5 / effectiveScale} />
+                          </filter>
+                        </defs>
+                        {renderAIDetections()}
+                        {renderRiskDetections()}
+                      </svg>
+                    )}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </>
+          )}
+
+          <RenewReportWorkspacePanel
+            visible={isReportWorkspaceVisible}
+            left={wp(viewerLeft)}
+            top={hp(49)}
+            width={wp(viewerWidth)}
+            height={hp(1019)}
+            sessionId={reportSessionId}
+            isLoading={reportStartState === 'creating'}
+            error={reportError}
+            onClose={() => {
+              setWorkspaceSection('none');
+              setIsReportActive(false);
+              setReportDrawerOpen(false);
+            }}
+          />
 
         <div style={{ width: wp(70), height: hp(1019), left: wp(12), top: hp(49), position: 'absolute', background: '#2D2D2D' }} />
         <div style={{ width: wp(70), height: hp(1019), left: wp(12), top: hp(49), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
@@ -744,8 +3649,18 @@ export function RenewPage() {
         <div style={{ left: wp(109), top: hp(outputLabelTop), position: 'absolute', color: 'white', fontSize: scalePx(13), fontWeight: 700 }}>Output</div>
         <div style={{ left: wp(109), top: hp(390), position: 'absolute', color: 'white', fontSize: scalePx(14), fontWeight: 700 }}>Task</div>
 
-        <div style={{ width: scalePx(7), height: scalePx(7), left: wp(96), top: hp(57), position: 'absolute', background: '#D9D9D9' }} />
-        <div style={{ width: scalePx(7), height: scalePx(7), left: wp(96), top: hp(397), position: 'absolute', background: '#D9D9D9' }} />
+        <img
+          src={headerMarkerIcon}
+          alt=""
+          draggable={false}
+          style={{ width: scalePx(7), height: scalePx(7), left: wp(96), top: hp(57), position: 'absolute' }}
+        />
+        <img
+          src={headerMarkerIcon}
+          alt=""
+          draggable={false}
+          style={{ width: scalePx(7), height: scalePx(7), left: wp(96), top: hp(397), position: 'absolute' }}
+        />
         <div
           style={{
             width: 0,
@@ -790,15 +3705,27 @@ export function RenewPage() {
           { key: 'invert' as ToolbarKey, x: 91.5, y: 141, label: 'Invert', active: inverted },
           { key: 'magnifier' as ToolbarKey, x: 136.5, y: 141, label: 'Magnification', active: selectedToolbarButton === 'magnifier' },
           { key: 'flip' as ToolbarKey, x: 181.5, y: 141, label: 'Flip', active: flipped },
-          { key: 'measure-length' as ToolbarKey, x: 91.5, y: 216, label: 'Ruler', active: selectedToolbarButton === 'measure-length' },
-          { key: 'measure-draw' as ToolbarKey, x: 136.5, y: 216, label: 'Draw', active: selectedToolbarButton === 'measure-draw' },
+          {
+            key: 'measure-length' as ToolbarKey,
+            x: 91.5,
+            y: 216,
+            label: 'Ruler',
+            active: toolSubmenu?.menu === 'measure' || selectedToolbarButton === 'measure-length',
+          },
+          {
+            key: 'measure-draw' as ToolbarKey,
+            x: 136.5,
+            y: 216,
+            label: 'Draw',
+            active: toolSubmenu?.menu === 'annotate' || selectedToolbarButton === 'measure-draw',
+          },
           { key: 'measure-eraser' as ToolbarKey, x: 181.5, y: 216, label: 'Eraser', active: selectedToolbarButton === 'measure-eraser' },
           { key: 'measure-clear' as ToolbarKey, x: 91.5, y: 261, label: 'Delete all measure', active: flashToolbarButton === 'measure-clear' },
-          { key: 'measure-rotate' as ToolbarKey, x: 136.5, y: 261, label: 'Rotate', active: selectedToolbarButton === 'measure-rotate' },
+          { key: 'measure-rotate' as ToolbarKey, x: 136.5, y: 261, label: 'Rotate', active: flashToolbarButton === 'measure-rotate' },
           { key: 'measure-reset' as ToolbarKey, x: 181.5, y: 261, label: 'Reset', active: flashToolbarButton === 'measure-reset' },
-          { key: 'output-capture' as ToolbarKey, x: 92, y: 336, label: 'Capture', active: selectedToolbarButton === 'output-capture' },
-          { key: 'output-save' as ToolbarKey, x: 139, y: 336, label: 'Capture save', active: selectedToolbarButton === 'output-save' },
-          { key: 'task-original' as ToolbarKey, x: 92, y: 416, label: 'Original image', active: viewMode === 'original' },
+          { key: 'output-capture' as ToolbarKey, x: 92, y: 336, label: 'Capture', active: flashToolbarButton === 'output-capture' },
+          { key: 'output-save' as ToolbarKey, x: 139, y: 336, label: 'Capture save', active: flashToolbarButton === 'output-save' },
+          { key: 'task-original' as ToolbarKey, x: 92, y: 416, label: 'Overlay', active: viewMode === 'overlay' },
           { key: 'task-heatmap' as ToolbarKey, x: 139, y: 416, label: 'Heatmap', active: viewMode === 'heatmap' },
         ].map((item, index) => (
           <ToolIcon
@@ -808,11 +3735,75 @@ export function RenewPage() {
             left={item.x}
             top={item.y}
             active={item.active}
-            onClick={() => handleToolSelection(item.key)}
+            onClick={() => {
+              if (item.key === 'measure-length') {
+                toggleToolSubmenu('measure', item.x + TOOL_ICON_SIZE + 4, item.y);
+                return;
+              }
+              if (item.key === 'measure-draw') {
+                toggleToolSubmenu('annotate', item.x + TOOL_ICON_SIZE + 4, item.y);
+                return;
+              }
+              handleToolSelection(item.key);
+            }}
             label={item.label}
           />
         ))}
+        <RenewToolSubmenu
+          visible={toolSubmenu?.menu === 'measure'}
+          left={wp(toolSubmenu?.left ?? 0)}
+          top={hp(toolSubmenu?.top ?? 0)}
+          width={wp(104)}
+          onClose={closeToolSubmenu}
+          items={[
+            { key: 'length', label: 'Length', active: activeMeasureSubtool === 'length', onClick: () => activateMeasureSubtool('length') },
+            {
+              key: 'bidirectional',
+              label: 'Bidirectional',
+              active: activeMeasureSubtool === 'bidirectional',
+              onClick: () => activateMeasureSubtool('bidirectional'),
+            },
+            { key: 'angle', label: 'Angle', active: activeMeasureSubtool === 'angle', onClick: () => activateMeasureSubtool('angle') },
+          ]}
+        />
+        <RenewToolSubmenu
+          visible={toolSubmenu?.menu === 'annotate'}
+          left={wp(toolSubmenu?.left ?? 0)}
+          top={hp(toolSubmenu?.top ?? 0)}
+          width={wp(118)}
+          onClose={closeToolSubmenu}
+          items={[
+            { key: 'text', label: 'Annotation', active: activeMeasureSubtool === 'text', onClick: () => activateMeasureSubtool('text') },
+            { key: 'arrow', label: 'Arrow', active: activeMeasureSubtool === 'arrow', onClick: () => activateMeasureSubtool('arrow') },
+            { key: 'ellipse', label: 'Ellipse', active: activeMeasureSubtool === 'ellipse', onClick: () => activateMeasureSubtool('ellipse') },
+            { key: 'rect', label: 'Rectangle', active: activeMeasureSubtool === 'rect', onClick: () => activateMeasureSubtool('rect') },
+            { key: 'circle', label: 'Circle', active: activeMeasureSubtool === 'circle', onClick: () => activateMeasureSubtool('circle') },
+            { key: 'roi-free', label: 'Freehand ROI', active: activeMeasureSubtool === 'roi-free', onClick: () => activateMeasureSubtool('roi-free') },
+            { key: 'spline-roi', label: 'Spline ROI', active: activeMeasureSubtool === 'spline-roi', onClick: () => activateMeasureSubtool('spline-roi') },
+            { key: 'livewire', label: 'Livewire Tool', active: activeMeasureSubtool === 'livewire', onClick: () => activateMeasureSubtool('livewire') },
+          ]}
+        />
+        <OutputCapturePanel
+          visible
+          collapsed={isCapturePanelCollapsed}
+          left={wp(88)}
+          top={hp(472)}
+          width={wp(140)}
+          height={hp(590)}
+          captures={capturedOutputs}
+          onToggle={() => {
+            setIsCapturePanelCollapsed((current) => !current);
+          }}
+          onRemove={(id) => {
+            setCapturedOutputs((current) => current.filter((item) => item.id !== id));
+          }}
+          onClear={() => {
+            setCapturedOutputs([]);
+          }}
+        />
 
+        {!isReportWorkspaceVisible && (
+          <>
         <div style={{ left: wp(251), top: hp(49), position: 'absolute', color: 'white', fontSize: scalePx(13), fontWeight: 700, zIndex: 2 }}>Panorama</div>
         <img
           src={headerMarkerIcon}
@@ -821,28 +3812,18 @@ export function RenewPage() {
           style={{ width: scalePx(7), height: scalePx(7), left: wp(240), top: hp(55), position: 'absolute', zIndex: 2 }}
         />
         {workspaceSection === 'studies' && (
-          <div
-            style={{
-              width: wp(studiesPanelWidth),
-              height: hp(studiesPanelHeight),
-              left: wp(studiesPanelLeft),
-              top: hp(studiesPanelTop),
-              position: 'absolute',
-              zIndex: 18,
-              border: `${scalePx(1)} solid #4C4C4C`,
-              background: 'rgba(14, 14, 14, 0.92)',
-              overflow: 'hidden',
+          <RenewStudiesDock
+            visible
+            width={wp(studiesPanelWidth)}
+            height={hp(studiesPanelHeight)}
+            left={wp(studiesPanelLeft)}
+            top={hp(studiesPanelTop)}
+            studies={combinedStudies as FolderStudy[]}
+            selectedSeriesId={selectedFolderSeriesId}
+            onSelectSeries={(seriesId) => {
+              void handleSelectSeries(seriesId);
             }}
-          >
-            <StudiesWorkspacePanel
-              studies={combinedStudies as FolderStudy[]}
-              selectedSeriesId={selectedFolderSeriesId}
-              isVisible
-              onSelectSeries={(seriesId) => {
-                void handleSelectSeries(seriesId);
-              }}
-            />
-          </div>
+          />
         )}
         {isChartVisible && (
           <>
@@ -858,7 +3839,7 @@ export function RenewPage() {
               onClick={() => {
                 setIsChartVisible(false);
               }}
-              aria-label="Hide dental chart"
+              aria-label="Minimize dental chart"
               style={{
                 width: wp(18),
                 height: hp(14),
@@ -877,48 +3858,62 @@ export function RenewPage() {
                 padding: 0,
               }}
             >
-              x
+              -
             </button>
           </>
         )}
 
         {isChartBodyVisible && (
-          <div style={{ left: wp(fdiLeft), top: hp(845), position: 'absolute', fontWeight: 700 }}>
-            <span style={{ color: 'white', fontSize: scalePx(14) }}>FDI</span>
-            <span style={{ color: 'white', fontSize: scalePx(13) }}> </span>
-            <span style={{ color: '#9C9C9C', fontSize: scalePx(13) }}>/ Univ</span>
-          </div>
-        )}
-
-        <div style={{ left: wp(251), top: hp(panoLabelTop), position: 'absolute', color: '#D39C00', fontSize: scalePx(14), fontWeight: 700, zIndex: 14 }}>R</div>
-        <div style={{ left: wp(lLabelLeft), top: hp(panoLabelTop), position: 'absolute', color: '#D39C00', fontSize: scalePx(14), fontWeight: 700, zIndex: 14 }}>L</div>
-
-        {isChartBodyVisible && (
-          <div
-            style={{
-              width: wp(chartOdontoLineWidth),
-              height: scalePx(1),
-              left: wp(chartOdontoLineLeft),
-              top: hp(chartOdontoLineY),
-              position: 'absolute',
-              background: '#B4B4B4',
-            }}
-          />
-        )}
-        {isChartBodyVisible && (
-          <div
-            style={{
-              width: scalePx(1),
-              height: hp(chartOdontoVerticalHeight),
-              left: wp(chartOdontoCenterX),
-              top: hp(chartOdontoVerticalTop),
-              position: 'absolute',
-              background: '#B4B4B4',
-            }}
-          />
-        )}
-        {isChartBodyVisible && (
           <>
+            <button
+              type="button"
+              onClick={() => setNumberingSystem((current) => (current === 'fdi' ? 'univ' : 'fdi'))}
+              aria-label="Toggle numbering system"
+              style={{
+                left: wp(fdiLeft),
+                top: hp(845),
+                position: 'absolute',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: wp(4),
+                fontWeight: 700,
+                background: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                zIndex: 16,
+                padding: 0,
+              }}
+            >
+              <span style={{ color: numberingSystem === 'fdi' ? '#FFFFFF' : '#6F7A86', fontSize: scalePx(14) }}>FDI</span>
+              <span style={{ color: '#9C9C9C', fontSize: scalePx(13) }}>/</span>
+              <span style={{ color: numberingSystem === 'univ' ? '#FFFFFF' : '#6F7A86', fontSize: scalePx(13) }}>Univ</span>
+            </button>
+            <div style={{ left: wp(251), top: hp(panoLabelTop), position: 'absolute', color: '#D39C00', fontSize: scalePx(14), fontWeight: 700, zIndex: 14 }}>
+              {flipped ? 'L' : 'R'}
+            </div>
+            <div style={{ left: wp(lLabelLeft), top: hp(panoLabelTop), position: 'absolute', color: '#D39C00', fontSize: scalePx(14), fontWeight: 700, zIndex: 14 }}>
+              {flipped ? 'R' : 'L'}
+            </div>
+            <div
+              style={{
+                width: wp(chartOdontoLineWidth),
+                height: scalePx(1),
+                left: wp(chartOdontoLineLeft),
+                top: hp(chartOdontoLineY),
+                position: 'absolute',
+                background: '#B4B4B4',
+              }}
+            />
+            <div
+              style={{
+                width: scalePx(1),
+                height: hp(chartOdontoVerticalHeight),
+                left: wp(chartOdontoCenterX),
+                top: hp(chartOdontoVerticalTop),
+                position: 'absolute',
+                background: '#B4B4B4',
+              }}
+            />
             <div style={{ width: scalePx(1), height: hp(264), left: wp(chartSectionLeft), top: hp(804), position: 'absolute', background: '#5C5C5C' }} />
             <div style={{ width: scalePx(1), height: hp(chartContentHeight), left: wp(chartLegendDividerX), top: hp(chartContentTop), position: 'absolute', background: '#5C5C5C' }} />
             <div style={{ width: scalePx(1), height: hp(250), left: wp(rightEdge - 1), top: hp(813), position: 'absolute', background: '#5C5C5C' }} />
@@ -929,71 +3924,166 @@ export function RenewPage() {
         {isChartBodyVisible && upperLeftOrders.map((order, index) => {
           const width = Number(upperSizes[order - 1].split(' ')[0]);
           const height = Number(upperSizes[order - 1].split(' ')[1]);
+          const toothFdi = String(upperTeeth[index]);
+          const toothStatus = toothStatusByFdi[toothFdi] || 'healthy';
+          const matchesLegendFilter = !activeLegendFilter || toothStatus === activeLegendFilter;
           return (
             <ToothSlotImage
               key={`upper-left-${order}`}
               arch="U"
               order={order}
+              toothFdi={toothFdi}
+              status={toothStatus}
               left={toothSlotCentersLeft[index] - width / 2}
               top={upperBaseline - height}
               width={width}
               height={height}
               flipX
+              active={activeTooth === toothFdi}
+              hasDetection={(Boolean(detectionsByTooth[toothFdi]?.length) || Boolean(findingSignalByTooth[toothFdi])) && matchesLegendFilter}
+              dimmed={!matchesLegendFilter}
+              onClick={handleToothSelect}
+              onHoverChange={setHoveredToothAnchor}
             />
           );
         })}
         {isChartBodyVisible && upperRightOrders.map((order, index) => {
           const width = Number(upperSizes[order - 1].split(' ')[0]);
           const height = Number(upperSizes[order - 1].split(' ')[1]);
+          const toothFdi = String(upperRightTeeth[index]);
+          const toothStatus = toothStatusByFdi[toothFdi] || 'healthy';
+          const matchesLegendFilter = !activeLegendFilter || toothStatus === activeLegendFilter;
           return (
             <ToothSlotImage
               key={`upper-right-${order}`}
               arch="U"
               order={order}
+              toothFdi={toothFdi}
+              status={toothStatus}
               left={toothSlotCentersRight[index] - width / 2}
               top={upperBaseline - height}
               width={width}
               height={height}
+              active={activeTooth === toothFdi}
+              hasDetection={(Boolean(detectionsByTooth[toothFdi]?.length) || Boolean(findingSignalByTooth[toothFdi])) && matchesLegendFilter}
+              dimmed={!matchesLegendFilter}
+              onClick={handleToothSelect}
+              onHoverChange={setHoveredToothAnchor}
             />
           );
         })}
         {isChartBodyVisible && lowerLeftOrders.map((order, index) => {
           const width = Number(lowerSizes[order - 1].split(' ')[0]);
           const height = Number(lowerSizes[order - 1].split(' ')[1]);
+          const toothFdi = String(lowerTeeth[index]);
+          const toothStatus = toothStatusByFdi[toothFdi] || 'healthy';
+          const matchesLegendFilter = !activeLegendFilter || toothStatus === activeLegendFilter;
           return (
             <ToothSlotImage
               key={`lower-left-${order}`}
               arch="L"
               order={order}
+              toothFdi={toothFdi}
+              status={toothStatus}
               left={toothSlotCentersLeft[index] - width / 2}
               top={lowerTop}
               width={width}
               height={height}
               flipX
+              active={activeTooth === toothFdi}
+              hasDetection={(Boolean(detectionsByTooth[toothFdi]?.length) || Boolean(findingSignalByTooth[toothFdi])) && matchesLegendFilter}
+              dimmed={!matchesLegendFilter}
+              onClick={handleToothSelect}
+              onHoverChange={setHoveredToothAnchor}
             />
           );
         })}
         {isChartBodyVisible && lowerRightOrders.map((order, index) => {
           const width = Number(lowerSizes[order - 1].split(' ')[0]);
           const height = Number(lowerSizes[order - 1].split(' ')[1]);
+          const toothFdi = String(lowerRightTeeth[index]);
+          const toothStatus = toothStatusByFdi[toothFdi] || 'healthy';
+          const matchesLegendFilter = !activeLegendFilter || toothStatus === activeLegendFilter;
           return (
             <ToothSlotImage
               key={`lower-right-${order}`}
               arch="L"
               order={order}
+              toothFdi={toothFdi}
+              status={toothStatus}
               left={toothSlotCentersRight[index] - width / 2}
               top={lowerTop}
               width={width}
               height={height}
+              active={activeTooth === toothFdi}
+              hasDetection={(Boolean(detectionsByTooth[toothFdi]?.length) || Boolean(findingSignalByTooth[toothFdi])) && matchesLegendFilter}
+              dimmed={!matchesLegendFilter}
+              onClick={handleToothSelect}
+              onHoverChange={setHoveredToothAnchor}
             />
           );
         })}
 
-        {isChartBodyVisible && (
+        <DentalChartLegendOverlay
+          visible={isChartBodyVisible}
+          width={chartLegendWidth}
+          height={chartLegendHeight}
+          left={wp(chartLegendLeft + 22)}
+          top={hp(chartLegendTop)}
+          items={legendItems}
+          activeKey={activeLegendFilter}
+          focusedKey={focusedCondition}
+          counts={legendCounts}
+          activeBorderWidth={scalePx(2)}
+          hoverBorderWidth={scalePx(1)}
+          glowSize={scalePx(10)}
+          badgeFontSize={scalePx(12)}
+          labelFontSize={scalePx(13)}
+          countGap={scalePx(6)}
+          onToggle={handleLegendToggle}
+        />
+
+        <ReportWorkspaceControls
+          showReportButton={isChartBodyVisible}
+          reportButtonLeft={wp(reportLeft)}
+          reportButtonTop={hp(reportTop)}
+          reportButtonWidth={wp(77)}
+          reportButtonHeight={hp(77)}
+          reportActive={reportDrawerOpen}
+          outlineWidth={scalePx(3)}
+          outlineOffset={scalePx(2)}
+          glowSize={scalePx(18)}
+          activeIconSrc={displayReportButtonIcons.active}
+          inactiveIconSrc={displayReportButtonIcons.inactive}
+          onOpenReport={() => { void handleOpenReportPanel(); }}
+          reportError={reportError}
+          reportErrorLeft={wp(251)}
+          reportErrorTop={hp(74)}
+          reportErrorFontSize={scalePx(11)}
+          showChartToggle={!isChartVisible}
+          chartToggleLeft={wp(chartSectionLeft)}
+          chartToggleTop={hp(panoChartToggleTop)}
+          chartToggleWidth={wp(chartSectionWidth)}
+          chartToggleHeight={hp(18)}
+          chartToggleBorderWidth={scalePx(1)}
+          chartToggleFontSize={scalePx(12)}
+          markerIconSrc={headerMarkerIcon}
+          markerIconWidth={scalePx(7)}
+          markerIconHeight={scalePx(7)}
+          markerIconLeft={wp(12)}
+          markerIconTop={hp(6)}
+          chartToggleLabelMarginLeft={wp(28)}
+          onShowChart={handleChartToggle}
+        />
+
+        {false && isChartBodyVisible && (
           <div style={{ width: wp(chartLegendWidth), height: hp(chartLegendHeight), left: wp(chartLegendLeft + 22), top: hp(chartLegendTop), position: 'absolute' }}>
             {legendItems.map((item) => (
               <div key={item.label}>
-                <div
+                <button
+                  type="button"
+                  onClick={() => handleLegendToggle(item.key)}
+                  aria-pressed={activeLegendFilter === item.key}
                   style={{
                     width: relativePercent(19, chartLegendWidth),
                     height: relativePercent(19, chartLegendHeight),
@@ -1001,8 +4091,29 @@ export function RenewPage() {
                     top: relativePercent(item.top - 834, chartLegendHeight),
                     position: 'absolute',
                     background: '#808181',
+                    border: activeLegendFilter === item.key ? `${scalePx(2)} solid #00C0F3` : focusedCondition === item.key ? `${scalePx(1)} solid rgba(0, 192, 243, 0.7)` : 'none',
+                    boxShadow: activeLegendFilter === item.key ? `0 0 ${scalePx(10)} rgba(0, 192, 243, 0.35)` : 'none',
+                    cursor: 'pointer',
+                    padding: 0,
                   }}
-                />
+                >
+                  {(activeLegendFilter === item.key || focusedCondition === item.key) && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        inset: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: item.key === 'healthy' ? '#111111' : '#ffffff',
+                        fontSize: scalePx(12),
+                        fontWeight: 700,
+                      }}
+                    >
+                      ✓
+                    </div>
+                  )}
+                </button>
                 <div
                   style={{
                     width: relativePercent(52, chartLegendWidth),
@@ -1024,21 +4135,24 @@ export function RenewPage() {
                   }}
                 >
                   {item.label}
+                  <span style={{ color: '#B7B7B7', marginLeft: scalePx(6) }}>
+                    {legendCounts[item.key]}
+                  </span>
                 </div>
               </div>
             ))}
           </div>
         )}
 
-          {isChartBodyVisible && (
+          {false && isChartBodyVisible && (
             <button
               type="button"
               onClick={() => { void handleStartReport(); }}
               aria-pressed={isReportActive || reportDrawerOpen}
               aria-label="Open report workspace"
               style={{
-                width: wp(88),
-                height: hp(88),
+                width: wp(77),
+                height: hp(77),
                 left: wp(reportLeft),
                 top: hp(reportTop),
                 position: 'absolute',
@@ -1063,7 +4177,7 @@ export function RenewPage() {
             </button>
           )}
 
-          {reportError && (
+          {false && reportError && (
             <div
               style={{
                 left: wp(251),
@@ -1079,45 +4193,71 @@ export function RenewPage() {
             </div>
           )}
 
-          {!isChartVisible && (
+          {false && !isChartVisible && (
             <button
               type="button"
               onClick={handleChartToggle}
               aria-pressed={false}
               aria-label="Show dental chart"
               style={{
-                width: wp(82),
-                height: hp(16),
-                left: wp(panoChartToggleLeft),
+                width: wp(chartSectionWidth),
+                height: hp(18),
+                left: wp(chartSectionLeft),
                 top: hp(panoChartToggleTop),
                 position: 'absolute',
                 border: `${scalePx(1)} solid #4C4C4C`,
                 background: '#5C5C5C',
                 color: '#FFFFFF',
-                fontSize: scalePx(9),
+                fontSize: scalePx(12),
                 fontWeight: 700,
                 cursor: 'pointer',
                 zIndex: 4,
                 padding: 0,
+                textAlign: 'left',
               }}
             >
-              Dental Chart
+              <img
+                src={headerMarkerIcon}
+                alt=""
+                draggable={false}
+                style={{ width: scalePx(7), height: scalePx(7), position: 'absolute', left: wp(12), top: hp(6) }}
+              />
+              <span style={{ marginLeft: wp(28), display: 'inline-block' }}>Dental Chart</span>
             </button>
           )}
+          </>
+        )}
         </div>
       </div>
-      {reportSessionId && typeof document !== 'undefined' && createPortal(
+      {reportSessionId && (
         <WebReportDrawer
           sessionId={reportSessionId}
+          selectedToothId={activeTooth}
           open={reportDrawerOpen}
+          layout="dock"
+          positionMode="absolute"
           onClose={() => {
             setReportDrawerOpen(false);
             setIsReportActive(false);
-            setWorkspaceSection('none');
+            setWorkspaceSection((current) => (current === 'report' ? 'none' : current));
           }}
-        />,
-        document.body
+        />
       )}
+      <ToothHoverHud
+        anchor={isReportWorkspaceVisible ? null : hoveredToothAnchor}
+        panel={hoveredToothPanel}
+        minWidth={wp(228)}
+        borderWidth={scalePx(1)}
+        paddingY={hp(10)}
+        paddingX={wp(12)}
+        titleFontSize={scalePx(16)}
+        labelFontSize={scalePx(10)}
+        valueFontSize={scalePx(12)}
+        titleGap={hp(10)}
+        labelGap={hp(3)}
+        columnGap={wp(18)}
+        rowGap={hp(10)}
+      />
     </div>
   );
 }

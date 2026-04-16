@@ -90,181 +90,302 @@ class ReportV3ViewerMixin:
             with open(self.info_icon_path, "rb") as f:
                 info_icon_b64 = base64.b64encode(f.read()).decode('utf-8')
 
-        # Load logo
-        logo_b64 = ""
-        if self.logo_path.exists():
-            with open(self.logo_path, "rb") as f:
-                logo_b64 = base64.b64encode(f.read()).decode('utf-8')
-        
-        # New Clean White Design (from report guidence)
+        # Renew-style dark report shell
         style = """
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
             font-family: 'Pretendard', 'Malgun Gothic', 'Apple SD Gothic Neo', 'Segoe UI', sans-serif; 
-            max-width: 1100px; 
+            max-width: 1380px; 
             margin: 0 auto; 
-            padding: 48px 64px; 
-            color: #E2E8F0; 
-            background: #090B20;
+            padding: 28px 36px 64px; 
+            color: #E5E5E5; 
+            background: #1E1E1E;
         }
-        h1 { font-size: 2.5rem; font-weight: 800; margin-bottom: 8px; color: #FFFFFF; letter-spacing: -0.02em; }
-        h2 { font-size: 1.75rem; font-weight: 700; margin-bottom: 24px; color: #CBD5E1; }
-        h3 { font-size: 1.5rem; font-weight: 700; margin-bottom: 12px; color: #FFFFFF; }
-        .header { margin-bottom: 48px; position: relative; }
-        .header p { font-size: 1.1rem; color: #94A3B8; margin-bottom: 32px; font-weight: 500; }
-        .user-info { display: flex; align-items: center; gap: 20px; }
+        h1 { font-size: 3rem; font-weight: 800; margin-bottom: 10px; color: #FFFFFF; letter-spacing: -0.03em; }
+        h2 { font-size: 1.55rem; font-weight: 700; margin-bottom: 0; color: #FFFFFF; }
+        h3 { font-size: 1.15rem; font-weight: 700; margin-bottom: 12px; color: #FFFFFF; }
+        .page-shell {
+            background: #2B2B2B;
+            border: 1px solid #4C4C4C;
+            box-shadow: 0 18px 42px rgba(0,0,0,0.28);
+        }
+        .header {
+            margin-bottom: 26px;
+            position: relative;
+            padding: 26px 28px 30px;
+            background: #2D2D2D;
+            border: 1px solid #4C4C4C;
+        }
+        .header p { font-size: 1.05rem; color: #9A9A9A; margin-bottom: 28px; font-weight: 500; }
+        .user-info { display: flex; align-items: center; gap: 18px; }
         .user-avatar { 
             width: 72px; height: 72px; 
-            border-radius: 20px; 
-            background: linear-gradient(135deg, #22D3EE 0%, #0EA5E9 100%); 
+            border-radius: 0; 
+            background: #00C0F3; 
             display: flex; align-items: center; justify-content: center;
             color: #0F172A; font-size: 1.75rem; font-weight: 800;
-            box-shadow: 0 8px 16px rgba(14, 165, 233, 0.2);
+            box-shadow: inset 0 -10px 18px rgba(0,0,0,0.14);
         }
         .user-details span { display: block; margin-bottom: 2px; }
-        .user-details .label { font-weight: 700; color: #94A3B8; font-size: 0.85rem; text-transform: uppercase; margin-right: 8px; }
+        .user-details .label { font-weight: 700; color: #9E9E9E; font-size: 0.85rem; text-transform: uppercase; margin-right: 8px; }
         .user-details .value { font-weight: 600; color: #F1F5F9; font-size: 1.05rem; }
-        .divider-thick { border-top: 4px solid #1E293B; margin: 32px 0; border-radius: 2px; }
-        .divider { border-top: 1px solid rgba(255,255,255,0.1); margin: 32px 0; }
-        .pano-container { margin-bottom: 40px; position: relative; }
+        .divider-thick { border-top: 1px solid #4C4C4C; margin: 0 0 26px; border-radius: 0; }
+        .divider { border-top: 1px solid #4C4C4C; margin: 24px 0; }
+        .renew-section {
+            margin-bottom: 24px;
+            background: #2D2D2D;
+            border: 1px solid #4C4C4C;
+        }
+        .renew-section-header {
+            height: 32px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 0 12px;
+            background: #5C5C5C;
+            border-bottom: 1px solid #4C4C4C;
+            color: #FFFFFF;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .renew-section-header .marker {
+            width: 7px;
+            height: 7px;
+            background: #D9D9D9;
+            flex: 0 0 auto;
+        }
+        .renew-section-body {
+            padding: 22px 22px 24px;
+            background: #2B2B2B;
+        }
+        .pano-container { margin-bottom: 0; position: relative; }
+        .pano-frame {
+            position: relative;
+            display: block;
+            width: 100%;
+            line-height: 0;
+            overflow: hidden;
+        }
         .pano-img { 
+            display: block;
             width: 100%; 
-            aspect-ratio: 16/9; 
+            aspect-ratio: 16/8; 
             object-fit: contain; 
-            border-radius: 24px; 
+            border-radius: 0; 
             background: #000;
-            border: 1px solid rgba(255,255,255,0.1);
-            box-shadow: 0 32px 64px rgba(0,0,0,0.4);
+            border: 1px solid #4C4C4C;
+            box-shadow: none;
+        }
+        .pano-overlay {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+            pointer-events: auto;
         }
         .legend { 
             display: flex; 
-            justify-content: center; 
-            gap: 40px; 
-            margin: 32px 0;
+            justify-content: flex-start; 
+            gap: 14px; 
+            margin: 14px 0 0;
             flex-wrap: wrap;
         }
-        .legend-item { display: flex; align-items: center; gap: 10px; font-weight: 700; color: #94A3B8; font-size: 0.95rem; }
-        .legend-bar { width: 40px; height: 6px; border-radius: 3px; }
-        .legend-bar.triage-1 { background: #F87171; box-shadow: 0 2px 8px rgba(248, 113, 113, 0.3); } 
-        .legend-bar.triage-2 { background: #FACC15; box-shadow: 0 2px 8px rgba(250, 204, 21, 0.3); } 
-        .legend-bar.triage-3 { background: #4ADE80; box-shadow: 0 2px 8px rgba(74, 222, 128, 0.3); } 
-        .legend-bar.implant { background: transparent; border-top: 4px solid #38BDF8; } 
-        .legend-bar.missing { background: transparent; border-top: 4px dashed #64748B; } 
+        .legend-item { display: flex; align-items: center; gap: 7px; font-weight: 700; color: #B7B7B7; font-size: 0.82rem; }
+        .legend-bar { width: 26px; height: 8px; border-radius: 0; border: 1px solid #4C4C4C; }
+        .legend-bar.triage-1 { background: #FF0037; } 
+        .legend-bar.triage-2 { background: #FCFF2A; } 
+        .legend-bar.triage-3 { background: #FFFFFF; } 
+        .legend-bar.implant { background: #003DFF; } 
+        .legend-bar.missing { background: #3F3F3F; } 
         
-        /* Odontogram Styles - Premium Dark Version */
+        /* Odontogram Styles - Renew */
         .odontogram { 
-            margin: 40px 0;
-            padding: 24px 32px 32px;
-            border-radius: 24px;
-            background: rgba(15, 23, 42, 0.5);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(20px);
-            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            margin: 0;
+            padding: 0;
+            border-radius: 0;
+            background: transparent;
+            border: none;
+            box-shadow: none;
         }
         .odonto-title {
-            margin: 0 0 20px;
-            color: #38BDF8;
-            font-size: 1.1rem;
-            font-weight: 800;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
+            margin: 0;
+            color: #FFFFFF;
+            font-size: 1rem;
+            font-weight: 700;
+            text-transform: none;
+            letter-spacing: normal;
         }
         .odonto-shell {
-            display: flex;
-            justify-content: center;
+            display: grid;
+            grid-template-columns: 258px minmax(0, 1fr);
             align-items: stretch;
-            gap: 16px;
+            gap: 0;
+            border: 1px solid #4C4C4C;
+            border-top: none;
+            background: #000000;
+        }
+        .odonto-legend-panel {
+            padding: 18px 16px;
+            border-right: 1px solid #4C4C4C;
+            background: #000000;
+            display: grid;
+            align-content: start;
+            gap: 14px;
+        }
+        .odonto-legend-item {
+            display: grid;
+            grid-template-columns: 18px 1fr 60px;
+            align-items: center;
+            gap: 12px;
+        }
+        .odonto-legend-chip {
+            width: 18px;
+            height: 18px;
+            border: 1px solid #6A6A6A;
+            background: #808181;
+        }
+        .odonto-legend-label {
+            color: #FFFFFF;
+            font-size: 0.86rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .odonto-legend-count {
+            color: #B7B7B7;
+            font-size: 0.84rem;
+            font-weight: 700;
+            margin-left: 6px;
+        }
+        .odonto-legend-swatch {
+            width: 58px;
+            height: 20px;
+            border: 1px solid #4C4C4C;
+        }
+        .odonto-main {
+            display: grid;
+            grid-template-rows: auto 1fr;
+            min-width: 0;
+            background: #000000;
+        }
+        .odonto-main-top {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            padding: 12px 18px 2px;
+        }
+        .odonto-notation-toggle {
+            background: transparent;
+            border: none;
+            color: #FFFFFF;
+            font-size: 0.9rem;
+            font-weight: 700;
+            cursor: pointer;
+            padding: 0;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .odonto-notation-toggle .slash { color: #7E7E7E; }
+        .odonto-notation-toggle.is-fdi .token-fdi,
+        .odonto-notation-toggle.is-univ .token-univ { color: #FFFFFF; }
+        .odonto-notation-toggle.is-fdi .token-univ,
+        .odonto-notation-toggle.is-univ .token-fdi { color: #7E7E7E; }
+        .odonto-canvas {
+            padding: 10px 20px 20px;
+            background: #000000;
         }
         .odonto-side {
             width: 32px;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: #64748B;
-            font-size: 1.1rem;
+            color: #D39C00;
+            font-size: 0.95rem;
             font-weight: 800;
-            letter-spacing: 0.2em;
+            letter-spacing: 0.18em;
         }
-        .odonto-body { display: flex; flex-direction: column; gap: 40px; }
-        .odonto-divider { height: 1px; width: 100%; background: rgba(255, 255, 255, 0.08); }
-        .odonto-row { display: flex; justify-content: center; gap: 6px; }
-        .odonto-cell { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+        .odonto-body { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+        .odonto-divider { height: 1px; width: 100%; background: #B4B4B4; }
+        .odonto-body-frame {
+            display: grid;
+            grid-template-columns: 34px minmax(0, 1fr) 34px;
+            align-items: center;
+            gap: 10px;
+        }
+        .odonto-row { display: flex; justify-content: center; gap: 4px; }
+        .odonto-cell { display: flex; flex-direction: column; align-items: center; gap: 6px; }
         
         .odonto-tooth { 
-            width: 54px; 
-            height: 120px; 
+            width: 44px; 
+            height: 110px; 
             position: relative;
             cursor: pointer;
             transition: all 0.2s ease;
-            border-radius: 12px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            background: rgba(255, 255, 255, 0.03);
+            border-radius: 0;
+            border: none;
+            background: transparent;
             display: flex;
             align-items: center;
             justify-content: center;
             overflow: hidden;
         }
-        .odonto-tooth:hover { transform: translateY(-2px); border-color: rgba(255, 255, 255, 0.3); }
+        .odonto-tooth:hover { transform: translateY(-2px); }
         .odonto-tooth img { 
             width: 42px; 
             height: 90px; 
             object-fit: contain;
-            filter: brightness(0) invert(0.9) drop-shadow(0 0 2px rgba(255,255,255,0.2));
-            opacity: 0.85;
+            filter: brightness(0) invert(0.98);
+            opacity: 0.92;
         }
         .odonto-tooth.flip img { transform: scaleX(-1); }
         
-        /* Neon Triage Colors for Dark Mode */
-        .odonto-tooth.triage-3 { background: rgba(74, 222, 128, 0.1); border-color: #4ADE80; box-shadow: inset 0 0 15px rgba(74, 222, 128, 0.1); }
-        .odonto-tooth.triage-3 + .odonto-label, .odonto-cell .odonto-label.triage-3 { color: #4ADE80; }
+        .odonto-tooth.triage-3 { background: transparent; }
+        .odonto-tooth.triage-3 + .odonto-label, .odonto-cell .odonto-label.triage-3 { color: #FFFFFF; }
         
-        .odonto-tooth.triage-2 { background: rgba(250, 204, 21, 0.1); border-color: #FACC15; box-shadow: inset 0 0 15px rgba(250, 204, 21, 0.1); }
-        .odonto-tooth.triage-2 + .odonto-label, .odonto-cell .odonto-label.triage-2 { color: #FACC15; }
+        .odonto-tooth.triage-2 { background: transparent; }
+        .odonto-tooth.triage-2 + .odonto-label, .odonto-cell .odonto-label.triage-2 { color: #FCFF2A; }
         
-        .odonto-tooth.triage-1 { background: rgba(248, 113, 113, 0.1); border-color: #F87171; box-shadow: inset 0 0 15px rgba(248, 113, 113, 0.1); }
-        .odonto-tooth.triage-1 + .odonto-label, .odonto-cell .odonto-label.triage-1 { color: #F87171; }
+        .odonto-tooth.triage-1 { background: transparent; }
+        .odonto-tooth.triage-1 + .odonto-label, .odonto-cell .odonto-label.triage-1 { color: #FF0037; }
         
-        .odonto-tooth.missing { background: rgba(148, 163, 184, 0.05); border: 1px dashed rgba(148, 163, 184, 0.3); }
-        .odonto-tooth.missing img { opacity: 0.2; filter: grayscale(1); }
-        .odonto-tooth.missing + .odonto-label, .odonto-cell .odonto-label.missing { color: #64748B; }
+        .odonto-tooth.missing { background: transparent; }
+        .odonto-tooth.missing img { opacity: 0.26; filter: brightness(0) invert(0.78) grayscale(1); }
+        .odonto-tooth.missing + .odonto-label, .odonto-cell .odonto-label.missing { color: #8A8A8A; }
         
-        .odonto-tooth.implant { background: rgba(56, 189, 248, 0.1); border-color: #38BDF8; }
-        .odonto-tooth.implant + .odonto-label, .odonto-cell .odonto-label.implant { color: #38BDF8; }
+        .odonto-tooth.implant { background: transparent; }
+        .odonto-tooth.implant + .odonto-label, .odonto-cell .odonto-label.implant { color: #00C0F3; }
         
         .odonto-label { 
-            font-size: 1.1rem;
+            font-size: 0.92rem;
             line-height: 1;
             font-weight: 800;
-            color: #94A3B8;
+            color: #B7B7B7;
         }
-        .odonto-quadrant { display: flex; gap: 6px; }
-        .odonto-separator { width: 4px; }
+        .odonto-quadrant { display: flex; gap: 4px; }
+        .odonto-separator { width: 26px; }
         
         /* Triage Color Codes - Synchronized with Viewer */
-        .badge { display:inline-block; padding:4px 10px; margin-right:6px; border-radius:8px; font-size:0.85rem; font-weight:700; color:#fff; }
-        .badge.triage-1 { background:#F87171; }
-        .badge.triage-2 { background:#FACC15; color:#0F172A; }
-        .badge.triage-3 { background:#4ADE80; color:#0F172A; }
+        .badge { display:inline-block; padding:4px 10px; margin-right:6px; border-radius:0; font-size:0.78rem; font-weight:700; color:#fff; border:1px solid #4C4C4C; }
+        .badge.triage-1 { background:#FF0037; }
+        .badge.triage-2 { background:#FCFF2A; color:#111111; }
+        .badge.triage-3 { background:#FFFFFF; color:#111111; }
         .tooth-card { 
-            border: 1px solid rgba(255,255,255,0.08); 
-            border-radius: 20px; 
+            border: 1px solid #4C4C4C; 
+            border-radius: 0; 
             padding: 24px; 
             margin-bottom: 24px;
             display: flex; 
             gap: 24px; 
-            background: rgba(15, 23, 42, 0.4);
-            backdrop-filter: blur(10px);
+            background: #2D2D2D;
         }
-        .tooth-card.triage-1 { border-left: 5px solid #F87171; }
-        .tooth-card.triage-2 { border-left: 5px solid #FACC15; }
-        .tooth-card.triage-3 { border-left: 5px solid #4ADE80; }
         .crop-img { 
             width: 192px; 
             height: 256px; 
             object-fit: contain; 
-            border-radius: 12px; 
+            border-radius: 0; 
             background: #000;
-            border: 1px solid rgba(255,255,255,0.1);
+            border: 1px solid #4C4C4C;
             flex-shrink: 0;
         }
         .tooth-details { flex: 1; text-align: left; }
@@ -279,14 +400,10 @@ class ReportV3ViewerMixin:
             color: #F87171;
         }
         .finding-tag svg, .finding-tag img { width: 24px; height: 24px; }
-        .description { color: #94A3B8; font-size: 0.95rem; margin-bottom: 24px; line-height: 1.6; }
-        .treatments h4 { font-size: 1.1rem; font-weight: 700; margin-bottom: 12px; color: #CBD5E1; }
-        .treatments ol { padding-left: 20px; color: #94A3B8; }
+        .description { color: #B7B7B7; font-size: 0.95rem; margin-bottom: 24px; line-height: 1.6; }
+        .treatments h4 { font-size: 1.1rem; font-weight: 700; margin-bottom: 12px; color: #FFFFFF; }
+        .treatments ol { padding-left: 20px; color: #B7B7B7; }
         .treatments li { margin-bottom: 8px; }
-        .badge { display:inline-block; padding:4px 10px; margin-right:6px; border-radius:8px; font-size:0.85rem; font-weight:700; color:#fff; }
-        .badge.triage-1 { background:#F87171; }
-        .badge.triage-2 { background:#FACC15; color:#0F172A; }
-        .badge.triage-3 { background:#4ADE80; color:#0F172A; }
         
         .footer { 
             display: flex; 
@@ -294,48 +411,47 @@ class ReportV3ViewerMixin:
             gap: 20px; 
             margin-top: 64px; 
             padding-top: 32px;
-            border-top: 1px solid rgba(255,255,255,0.08);
-            color: #64748B;
+            border-top: 1px solid #4C4C4C;
+            color: #8A8A8A;
         }
-        .footer-logo { color: #22D3EE; font-weight: 800; font-size: 1.5rem; }
+        .footer-logo { color: #FFFFFF; font-weight: 800; font-size: 1.5rem; }
         .footer-warning { font-size: 0.8rem; }
         
-        /* New Summary Box - Clinical Glassmorphism */
+        /* Renew Summary */
         .summary-box { 
-            background: linear-gradient(135deg, rgba(15, 23, 42, 0.7) 0%, rgba(30, 41, 59, 0.7) 100%); 
-            padding: 32px; 
-            border-radius: 24px; 
-            margin-bottom: 40px; 
-            border: 1px solid rgba(255, 255, 255, 0.1); 
-            backdrop-filter: blur(20px);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            background: #2D2D2D; 
+            padding: 0; 
+            border-radius: 0; 
+            margin-bottom: 0; 
+            border: 1px solid #4C4C4C; 
+            box-shadow: none;
         }
-        .summary-title { margin-top:0; color:#22D3EE; font-size: 1.25rem; font-weight: 800; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 0.1em; }
-        .summary-grid { display: flex; gap: 48px; }
-        .summary-item { display: flex; flex-direction: column; gap: 4px; }
-        .summary-val { font-size: 2.5rem; font-weight: 800; color: #FFFFFF; font-variant-numeric: tabular-nums; }
-        .summary-label { font-size: 0.75rem; color: #94A3B8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+        .summary-title { margin-top:0; color:#FFFFFF; font-size: 1rem; font-weight: 700; margin-bottom: 0; text-transform: none; letter-spacing: normal; }
+        .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 18px; }
+        .summary-item { display: flex; flex-direction: column; gap: 6px; padding: 14px; background:#414141; border:1px solid #4C4C4C; }
+        .summary-val { font-size: 2.1rem; font-weight: 800; color: #FFFFFF; font-variant-numeric: tabular-nums; }
+        .summary-label { font-size: 0.72rem; color: #AFAFAF; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
         
-        /* AI Insight Box - Professional Dark */
+        /* Commentary */
         .ai-box {
-            background: rgba(34, 211, 238, 0.05);
-            border: 1px solid rgba(34, 211, 238, 0.2);
-            border-radius: 20px;
-            padding: 28px;
+            background: #2D2D2D;
+            border: 1px solid #4C4C4C;
+            border-radius: 0;
+            padding: 0;
             margin-bottom: 40px;
             position: relative;
         }
         .ai-title {
-            color: #22D3EE; 
-            font-size: 1.1rem; 
-            font-weight: 800; 
-            margin-bottom: 16px; 
+            color: #FFFFFF; 
+            font-size: 1rem; 
+            font-weight: 700; 
+            margin-bottom: 0; 
             display: flex; 
             align-items: center; 
             gap: 12px;
-            text-transform: uppercase;
+            text-transform: none;
         }
-        .ai-content { color: #E2E8F0; font-size: 1rem; line-height: 1.7; white-space: pre-wrap; }
+        .ai-content { color: #E2E8F0; font-size: 1rem; line-height: 1.7; white-space: pre-wrap; padding: 18px 22px 22px; background:#2B2B2B; }
         """
 
         user_initial = user_name[0].upper() if user_name else "U"
@@ -385,9 +501,9 @@ class ReportV3ViewerMixin:
         if report_note:
             report_reference_html = f"""
             <div class="divider"></div>
-            <div style="margin: 24px 0 32px; padding: 24px 32px; border-radius: 24px; background: rgba(34, 211, 238, 0.05); border: 1px solid rgba(34, 211, 238, 0.2);">
-                <div style="font-size: 0.85rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: #22D3EE; margin-bottom: 12px;">Report Commentary</div>
-                <div style="font-size: 1.05rem; line-height: 1.7; color: #E2E8F0; white-space: pre-wrap;">{html_lib.escape(str(report_note or ''))}</div>
+            <div class="renew-section">
+                <div class="renew-section-header"><span class="marker"></span><span>Report Commentary</span></div>
+                <div class="renew-section-body" style="font-size: 1rem; line-height: 1.7; color: #E2E8F0; white-space: pre-wrap;">{html_lib.escape(str(report_note or ''))}</div>
             </div>
             """
 
@@ -406,9 +522,9 @@ class ReportV3ViewerMixin:
             if capture_cards_html:
                 attached_captures_html = f"""
                 <div class="divider"></div>
-                <div style="margin: 24px 0 40px; padding: 32px; border-radius: 24px; background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(255, 255, 255, 0.08);">
-                    <div style="font-size: 0.85rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: #94A3B8; margin-bottom: 20px;">Attached Secondary Findings</div>
-                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px;">
+                <div class="renew-section">
+                    <div class="renew-section-header"><span class="marker"></span><span>Attached Secondary Findings</span></div>
+                    <div class="renew-section-body" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px;">
                         {capture_cards_html}
                     </div>
                 </div>
@@ -423,48 +539,29 @@ class ReportV3ViewerMixin:
             <style>
 {style}
             
-            /* Toggle Button Style */
-            .notation-toggle {{
-                background: #fff;
-                cursor: pointer;
-                border: 1px solid #ddd;
-                padding: 5px 10px;
-                border-radius: 20px;
-                font-size: 0.8rem;
-                color: #666;
-                display: inline-flex;
-                align-items: center;
-                gap: 5px;
-                transition: all 0.2s;
-            }}
-            .notation-toggle:hover {{ background: #f9fafb; border-color: #bbb; }}
-            
-            /* Logic for switching display */
             body.use-universal .format-fdi {{ display: none !important; }}
             body.use-universal .format-univ {{ display: inline !important; }}
-            
             body:not(.use-universal) .format-fdi {{ display: inline !important; }}
             body:not(.use-universal) .format-univ {{ display: none !important; }}
             </style>
             <script>
+            window.updateNotationButtons = function() {{
+                const isUniv = document.body.classList.contains('use-universal');
+                document.querySelectorAll('.odonto-notation-toggle').forEach(btn => {{
+                    btn.classList.toggle('is-univ', isUniv);
+                    btn.classList.toggle('is-fdi', !isUniv);
+                }});
+            }};
             window.toggleNotation = function() {{
                 document.body.classList.toggle('use-universal');
-                const btns = document.querySelectorAll('.notation-toggle');
-                const isUniv = document.body.classList.contains('use-universal');
-                btns.forEach(btn => {{
-                    btn.innerHTML = isUniv ? 'Notation: <strong>Universal (1-32)</strong>' : 'Notation: <strong>FDI (11-48)</strong>';
-                }});
+                window.updateNotationButtons();
             }};
             </script>
         </head>
-        <body>
+        <body onload="window.updateNotationButtons()">
             <div class="header">
-                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                    <img src="data:image/png;base64,{logo_b64}" style="height:120px; margin-top:-15px; margin-bottom:10px; display: block; filter: brightness(0) invert(1);">
-                    <button id="btn-notation" class="notation-toggle" onclick="window.toggleNotation()">Notation: <strong>FDI (11-48)</strong></button>
-                </div>
                 <h1 style="color: #F1F5F9;">Dental AI Analysis Report</h1>
-                <p style="color: #94A3B8;">Generated by Dental AI Assistant</p>
+                <p style="color: #9A9A9A;">Generated by Dental AI Assistant</p>
                 
                 <div class="user-info">
                     <div class="user-avatar">{user_initial}</div>
@@ -474,14 +571,13 @@ class ReportV3ViewerMixin:
                     </div>
                 </div>
             </div>
-            
             <div class="divider-thick"></div>
 
     
 
             <!-- EXECUTIVE SUMMARY -->
-            <div class="summary-box">
-                <h2 class="summary-title">Clinical Summary </h2>
+            <div class="renew-section summary-box">
+                <div class="renew-section-header"><span class="marker"></span><h2 class="summary-title">Clinical Summary</h2></div>
                 <div class="summary-grid">
                     <div class="summary-item">
                         <span class="summary-val">{len(missing_teeth)}</span>
@@ -495,28 +591,28 @@ class ReportV3ViewerMixin:
                         <span class="summary-val">{len(summary_data.get('periapical', []))}</span>
                         <span class="summary-label">Apical Lesions</span>
                     </div>
+                    <div class="summary-item">
+                        <span class="summary-val">{len(findings)}</span>
+                        <span class="summary-label">Detected Teeth</span>
+                    </div>
 
                 </div>
             </div>
 
             <!-- AI INSIGHT REMOVED: Now using per-tooth analysis in each card -->
 
-            <div class="pano-container" id="pano-wrapper">
-                <h2>Full Panorama <span style="font-size:0.7em;color:#666;font-weight:normal;">(Click on highlighted areas)</span></h2>
-                <div style="position:relative;display:inline-block;width:100%;">
+            <div class="renew-section pano-container" id="pano-wrapper">
+                <div class="renew-section-header"><span class="marker"></span><h2>Full Panorama</h2></div>
+                <div class="renew-section-body">
+                <div style="font-size:0.8rem;color:#9A9A9A;font-weight:600;margin-bottom:16px;">Click on highlighted areas</div>
+                <div class="pano-frame">
                     <img class="pano-img" id="pano-img" src="data:image/jpeg;base64,{pano_img_b64}" alt="Full Panorama">
                     <svg class="pano-overlay" id="pano-svg" viewBox="0 0 1000 500" preserveAspectRatio="none">
                         <!-- Hotspots will be added dynamically -->
                     </svg>
                 </div>
-            </div>
             
-            <div class="legend">
-                <div class="legend-item"><div class="legend-bar triage-3"></div><span style="color:#4ADE80">Routine Checkup (Triage 3)</span></div>
-                <div class="legend-item"><div class="legend-bar triage-2"></div><span style="color:#FACC15">Treatment Required (Triage 2)</span></div>
-                <div class="legend-item"><div class="legend-bar triage-1"></div><span style="color:#F87171">Urgent Priority (Triage 1)</span></div>
-                <div class="legend-item"><div class="legend-bar implant"></div><span style="color:#38BDF8">Implant</span></div>
-                <div class="legend-item"><div class="legend-bar missing"></div><span style="color:#64748B">Missing Tooth</span></div>
+                </div>
             </div>
             
             <!-- ODONTOGRAM_PLACEHOLDER -->
@@ -526,7 +622,9 @@ class ReportV3ViewerMixin:
              
             <div class="divider"></div>
              
-            <h2>Detailed Findings</h2>
+            <div class="renew-section">
+                <div class="renew-section-header"><span class="marker"></span><h2>Detailed Findings</h2></div>
+                <div class="renew-section-body">
         """
         
         # Build tooth status map
@@ -573,6 +671,14 @@ class ReportV3ViewerMixin:
                 lbl = str(mt.get('tooth_label', ''))
                 if lbl:
                     tooth_status[lbl] = 'missing'
+
+        status_counts = {
+            'triage-1': sum(1 for status in tooth_status.values() if status == 'triage-1'),
+            'triage-2': sum(1 for status in tooth_status.values() if status == 'triage-2'),
+            'triage-3': sum(1 for status in tooth_status.values() if status == 'triage-3'),
+            'implant': sum(1 for status in tooth_status.values() if status == 'implant'),
+            'missing': sum(1 for status in tooth_status.values() if status == 'missing'),
+        }
         
         # Generate odontogram HTML with Toggle
         def build_odonto_row_toggle(jaw, quadrants):
@@ -600,7 +706,7 @@ class ReportV3ViewerMixin:
                     status = tooth_status.get(fdi_str, 'triage-3')
                     
                     # Image loading
-                    icon_b64 = self._load_odonto_icon(jaw, pos)
+                    icon_b64 = self._load_odonto_icon(jaw, pos, status)
                     flip_class = 'flip' if flip else ''
                     
                     if icon_b64:
@@ -634,17 +740,55 @@ class ReportV3ViewerMixin:
         
         odontogram_html = f'''
         <div class="odontogram" style="position:relative;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
-                <h3 class="odonto-title">Dental Chart</h3>
-            </div>
+            <div class="renew-section-header" style="margin-bottom:0;"><span class="marker"></span><h3 class="odonto-title">Dental Chart</h3></div>
             <div class="odonto-shell">
-                <div class="odonto-side">R</div>
-                <div class="odonto-body">
-                    {upper_row}
-                    <div class="odonto-divider"></div>
-                    {lower_row}
+                <div class="odonto-legend-panel">
+                    <div class="odonto-legend-item">
+                        <div class="odonto-legend-chip"></div>
+                        <div class="odonto-legend-label">Routine Checkup (Triage 3)<span class="odonto-legend-count">{status_counts['triage-3']}</span></div>
+                        <div class="odonto-legend-swatch" style="background:#FFFFFF;"></div>
+                    </div>
+                    <div class="odonto-legend-item">
+                        <div class="odonto-legend-chip"></div>
+                        <div class="odonto-legend-label">Treatment Required (Triage 2)<span class="odonto-legend-count">{status_counts['triage-2']}</span></div>
+                        <div class="odonto-legend-swatch" style="background:#FCFF2A;"></div>
+                    </div>
+                    <div class="odonto-legend-item">
+                        <div class="odonto-legend-chip"></div>
+                        <div class="odonto-legend-label">Urgent Priority (Triage 1)<span class="odonto-legend-count">{status_counts['triage-1']}</span></div>
+                        <div class="odonto-legend-swatch" style="background:#FF0037;"></div>
+                    </div>
+                    <div class="odonto-legend-item">
+                        <div class="odonto-legend-chip"></div>
+                        <div class="odonto-legend-label">Implant<span class="odonto-legend-count">{status_counts['implant']}</span></div>
+                        <div class="odonto-legend-swatch" style="background:#003DFF;"></div>
+                    </div>
+                    <div class="odonto-legend-item">
+                        <div class="odonto-legend-chip"></div>
+                        <div class="odonto-legend-label">Missing Tooth<span class="odonto-legend-count">{status_counts['missing']}</span></div>
+                        <div class="odonto-legend-swatch" style="background:#3F3F3F;"></div>
+                    </div>
                 </div>
-                <div class="odonto-side">L</div>
+                <div class="odonto-main">
+                    <div class="odonto-main-top">
+                        <button class="odonto-notation-toggle is-fdi" onclick="window.toggleNotation()">
+                            <span class="token-fdi">FDI</span>
+                            <span class="slash">/</span>
+                            <span class="token-univ">Univ</span>
+                        </button>
+                    </div>
+                    <div class="odonto-canvas">
+                        <div class="odonto-body-frame">
+                            <div class="odonto-side">R</div>
+                            <div class="odonto-body">
+                                {upper_row}
+                                <div class="odonto-divider"></div>
+                                {lower_row}
+                            </div>
+                            <div class="odonto-side">L</div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
         '''
@@ -1732,7 +1876,7 @@ class ReportV3ViewerMixin:
                               <span class="format-fdi">Tooth #{tooth_label} <span style="font-size:0.8rem;color:#94A3B8;font-weight:normal;">(Univ #{self.get_universal_label(str(tooth_label))})</span></span>
                               <span class="format-univ" style="display:none">Tooth #{self.get_universal_label(str(tooth_label))} <span style="font-size:0.8rem;color:#94A3B8;font-weight:normal;">(FDI #{tooth_label})</span></span>
                           </h3>
-                         <div style="margin:12px 0 8px; font-size:1.1rem; font-weight:800; color:#38BDF8;">Clinical Analysis:</div>
+                         <div style="margin:12px 0 8px; font-size:1.1rem; font-weight:800; color:#FFFFFF;">Clinical Analysis:</div>
                          <div style="color:#E2E8F0; line-height:1.6; font-size:0.98rem;">{' '.join(desc).replace('<strong>Analysis:</strong><br>', '', 1)}</div>
                          {tooth_note_html}
                          {treatment_html}
@@ -1752,8 +1896,9 @@ class ReportV3ViewerMixin:
             """
 
         html += f"""
+                </div>
+            </div>
             <div class="footer">
-                <div class="footer-logo"><img src="data:image/png;base64,{logo_b64}" style="height:87px;"></div>
                 <div class="footer-warning" style="flex:1;">
                     <div style="display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:12px;">
                         <img src="data:image/png;base64,{warning_icon_b64}" style="height:60px; width:auto;">
