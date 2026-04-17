@@ -79,9 +79,11 @@ werkzeug_logger.handlers.clear()
 werkzeug_logger.addHandler(_secure_handler)
 # -----------------------------
 
-# Resolve device: default to CPU unless explicitly set
-_target_device = os.environ.get("PANO_DEVICE", "cpu").lower()
+# Resolve device: prefer CUDA unless explicitly overridden
+_target_device = os.environ.get("PANO_DEVICE", "cuda").lower()
 if _target_device == "gpu":
+    _target_device = "cuda"
+elif _target_device == "auto":
     _target_device = "cuda"
 try:
     import torch
@@ -115,6 +117,8 @@ calc_utils.set_weight_paths(
     bonelevel=Path(app.config["BASE_DIR"]) / "weights" / app.config["PANO_MODELS"]["bonelevel"]["path"],
     cej=Path(app.config["BASE_DIR"]) / "weights" / app.config["PANO_MODELS"]["cej"]["path"],
 )
+if hasattr(calc_utils, "INFER_DEVICE"):
+    calc_utils.INFER_DEVICE = _target_device
 
 
 # Register Blueprints

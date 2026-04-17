@@ -8,6 +8,15 @@ type DicomMetadataOverlayProps = {
   right?: number;
   compact?: boolean;
   leftPanelAlign?: 'left' | 'right';
+  rightPanelAlign?: 'left' | 'right';
+  leftPanelWidth?: number;
+  rightPanelWidth?: number;
+  leftPanelFontSize?: number;
+  rightPanelFontSize?: number;
+  headerFontSize?: number;
+  panelPaddingX?: number;
+  panelPaddingY?: number;
+  panelRadius?: number;
 };
 
 const formatDicomDate = (raw?: string) => {
@@ -90,6 +99,15 @@ export function DicomMetadataOverlay({
   right = 16,
   compact = false,
   leftPanelAlign = 'left',
+  rightPanelAlign = 'right',
+  leftPanelWidth = 260,
+  rightPanelWidth = 320,
+  leftPanelFontSize = 11,
+  rightPanelFontSize = 10,
+  headerFontSize = 10,
+  panelPaddingX = 12,
+  panelPaddingY = 8,
+  panelRadius = 12,
 }: DicomMetadataOverlayProps) {
   if (!metadata) return null;
 
@@ -110,8 +128,13 @@ export function DicomMetadataOverlay({
         style={leftPanelAlign === 'right' ? { position: 'absolute', top, right } : { position: 'absolute', top, left }}
       >
         <div
-          className="min-w-[220px] max-w-[min(260px,calc(100%-32px))] rounded-xl px-3 py-2 text-[11px] leading-[1.35] text-white"
           style={{
+            width: `${leftPanelWidth}px`,
+            borderRadius: `${panelRadius}px`,
+            padding: `${panelPaddingY}px ${panelPaddingX}px`,
+            fontSize: `${leftPanelFontSize}px`,
+            lineHeight: 1.35,
+            color: '#FFFFFF',
             background: 'rgba(0, 0, 0, 0.58)',
             border: '1px solid rgba(255,255,255,0.14)',
             boxShadow: '0 12px 30px rgba(0,0,0,0.32)',
@@ -119,12 +142,12 @@ export function DicomMetadataOverlay({
             WebkitBackdropFilter: 'blur(10px)',
           }}
         >
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white">
+          <div style={{ marginBottom: '4px', fontSize: `${headerFontSize}px`, fontWeight: 600, letterSpacing: '0.18em', textTransform: 'uppercase', color: '#FFFFFF' }}>
             DICOM HUD
           </div>
-          <div className="space-y-0.5 font-mono">
+          <div style={{ fontFamily: 'monospace' }}>
             {leftLines.map((line, index) => (
-              <div key={`left-${line}-${index}`} className="break-all whitespace-pre-wrap">
+              <div key={`left-${line}-${index}`} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
                 {line}
               </div>
             ))}
@@ -132,11 +155,16 @@ export function DicomMetadataOverlay({
         </div>
       </div>
       <div
-        style={{ position: 'absolute', right, bottom }}
+        style={rightPanelAlign === 'left' ? { position: 'absolute', left, bottom } : { position: 'absolute', right, bottom }}
       >
         <div
-          className="min-w-[240px] max-w-[min(320px,calc(100%-32px))] rounded-xl px-3 py-2 text-[10px] leading-[1.35] text-white"
           style={{
+            width: `${rightPanelWidth}px`,
+            borderRadius: `${panelRadius}px`,
+            padding: `${panelPaddingY}px ${panelPaddingX}px`,
+            fontSize: `${rightPanelFontSize}px`,
+            lineHeight: 1.35,
+            color: '#FFFFFF',
             background: 'rgba(0, 0, 0, 0.58)',
             border: '1px solid rgba(255,255,255,0.12)',
             boxShadow: '0 10px 26px rgba(0,0,0,0.28)',
@@ -144,12 +172,12 @@ export function DicomMetadataOverlay({
             WebkitBackdropFilter: 'blur(10px)',
           }}
         >
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white">
+          <div style={{ marginBottom: '4px', fontSize: `${headerFontSize}px`, fontWeight: 600, letterSpacing: '0.18em', textTransform: 'uppercase', color: '#FFFFFF' }}>
             {metadata.modality || 'DICOM'}
           </div>
-          <div className="space-y-0.5 font-mono">
+          <div style={{ fontFamily: 'monospace' }}>
             {rightLines.map((line, index) => (
-              <div key={`right-${line}-${index}`} className="break-all whitespace-pre-wrap">
+              <div key={`right-${line}-${index}`} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
                 {line}
               </div>
             ))}

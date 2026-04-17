@@ -121,6 +121,7 @@ class YOLODetector(BaseDetector):
             retina_masks=retina_masks,
             verbose=False,
             classes=classes,
+            device=self.device,
         )
         inference_time = (time.time() - inference_start) * 1000
 

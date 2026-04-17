@@ -71,6 +71,8 @@ class PanoPipeline:
             if not cej_path.is_absolute(): cej_path = model_dir / cej_path
             
             calc.set_weight_paths(bl_path, cej_path)
+            if hasattr(calc, "INFER_DEVICE"):
+                calc.INFER_DEVICE = self.device
         except Exception as e:
             print(f"[WARN] Failed to set PBL paths: {e}")
 
@@ -284,6 +286,7 @@ class PanoPipeline:
             iou=seg_cfg.get("default_iou", 0.7),
             retina_masks=True,
             verbose=False,
+            device=self.device,
         )[0]
         results['seg_res'] = filter_results_with_isolated_guard(
             seg_res,
@@ -306,7 +309,8 @@ class PanoPipeline:
                     imgsz=aux_cfg.get("default_imgsz", 1024),
                     conf=aux_cfg.get("default_confidence", 0.25),
                     iou=aux_cfg.get("default_iou", 0.7),
-                    verbose=False
+                    verbose=False,
+                    device=self.device,
                 )[0]
                 
                 if aux_res.boxes is not None:
@@ -330,6 +334,7 @@ class PanoPipeline:
             conf=car_cfg.get("default_confidence", 0.2),
             iou=car_cfg.get("default_iou", 0.5),
             verbose=False,
+            device=self.device,
         )[0]
         results['car_time'] = time.perf_counter() - t1
         print(f"  [PERF][{self.device.upper()}] caries inference: {results['car_time']:.3f}s")
@@ -343,6 +348,7 @@ class PanoPipeline:
             conf=per_cfg.get("default_confidence", 0.1),
             iou=per_cfg.get("default_iou", 0.5),
             verbose=False,
+            device=self.device,
         )[0]
         results['per_time'] = time.perf_counter() - t2
         print(f"  [PERF][{self.device.upper()}] periapical inference: {results['per_time']:.3f}s")
@@ -379,6 +385,7 @@ class PanoPipeline:
                 iou=iac_cfg.get("default_iou", 0.5),
                 retina_masks=True,
                 verbose=False,
+                device=self.device,
             )[0]
             
             score = float(res.boxes.conf.max()) if res.boxes is not None and len(res.boxes) > 0 else 0
@@ -386,7 +393,7 @@ class PanoPipeline:
                 best_score = score
                 best_iac_res = res
         
-        results['iac_res'] = best_iac_res if best_iac_res else iac_model.predict(img, verbose=False)[0]
+        results['iac_res'] = best_iac_res if best_iac_res else iac_model.predict(img, verbose=False, device=self.device)[0]
         results['iac_time'] = time.perf_counter() - t_iac
         print(f"  [PERF][{self.device.upper()}] iac inference (ensemble): {results['iac_time']:.3f}s")
         

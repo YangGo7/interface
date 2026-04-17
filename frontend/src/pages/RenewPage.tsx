@@ -174,6 +174,11 @@ const activeRailIcons = {
   captures: assetPath('main_active/left_bar_active (51 57)/자산 587.png'),
 };
 
+const panoZoomIcons = {
+  maximize: assetPath('botton/maxima642@4x.png'),
+  minimize: assetPath('botton/minima.png'),
+};
+
 const displayToolbarIcons = [
   assetPath('mian_deactive/tools_deactive(36 36)/자산 20@4x.png'),
   assetPath('mian_deactive/tools_deactive(36 36)/자산 21@4x.png'),
@@ -223,6 +228,15 @@ const legendItems = [
   { key: 'implant', label: 'Implant', color: '#003DFF', top: 900 },
   { key: 'missing', label: 'Missing Tooth', color: '#3F3F3F', top: 933 },
   { key: 'healthy', label: 'Healthy Tooth', color: '#FFFFFF', top: 966 },
+] as const;
+
+const overlayPresetOptions = [
+  { key: 'all', label: '전체', menuLabel: '1. all' },
+  { key: 'sinus', label: 'sinus', menuLabel: '2. sinus' },
+  { key: 'nerve', label: 'nerve', menuLabel: '3. nerve' },
+  { key: 'tooth', label: 'tooth', menuLabel: '4. tooth' },
+  { key: 'sinus-upper-tooth', label: 'sinus + upper tooth', menuLabel: '5. sinus + upper tooth' },
+  { key: 'nerve-lower-tooth', label: 'nerve + lower tooth', menuLabel: '6. nerve + lower tooth' },
 ] as const;
 
 const upperSizes = ['23 79', '20 75', '22 82', '25 74', '25 67', '38 58', '36 54', '35 49'];
@@ -367,6 +381,7 @@ type ToothGeometry = {
 };
 
 type ToothCondition = 'healthy' | 'requires' | 'warning' | 'implant' | 'missing';
+type OverlayPreset = typeof overlayPresetOptions[number]['key'];
 
 type NormalizedDetection = {
   id: string;
@@ -866,6 +881,14 @@ function ToothSlotImage({
   onHoverChange?: (value: ToothHoverAnchor | null) => void;
 }) {
   const imageSrc = getToothStatusAsset(arch, order, status);
+  const shouldFlipImplantVertically = status === 'implant' && arch === 'L';
+  const scaleX = flipX ? -1 : 1;
+  const scaleY = shouldFlipImplantVertically ? -1 : 1;
+  const imageTransform =
+    scaleX === 1 && scaleY === 1
+      ? undefined
+      : `translate(${scaleX === -1 ? width : 0}px, ${scaleY === -1 ? height : 0}px) scale(${scaleX}, ${scaleY})`;
+  const imageTransformOrigin = scaleX === -1 || scaleY === -1 ? 'top left' : undefined;
   const glowFilter = active
     ? 'drop-shadow(0 0 8px rgba(0, 192, 243, 0.95)) drop-shadow(0 0 14px rgba(0, 192, 243, 0.65))'
     : hasDetection
@@ -908,8 +931,8 @@ function ToothSlotImage({
           width: '100%',
           height: '100%',
           display: 'block',
-          transform: flipX ? `translate(${width}px, 0) scaleX(-1)` : undefined,
-          transformOrigin: flipX ? 'top left' : undefined,
+          transform: imageTransform,
+          transformOrigin: imageTransformOrigin,
           filter: glowFilter,
         }}
       />
@@ -946,6 +969,7 @@ export function RenewPage() {
   const [result, setResult] = useState<any>(locationState?.result || null);
   const [jobId, setJobId] = useState<string | null>(locationState?.jobId || null);
   const [isProcessing, setIsProcessing] = useState(!locationState?.result && !!locationState?.jobId);
+  const [loadingProgress, setLoadingProgress] = useState(0);
   const [activeFolderStudies, setActiveFolderStudies] = useState<FolderStudy[]>(() => {
     const raw = (locationState.originalFolderStudies as FolderStudy[] | undefined) || [];
     const seen = new Set<string>();
@@ -997,6 +1021,7 @@ export function RenewPage() {
   const [panoContrast, setPanoContrast] = useState(PANO_DEFAULT_CONTRAST);
   const [panoDisplaySize, setPanoDisplaySize] = useState({ width: 0, height: 0 });
   const [panoNaturalSize, setPanoNaturalSize] = useState({ width: 0, height: 0 });
+  const [isOverlayPresetMenuVisible, setIsOverlayPresetMenuVisible] = useState(false);
   const [panoMagnifier, setPanoMagnifier] = useState({
     visible: false,
     clientX: 0,
@@ -1010,6 +1035,7 @@ export function RenewPage() {
   const [activeDetectionId, setActiveDetectionId] = useState<string | null>(null);
   const [hoveredToothAnchor, setHoveredToothAnchor] = useState<ToothHoverAnchor | null>(null);
   const [activeLegendFilter, setActiveLegendFilter] = useState<ToothCondition | null>(null);
+  const [overlayPreset, setOverlayPreset] = useState<OverlayPreset>('all');
   const [selectedFolderSeriesId, setSelectedFolderSeriesId] = useState<string | null>(
     locationState.folderSelectedSeriesId || activeFolderStudies.flatMap((study) => study.series)[0]?.id || null
   );
@@ -2150,6 +2176,11 @@ export function RenewPage() {
     if (viewMode !== 'overlay' || !result) return null;
 
     const items: any[] = [];
+    const shouldFocusSingleTooth = Boolean(activeTooth);
+    const shouldShowSinus = !shouldFocusSingleTooth && (overlayPreset === 'all' || overlayPreset === 'sinus' || overlayPreset === 'sinus-upper-tooth');
+    const shouldShowNerve = !shouldFocusSingleTooth && (overlayPreset === 'all' || overlayPreset === 'nerve' || overlayPreset === 'nerve-lower-tooth');
+    const shouldShowUpperTooth = overlayPreset === 'all' || overlayPreset === 'tooth' || overlayPreset === 'sinus-upper-tooth';
+    const shouldShowLowerTooth = overlayPreset === 'all' || overlayPreset === 'tooth' || overlayPreset === 'nerve-lower-tooth';
     const matchesFilter = (toothFdi: string | null | undefined) => {
       if (!activeLegendFilter) return true;
       if (!toothFdi) return false;
@@ -2160,7 +2191,7 @@ export function RenewPage() {
       return toothFdi === activeTooth;
     };
 
-    if (Array.isArray(result.sinus_contours)) {
+    if (shouldShowSinus && Array.isArray(result.sinus_contours)) {
       result.sinus_contours.forEach((contour: any, idx: number) => {
         if (!Array.isArray(contour)) return;
         const runs = buildLowerContourRuns(contour, 0.25);
@@ -2182,7 +2213,7 @@ export function RenewPage() {
       });
     }
 
-    if (Array.isArray(result.nerve_contours)) {
+    if (shouldShowNerve && Array.isArray(result.nerve_contours)) {
       result.nerve_contours.forEach((contour: any, idx: number) => {
         if (!Array.isArray(contour) || contour.length < 2) return;
         const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
@@ -2203,6 +2234,9 @@ export function RenewPage() {
 
     toothGeometries.forEach((tooth, idx) => {
       if (!matchesFilter(tooth.fdi) || !matchesToothSelection(tooth.fdi)) return;
+      const isUpperTooth = tooth.fdi.startsWith('1') || tooth.fdi.startsWith('2');
+      if (isUpperTooth && !shouldShowUpperTooth) return;
+      if (!isUpperTooth && !shouldShowLowerTooth) return;
       const paletteIndex = Number.isFinite(Number(tooth.fdi)) ? Math.abs(Number(tooth.fdi)) % warmPastelPalette.length : 0;
       const style = warmPastelPalette[paletteIndex];
       const toothStatus = toothStatusByFdi[tooth.fdi] || 'healthy';
@@ -2685,6 +2719,26 @@ export function RenewPage() {
   }, [jobId, result]);
 
   useEffect(() => {
+    if (!isProcessing) {
+      setLoadingProgress(0);
+      return;
+    }
+
+    setLoadingProgress((current) => (current > 8 ? current : 8));
+    const timer = window.setInterval(() => {
+      setLoadingProgress((current) => {
+        if (current < 42) return Math.min(42, current + 10);
+        if (current < 68) return Math.min(68, current + 6);
+        if (current < 86) return Math.min(86, current + 3);
+        if (current < 94) return Math.min(94, current + 1);
+        return current;
+      });
+    }, 260);
+
+    return () => window.clearInterval(timer);
+  }, [isProcessing]);
+
+  useEffect(() => {
     if (!result) return;
 
     const nextHasStructuredOverlay = Boolean(
@@ -2927,6 +2981,7 @@ export function RenewPage() {
 
   const handlePanoPointerLeave = () => {
     panoDragRef.current.mode = null;
+    setIsOverlayPresetMenuVisible(false);
     setPanoMagnifier((current) =>
       current.visible ? { visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 } : current
     );
@@ -3445,6 +3500,42 @@ export function RenewPage() {
           {!isReportWorkspaceVisible && (
             <>
               <div style={{ width: wp(topBarWidth), height: hp(18), left: wp(topBarLeft), top: hp(49), position: 'absolute', background: '#5C5C5C', zIndex: 1 }} />
+              {panoViewerUrl && (
+                <button
+                  type="button"
+                  onClick={handleChartToggle}
+                  aria-pressed={!isChartVisible}
+                  aria-label={isChartVisible ? 'Maximize pano viewer' : 'Restore dental chart'}
+                  title={isChartVisible ? 'Maximize pano viewer' : 'Restore dental chart'}
+                  style={{
+                    width: wp(18),
+                    height: hp(18),
+                    left: wp(viewerLeft + viewerWidth - 21),
+                    top: hp(49),
+                    position: 'absolute',
+                    zIndex: 6,
+                    background: '#5C5C5C',
+                    borderLeft: `${scalePx(1)} solid #4C4C4C`,
+                    padding: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <img
+                    src={isChartVisible ? panoZoomIcons.maximize : panoZoomIcons.minimize}
+                    alt=""
+                    draggable={false}
+                    style={{
+                      width: wp(10),
+                      height: hp(10),
+                      objectFit: 'contain',
+                      display: 'block',
+                    }}
+                  />
+                </button>
+              )}
               <div style={{ width: wp(viewerWidth), height: hp(1018), left: wp(viewerLeft), top: hp(50), position: 'absolute', background: 'black' }} />
               {isChartVisible && (
                 <div style={{ width: wp(viewerWidth), height: hp(18), left: wp(viewerLeft), top: hp(804), position: 'absolute', background: '#5C5C5C', zIndex: 1 }} />
@@ -3504,6 +3595,9 @@ export function RenewPage() {
                       transform: `translate(${panoOffset.x}px, ${panoOffset.y}px) scale(${panoZoom}) scaleX(${flipped ? -1 : 1})`,
                       transformOrigin: 'center',
                       isolation: 'isolate',
+                      filter: isProcessing ? 'blur(1.8px)' : 'none',
+                      opacity: isProcessing ? 0.82 : 1,
+                      transition: 'filter 180ms ease, opacity 180ms ease',
                     }}
                     ref={panoDisplayRef}
                   >
@@ -3608,14 +3702,194 @@ export function RenewPage() {
                     No panorama source
                   </div>
                 )}
+                {isProcessing && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      pointerEvents: 'none',
+                      zIndex: 18,
+                      background: 'rgba(0, 0, 0, 0.12)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: wp(220),
+                        padding: `${hp(14)} ${wp(16)}`,
+                        borderRadius: scalePx(10),
+                        border: `${scalePx(1)} solid rgba(255, 255, 255, 0.18)`,
+                        background: 'rgba(30, 30, 30, 0.78)',
+                        backdropFilter: 'blur(10px)',
+                        boxShadow: '0 14px 40px rgba(0, 0, 0, 0.28)',
+                      }}
+                    >
+                      <div
+                        style={{
+                          color: '#F3F4F6',
+                          fontSize: scalePx(16),
+                          fontWeight: 700,
+                          letterSpacing: '0.03em',
+                          marginBottom: hp(10),
+                          textAlign: 'center',
+                        }}
+                      >
+                        Loading ...
+                      </div>
+                      <div
+                        style={{
+                          width: '100%',
+                          height: hp(8),
+                          borderRadius: scalePx(999),
+                          background: 'rgba(255, 255, 255, 0.12)',
+                          overflow: 'hidden',
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: `${loadingProgress}%`,
+                            height: '100%',
+                            borderRadius: 'inherit',
+                            background: 'linear-gradient(90deg, rgba(180,180,180,0.85) 0%, rgba(240,240,240,0.96) 100%)',
+                            boxShadow: '0 0 14px rgba(255, 255, 255, 0.24)',
+                            transition: 'width 240ms ease',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
                 {displayDicomHudMetadata && (
                   <DicomMetadataOverlay
                     metadata={displayDicomHudMetadata}
                     top={12}
-                    right={12}
+                    left={12}
                     bottom={12}
-                    leftPanelAlign="right"
+                    leftPanelAlign="left"
+                    rightPanelAlign="left"
+                    leftPanelWidth={252}
+                    rightPanelWidth={286}
+                    leftPanelFontSize={11}
+                    rightPanelFontSize={10}
+                    headerFontSize={10}
+                    panelPaddingX={12}
+                    panelPaddingY={8}
+                    panelRadius={12}
                   />
+                )}
+                {viewMode === 'overlay' && hasStructuredOverlayData && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      left: wp(18),
+                      bottom: hp(18),
+                      width: wp(190),
+                      zIndex: 9,
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setIsOverlayPresetMenuVisible((current) => !current)}
+                      style={{
+                        width: wp(190),
+                        minHeight: hp(28),
+                        padding: `${hp(5)} ${wp(7)}`,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        background: 'rgba(46, 46, 46, 0.92)',
+                        color: '#FFFFFF',
+                        border: `${scalePx(1)} solid rgba(255, 255, 255, 0.12)`,
+                        borderRadius: isOverlayPresetMenuVisible ? `${scalePx(6)} ${scalePx(6)} 0 0` : scalePx(6),
+                        backdropFilter: 'blur(8px)',
+                        boxShadow: '0 8px 18px rgba(0, 0, 0, 0.22)',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: scalePx(11),
+                          fontWeight: 700,
+                          letterSpacing: '0.02em',
+                        }}
+                      >
+                        {overlayPresetOptions.find((option) => option.key === overlayPreset)?.menuLabel ?? '1. 전체'}
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          fontSize: scalePx(14),
+                          fontWeight: 700,
+                          lineHeight: 1,
+                          transform: isOverlayPresetMenuVisible ? 'rotate(180deg)' : 'rotate(0deg)',
+                          transition: 'transform 120ms ease',
+                          display: 'none',
+                        }}
+                      >
+                        ˅
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          transform: isOverlayPresetMenuVisible ? 'rotate(180deg)' : 'rotate(0deg)',
+                          transition: 'transform 120ms ease',
+                          width: 0,
+                          height: 0,
+                          borderLeft: `${scalePx(4)} solid transparent`,
+                          borderRight: `${scalePx(4)} solid transparent`,
+                          borderTop: `${scalePx(6)} solid rgba(255, 255, 255, 0.8)`,
+                        }}
+                      />
+                    </button>
+                    {isOverlayPresetMenuVisible && (
+                      <div
+                        style={{
+                          width: wp(190),
+                          background: 'rgba(34, 34, 34, 0.96)',
+                          borderLeft: `${scalePx(1)} solid rgba(255, 255, 255, 0.12)`,
+                          borderRight: `${scalePx(1)} solid rgba(255, 255, 255, 0.12)`,
+                          borderBottom: `${scalePx(1)} solid rgba(255, 255, 255, 0.12)`,
+                          borderRadius: `0 0 ${scalePx(6)} ${scalePx(6)}`,
+                          overflow: 'hidden',
+                          backdropFilter: 'blur(8px)',
+                          boxShadow: '0 8px 18px rgba(0, 0, 0, 0.22)',
+                        }}
+                      >
+                        {overlayPresetOptions.map((option) => {
+                          const active = overlayPreset === option.key;
+                          return (
+                            <button
+                              key={option.key}
+                              type="button"
+                              onClick={() => {
+                                setOverlayPreset(option.key);
+                                setIsOverlayPresetMenuVisible(false);
+                              }}
+                              style={{
+                                width: '100%',
+                                minHeight: hp(28),
+                                padding: `${hp(5)} ${wp(7)}`,
+                                background: active ? 'rgba(92, 92, 92, 0.96)' : 'transparent',
+                                color: '#FFFFFF',
+                                border: 'none',
+                                fontSize: scalePx(11),
+                                fontWeight: 700,
+                                letterSpacing: '0.02em',
+                                cursor: 'pointer',
+                                whiteSpace: 'nowrap',
+                                textAlign: 'left',
+                              }}
+                            >
+                              {option.menuLabel}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 )}
                 {selectedToolbarButton === 'magnifier' && panoMagnifierViewport && (
                   <div
@@ -4151,7 +4425,7 @@ export function RenewPage() {
           reportErrorLeft={wp(251)}
           reportErrorTop={hp(74)}
           reportErrorFontSize={scalePx(11)}
-          showChartToggle={!isChartVisible}
+          showChartToggle={false}
           chartToggleLeft={wp(chartSectionLeft)}
           chartToggleTop={hp(panoChartToggleTop)}
           chartToggleWidth={wp(chartSectionWidth)}

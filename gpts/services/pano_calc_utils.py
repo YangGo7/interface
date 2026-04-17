@@ -54,12 +54,14 @@ def pca_axis_from_mask(mask_roi: np.ndarray, n_samples: int = 40):
 # Paths will be set at runtime
 BONELEVEL = ""
 CEJ = ""
+INFER_DEVICE = "cpu"
 
 
-def set_weight_paths(bonelevel: Path, cej: Path) -> None:
-    global BONELEVEL, CEJ
+def set_weight_paths(bonelevel: Path, cej: Path, device: str = "cpu") -> None:
+    global BONELEVEL, CEJ, INFER_DEVICE
     BONELEVEL = str(bonelevel)
     CEJ = str(cej)
+    INFER_DEVICE = device
 
 
 def get_squeeze_points(coordinates, img_path: np.ndarray, e: int = 0, opt=cv2.CHAIN_APPROX_NONE):
@@ -307,18 +309,20 @@ def get_bonelevel(img, seg_res, bonelv_model=None, cej_model=None, axis_only: bo
 
     if bonelv_model is None:
         bonelv = YOLO(BONELEVEL)
-        bonelv_result = bonelv(img, conf=bl_conf, iou=bl_iou)
+        bonelv.to(INFER_DEVICE)
+        bonelv_result = bonelv(img, conf=bl_conf, iou=bl_iou, device=INFER_DEVICE)
     else:
-        bonelv_result = bonelv_model(img, conf=bl_conf, iou=bl_iou)
+        bonelv_result = bonelv_model(img, conf=bl_conf, iou=bl_iou, device=INFER_DEVICE)
 
     if len(bonelv_result) == 0 or bonelv_result[0].masks is None:
         return np.zeros_like(img), {}, 0, 0
 
     if cej_model is None:
         cej_m = YOLO(CEJ)
-        cej_result = cej_m(img, conf=cej_conf, iou=cej_iou)
+        cej_m.to(INFER_DEVICE)
+        cej_result = cej_m(img, conf=cej_conf, iou=cej_iou, device=INFER_DEVICE)
     else:
-        cej_result = cej_model(img, conf=cej_conf, iou=cej_iou)
+        cej_result = cej_model(img, conf=cej_conf, iou=cej_iou, device=INFER_DEVICE)
 
     if len(cej_result) == 0 or cej_result[0].masks is None:
         return np.zeros_like(img), {}, 0, 0
@@ -618,11 +622,13 @@ def get_bonelevel_info(img, seg_res):
     if not BONELEVEL or not CEJ:
         return {}
     bonelv = YOLO(BONELEVEL)
-    bonelv_result = bonelv(img)
+    bonelv.to(INFER_DEVICE)
+    bonelv_result = bonelv(img, device=INFER_DEVICE)
     if len(bonelv_result) == 0 or bonelv_result[0].masks is None:
         return {}
     cej_model = YOLO(CEJ)
-    cej_result = cej_model(img)
+    cej_model.to(INFER_DEVICE)
+    cej_result = cej_model(img, device=INFER_DEVICE)
     if len(cej_result) == 0 or cej_result[0].masks is None:
         return {}
 
