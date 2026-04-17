@@ -8,6 +8,7 @@ dicom_browser_api = Blueprint('dicom_browser_api', __name__)
 
 # [CONFIG] Default DICOM Root Path
 DICOM_ROOT = Path("C:/interface/case")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 
 @dicom_browser_api.route('/studies', methods=['GET'])
 def list_studies():
@@ -17,6 +18,7 @@ def list_studies():
     """
     root_exists = DICOM_ROOT.exists()
     study_map = {} # study_uid -> study_data
+    images = []
     
     if root_exists:
         # 1. Exhaustive recursive scan for all DICOM files
@@ -105,11 +107,27 @@ def list_studies():
                 ]
             })
 
+        for img_path in DICOM_ROOT.rglob("*"):
+            if not img_path.is_file() or not img_path.name.lower().endswith(IMAGE_EXTENSIONS):
+                continue
+            rel_path = img_path.relative_to(DICOM_ROOT).as_posix()
+            images.append({
+                "name": img_path.name,
+                "relativePath": rel_path,
+                "downloadUrl": f"/api/dicom-server/file?path={rel_path}",
+                "folderLabel": img_path.parent.name,
+                "width": 0,
+                "height": 0,
+                "format": img_path.suffix.lstrip(".").upper(),
+                "size": img_path.stat().st_size,
+            })
+
         return jsonify({
             "success": True,
             "root_path": str(DICOM_ROOT),
             "root_exists": root_exists,
-            "studies": formatted_studies
+            "studies": formatted_studies,
+            "images": images,
         })
 
     return jsonify({
@@ -117,7 +135,8 @@ def list_studies():
         "message": "Root directory not found",
         "root_path": str(DICOM_ROOT),
         "root_exists": False,
-        "studies": []
+        "studies": [],
+        "images": [],
     })
 
 @dicom_browser_api.route('/preview', methods=['GET'])
@@ -156,3 +175,9 @@ def download_dicom():
     rel_path = request.args.get('path', '')
     # Ensure it's treated as a safe download
     return send_from_directory(str(DICOM_ROOT), rel_path, as_attachment=True)
+
+@dicom_browser_api.route('/file', methods=['GET'])
+def serve_file():
+    from flask import send_from_directory
+    rel_path = request.args.get('path', '')
+    return send_from_directory(str(DICOM_ROOT), rel_path, as_attachment=False)

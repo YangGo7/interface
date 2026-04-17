@@ -221,6 +221,15 @@ class ToothLogic:
                     t_n1 = find_nearest_present(cross_q, 1, +1) or get_tooth_by_label(cross_q * 10 + 1)
 
             print(f"[GAP DEBUG] Tooth {fdi}: t_n1={t_n1.get('tooth_label') if t_n1 else None}, t_n2={t_n2.get('tooth_label') if t_n2 else None}")
+            if fdi in (45, 46, 47, 48):
+                lower_left_present = sorted(
+                    [p for p in present_fdis if int(str(p)[0]) == 4],
+                    key=lambda value: int(value),
+                )
+                print(
+                    f"[GAP DEBUG] Q4 present_fdis before missing {fdi}: {lower_left_present}",
+                    flush=True,
+                )
 
             valid_boxes = [t for t in [t_n1, t_n2] if t and t.get('box')]
             

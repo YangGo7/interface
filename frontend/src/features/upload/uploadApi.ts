@@ -68,7 +68,7 @@ export async function requestAsyncDetection(primaryFile: File, folderFiles: File
   return {
     jobId: data.job_id as string,
     previewUrl: data.preview_url || (!dicom ? URL.createObjectURL(primaryFile) : undefined),
-    originalFile: dicom ? primaryFile : undefined,
+    originalFile: primaryFile,
     originalFolderFiles: folderFiles.length > 0 ? folderFiles : undefined,
     originalFolderMode: folderFiles.length > 0,
     originalIsDicom: dicom,

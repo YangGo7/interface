@@ -17,7 +17,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    allowedHosts: ['.ngrok-free.app', '.ngrok.app', '.ngrok-free.dev', '.ngrok.dev'],
+    allowedHosts: ['.ngrok-free.app', '.ngrok.app', '.ngrok-free.dev', '.ngrok.dev','congress-ballet-stuff-example.trycloudflare.com' ,'.trycloudflare.com'],
     proxy: {
       // 백엔드가 5000에서 동작한다고 가정. 다르면 수정하세요.
       '/api': {

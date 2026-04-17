@@ -8,11 +8,13 @@ class RulesEngine:
         img_height: int,
         k_implant: float = 1.5,
         anchor_confidence_threshold: float = 0.75,
+        hard_anchor_confidence_threshold: float = 0.85,
     ):
         self.W = img_width
         self.H = img_height
         self.k_implant = k_implant
         self.anchor_confidence_threshold = anchor_confidence_threshold
+        self.hard_anchor_confidence_threshold = hard_anchor_confidence_threshold
         self.debug_log = {}
 
     def run(self, objects: List[Dict[str, Any]], caries: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -152,6 +154,8 @@ class RulesEngine:
 
         # D. Assign Objects
         assigned_slots = self._assign_objects(slots_grid, objects, metrics, is_upper)
+        assigned_slots = self._prioritize_natural_labels(assigned_slots, objects, is_upper)
+        assigned_slots = self._reflow_implant_segments(assigned_slots, is_upper)
         
         # E. Spatial Consistency Check (Swap/Ambiguous check)
         final_slots = self._enforce_spatial_order(assigned_slots, is_upper)
@@ -380,7 +384,8 @@ class RulesEngine:
                     "ideal_x": ideal_x,
                     "status": "unassigned",
                     "object_id": None,
-                    "candidates": []
+                    "candidates": [],
+                    "hard_anchor": False,
                 }
         return slots
 
@@ -430,6 +435,7 @@ class RulesEngine:
                     slots[lbl]['status'] = 'confirmed'
                     slots[lbl]['object_id'] = obj['id']
                     slots[lbl]['candidates'].append(obj)
+                    slots[lbl]['hard_anchor'] = float(obj.get('conf', 0.0) or 0.0) >= self.hard_anchor_confidence_threshold
                     anchored_object_ids.add(obj['id'])
                     # Update ideal_x to actual anchor x for better local accuracy?
                     # Yes, snap grid to anchor.
@@ -535,7 +541,175 @@ class RulesEngine:
                 slots[best_fdi]['status'] = 'confirmed'
                 slots[best_fdi]['object_id'] = obj['id']
                 slots[best_fdi]['candidates'].append(obj)
-    
+        
+        return slots
+
+    def _prioritize_natural_labels(self, slots: Dict[str, Dict], objects: List[Dict[str, Any]], is_upper: bool) -> Dict[str, Dict]:
+        natural_reclaim_threshold = 0.5
+
+        def primary_candidate(slot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            candidates = slot.get('candidates') or []
+            return candidates[0] if candidates else None
+
+        def clear_slot(slot_id: str) -> None:
+            slots[slot_id]['status'] = 'unassigned'
+            slots[slot_id]['object_id'] = None
+            slots[slot_id]['candidates'] = []
+            slots[slot_id]['hard_anchor'] = False
+
+        def find_slot_by_object_id(object_id: Any) -> Optional[str]:
+            for slot_id, slot in slots.items():
+                if slot.get('object_id') == object_id:
+                    return slot_id
+            return None
+
+        displaced_implants: List[Tuple[Dict[str, Any], int]] = []
+        natural_candidates = [
+            obj for obj in objects
+            if obj.get('type') == 'natural'
+            and obj.get('label_hint')
+            and float(obj.get('conf', 0.0) or 0.0) >= natural_reclaim_threshold
+            and str(obj.get('label_hint')) in slots
+        ]
+        natural_candidates.sort(key=lambda obj: float(obj.get('conf', 0.0) or 0.0), reverse=True)
+
+        for obj in natural_candidates:
+            target_slot_id = str(obj['label_hint'])
+            target_slot = slots[target_slot_id]
+            target_candidate = primary_candidate(target_slot)
+
+            if target_slot.get('object_id') == obj['id']:
+                target_slot['hard_anchor'] = target_slot.get('hard_anchor', False) or (
+                    float(obj.get('conf', 0.0) or 0.0) >= self.hard_anchor_confidence_threshold
+                )
+                continue
+
+            if target_slot.get('hard_anchor'):
+                continue
+
+            current_slot_id = find_slot_by_object_id(obj['id'])
+            if current_slot_id and current_slot_id != target_slot_id:
+                clear_slot(current_slot_id)
+
+            if target_slot.get('object_id') is not None and target_candidate and str(target_candidate.get('type', '')) == 'implant':
+                displaced_implants.append((target_candidate, int(target_slot_id) // 10))
+
+            target_slot['status'] = 'confirmed'
+            target_slot['object_id'] = obj['id']
+            target_slot['candidates'] = [obj]
+            target_slot['hard_anchor'] = float(obj.get('conf', 0.0) or 0.0) >= self.hard_anchor_confidence_threshold
+            target_slot['ideal_x'] = obj['cx']
+
+            print(
+                f"[RULE DEBUG] natural reclaim slot {target_slot_id}: obj_id={obj['id']} conf={float(obj.get('conf', 0.0) or 0.0):.3f}",
+                flush=True,
+            )
+
+        for implant_obj, quadrant in displaced_implants:
+            preferred_slots = self._quadrant_slot_ids(quadrant)
+            free_slots = [slot_id for slot_id in preferred_slots if slots[slot_id].get('object_id') is None]
+            if not free_slots:
+                free_slots = [slot_id for slot_id, slot in slots.items() if slot.get('object_id') is None]
+            if not free_slots:
+                continue
+
+            best_slot_id = min(
+                free_slots,
+                key=lambda slot_id: abs(float(implant_obj.get('cx', 0.0) or 0.0) - float(slots[slot_id]['ideal_x'])),
+            )
+            slots[best_slot_id]['status'] = 'confirmed'
+            slots[best_slot_id]['object_id'] = implant_obj['id']
+            slots[best_slot_id]['candidates'] = [implant_obj]
+            slots[best_slot_id]['hard_anchor'] = False
+
+            print(
+                f"[RULE DEBUG] displaced implant reassigned -> slot {best_slot_id}: obj_id={implant_obj['id']}",
+                flush=True,
+            )
+
+        return slots
+
+    def _quadrant_slot_ids(self, quadrant: int) -> List[str]:
+        if quadrant in [1, 4]:
+            return [str(quadrant * 10 + n) for n in range(8, 0, -1)]
+        return [str(quadrant * 10 + n) for n in range(1, 9)]
+
+    def _reflow_implant_segments(self, slots: Dict[str, Dict], is_upper: bool) -> Dict[str, Dict]:
+        quadrants = [1, 2] if is_upper else [4, 3]
+
+        def primary_candidate(slot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            candidates = slot.get('candidates') or []
+            return candidates[0] if candidates else None
+
+        for quadrant in quadrants:
+            slot_ids = self._quadrant_slot_ids(quadrant)
+            segments: List[List[str]] = []
+            current_segment: List[str] = []
+
+            for slot_id in slot_ids:
+                slot = slots[slot_id]
+                candidate = primary_candidate(slot)
+                candidate_type = str(candidate.get('type', '')) if candidate else ''
+                is_assignable = (
+                    slot.get('object_id') is None
+                    or (candidate_type == 'implant' and not slot.get('hard_anchor'))
+                )
+                if is_assignable:
+                    current_segment.append(slot_id)
+                else:
+                    if current_segment:
+                        segments.append(current_segment)
+                        current_segment = []
+            if current_segment:
+                segments.append(current_segment)
+
+            for segment in segments:
+                implant_objects: List[Dict[str, Any]] = []
+                current_implant_slots: List[str] = []
+
+                for slot_id in segment:
+                    slot = slots[slot_id]
+                    candidate = primary_candidate(slot)
+                    if slot.get('object_id') is not None and candidate and str(candidate.get('type', '')) == 'implant':
+                        current_implant_slots.append(slot_id)
+                        implant_objects.append(candidate)
+
+                if len(implant_objects) <= 1:
+                    continue
+
+                implant_objects.sort(key=lambda item: float(item.get('cx', 0.0) or 0.0))
+                window_size = len(implant_objects)
+                windows = [segment[idx:idx + window_size] for idx in range(0, len(segment) - window_size + 1)]
+                if not windows:
+                    continue
+
+                def score_window(window: List[str]) -> float:
+                    return sum(
+                        abs(float(obj.get('cx', 0.0) or 0.0) - float(slots[slot_id]['ideal_x']))
+                        for obj, slot_id in zip(implant_objects, window)
+                    )
+
+                best_window = min(windows, key=score_window)
+                if current_implant_slots == best_window:
+                    continue
+
+                print(
+                    f"[RULE DEBUG] implant serial reflow q{quadrant}: {current_implant_slots} -> {best_window}",
+                    flush=True,
+                )
+
+                for slot_id in current_implant_slots:
+                    slots[slot_id]['status'] = 'unassigned'
+                    slots[slot_id]['object_id'] = None
+                    slots[slot_id]['candidates'] = []
+                    slots[slot_id]['hard_anchor'] = False
+
+                for obj, slot_id in zip(implant_objects, best_window):
+                    slots[slot_id]['status'] = 'confirmed'
+                    slots[slot_id]['object_id'] = obj['id']
+                    slots[slot_id]['candidates'] = [obj]
+                    slots[slot_id]['hard_anchor'] = False
+
         return slots
 
     def _enforce_spatial_order(self, slots: Dict[str, Dict], is_upper: bool) -> Dict[str, Dict]:
@@ -581,6 +755,8 @@ class RulesEngine:
                 
                 fdi1_str = str(curr['fdi'])
                 fdi2_str = str(next_b['fdi'])
+                if slots[fdi1_str].get('hard_anchor') or slots[fdi2_str].get('hard_anchor'):
+                    continue
                 
                 # Swap object_id
                 tmp_id = slots[fdi1_str]['object_id']
@@ -591,6 +767,10 @@ class RulesEngine:
                 tmp_cand = slots[fdi1_str]['candidates']
                 slots[fdi1_str]['candidates'] = slots[fdi2_str]['candidates']
                 slots[fdi2_str]['candidates'] = tmp_cand
+
+                tmp_anchor = slots[fdi1_str].get('hard_anchor', False)
+                slots[fdi1_str]['hard_anchor'] = slots[fdi2_str].get('hard_anchor', False)
+                slots[fdi2_str]['hard_anchor'] = tmp_anchor
                 
                 # Mark as corrected (confirmed)
                 slots[fdi1_str]['status'] = 'confirmed'

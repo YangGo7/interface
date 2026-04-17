@@ -27,6 +27,7 @@ type DentalChartLegendOverlayProps = {
 };
 
 const relativePercent = (value: number, total: number) => `${(value / total) * 100}%`;
+const checkedIconSrc = encodeURI('/imgs/11 14.png');
 
 export function DentalChartLegendOverlay({
   visible,
@@ -73,21 +74,21 @@ export function DentalChartLegendOverlay({
               padding: 0,
             }}
           >
-            {(activeKey === item.key || focusedKey === item.key) && (
-              <div
+            {activeKey === item.key && (
+              <img
+                src={checkedIconSrc}
+                alt=""
+                aria-hidden="true"
+                draggable={false}
                 style={{
                   position: 'absolute',
                   inset: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: item.key === 'healthy' ? '#111111' : '#ffffff',
-                  fontSize: badgeFontSize,
-                  fontWeight: 700,
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'contain',
+                  pointerEvents: 'none',
                 }}
-              >
-                ??
-              </div>
+              />
             )}
           </button>
           <div

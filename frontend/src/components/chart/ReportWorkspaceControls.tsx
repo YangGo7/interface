@@ -71,6 +71,7 @@ export function ReportWorkspaceControls({
           onClick={onOpenReport}
           aria-pressed={reportActive}
           aria-label="Open report panel"
+          title="Report panel"
           style={{
             width: reportButtonWidth,
             height: reportButtonHeight,
@@ -120,6 +121,7 @@ export function ReportWorkspaceControls({
           onClick={onShowChart}
           aria-pressed={false}
           aria-label="Show dental chart"
+          title="Show dental chart"
           style={{
             width: chartToggleWidth,
             height: chartToggleHeight,

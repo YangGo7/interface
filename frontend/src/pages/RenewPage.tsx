@@ -255,6 +255,33 @@ const formatToothNumber = (toothFdi: string | number, numberingSystem: Numbering
   return String(UNIVERSAL_TOOTH_MAP[numeric] || numeric);
 };
 
+const formatDisplayedToothNumber = (
+  toothFdi: string | number,
+  numberingSystem: NumberingSystem,
+  flipped = false
+) => {
+  const displayNumber = formatToothNumber(toothFdi, numberingSystem);
+  return flipped ? displayNumber.split('').reverse().join('') : displayNumber;
+};
+
+const getDisplayedArchTeeth = (
+  flipped: boolean,
+  leftTeeth: readonly number[],
+  rightTeeth: readonly number[]
+) => {
+  if (!flipped) {
+    return {
+      left: [...leftTeeth],
+      right: [...rightTeeth],
+    };
+  }
+
+  return {
+    left: [...rightTeeth].reverse(),
+    right: [...leftTeeth].reverse(),
+  };
+};
+
 const outerToInnerOffsets = [390.5, 332.5, 274.5, 216.5, 166.5, 116.5, 66.5, 22.5] as const;
 const innerToOuterOffsets = [22.5, 66.5, 116.5, 166.5, 216.5, 274.5, 332.5, 390.5] as const;
 const upperBaseline = 935;
@@ -730,6 +757,7 @@ function ToolIcon({
       onClick={onClick}
       aria-pressed={active}
       aria-label={label}
+      title={label}
       style={{
         width: wp(TOOL_ICON_SIZE),
         height: hp(TOOL_ICON_SIZE),
@@ -930,7 +958,9 @@ export function RenewPage() {
   const [serverStudies, setServerStudies] = useState<any[]>([]);
   const [isReportActive, setIsReportActive] = useState(false);
   const [isChartVisible, setIsChartVisible] = useState(true);
-  const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'report' | 'none'>('studies');
+  const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'report' | 'none'>(
+    locationState?.reportSessionId ? 'report' : 'none'
+  );
   const [selectedToolbarButton, setSelectedToolbarButton] = useState<ToolbarKey>('pointer');
   const [flashToolbarButton, setFlashToolbarButton] = useState<ToolbarKey | null>(null);
   const [activeMeasureSubtool, setActiveMeasureSubtool] = useState<MeasureSubtoolKey>('length');
@@ -1054,6 +1084,8 @@ export function RenewPage() {
   const chartOdontoLineY = Math.round(chartContentTop + chartContentHeight / 2);
   const chartOdontoVerticalTop = chartOdontoFrameTop;
   const chartOdontoVerticalHeight = chartOdontoFrameBottom - chartOdontoFrameTop;
+  const displayedUpperArch = getDisplayedArchTeeth(flipped, upperTeeth, upperRightTeeth);
+  const displayedLowerArch = getDisplayedArchTeeth(flipped, lowerTeeth, lowerRightTeeth);
   const viewLabelTop = 75;
   const measureLabelTop = 195;
   const outputLabelTop = 315;
@@ -1678,7 +1710,7 @@ export function RenewPage() {
 
       acc[toothFdi] = {
         toothFdi,
-        title: `Tooth #${formatToothNumber(toothFdi, numberingSystem)}`,
+        title: `Tooth #${formatDisplayedToothNumber(toothFdi, numberingSystem, flipped)}`,
         kind,
         status: statusLabel,
         pblPct: Number.isFinite(boneLossPct) && boneLossPct > 0 ? boneLossPct : null,
@@ -1697,7 +1729,7 @@ export function RenewPage() {
       };
       return acc;
     }, {});
-  }, [implantMetricsByTooth, nervePoints, numberingSystem, odontogramTeeth, primaryDetectionByTooth, result, toothRecords, toothStatusByFdi]);
+  }, [flipped, implantMetricsByTooth, nervePoints, numberingSystem, odontogramTeeth, primaryDetectionByTooth, result, toothRecords, toothStatusByFdi]);
 
   const hoveredToothPanel = hoveredToothAnchor ? toothHoverPanelByFdi[hoveredToothAnchor.toothFdi] || null : null;
 
@@ -2173,10 +2205,18 @@ export function RenewPage() {
       if (!matchesFilter(tooth.fdi) || !matchesToothSelection(tooth.fdi)) return;
       const paletteIndex = Number.isFinite(Number(tooth.fdi)) ? Math.abs(Number(tooth.fdi)) % warmPastelPalette.length : 0;
       const style = warmPastelPalette[paletteIndex];
+      const toothStatus = toothStatusByFdi[tooth.fdi] || 'healthy';
       const isActive = activeTooth === tooth.fdi;
       const hasDetection = Boolean(detectionsByTooth[tooth.fdi]?.length);
       const points = tooth.contour.map((point) => `${point.x},${point.y}`).join(' ');
       const fillColor = isActive ? style.fill.replace('0.26', '0.45') : style.fill;
+      const strokeColor = isActive
+        ? 'rgba(0, 192, 243, 0.18)'
+        : toothStatus === 'implant'
+          ? 'rgba(0, 61, 255, 0.72)'
+          : hasDetection
+            ? 'rgba(255, 215, 102, 0.2)'
+            : style.stroke;
 
       items.push(
         <g
@@ -2187,7 +2227,7 @@ export function RenewPage() {
           <polygon
             points={points}
             fill={fillColor}
-            stroke={isActive ? 'rgba(0, 192, 243, 0.18)' : hasDetection ? 'rgba(255, 215, 102, 0.2)' : style.stroke}
+            stroke={strokeColor}
             strokeWidth={(isActive ? 0.14 : hasDetection ? 0.8 : 2) / effectiveScale}
             strokeLinejoin="round"
             vectorEffect="non-scaling-stroke"
@@ -2201,8 +2241,14 @@ export function RenewPage() {
               rx={4 / effectiveScale}
               fill={isActive ? 'rgba(0, 192, 243, 0.88)' : 'rgba(0,0,0,0.62)'}
             />
-            <text textAnchor="middle" fill="#ffffff" fontSize={10 / effectiveScale} fontWeight="bold">
-              {formatToothNumber(tooth.fdi, numberingSystem)}
+            <text
+              textAnchor="middle"
+              fill="#ffffff"
+              fontSize={10 / effectiveScale}
+              fontWeight="bold"
+              transform={flipped ? 'scale(-1,1)' : undefined}
+            >
+              {formatDisplayedToothNumber(tooth.fdi, numberingSystem, flipped)}
             </text>
           </g>
         </g>
@@ -2218,6 +2264,8 @@ export function RenewPage() {
           ? '#ff4444'
           : detection.type === 'periapical'
             ? '#ff9800'
+            : detection.type === 'implant'
+              ? '#003DFF'
             : detection.type === 'bonelevel'
               ? '#FFD766'
               : '#FFD766';
@@ -2242,9 +2290,16 @@ export function RenewPage() {
       const height = detection.bounds.y2 - detection.bounds.y1;
       const tagHeight = 14 / effectiveScale;
       const tagPadding = 6 / effectiveScale;
-      const labelText = `${detection.label} ${detection.toothFdi ?? ''}`.trim();
+      const displayedToothNumber = detection.toothFdi
+        ? formatDisplayedToothNumber(detection.toothFdi, numberingSystem, flipped)
+        : '';
+      const labelText = `${detection.label} ${displayedToothNumber}`.trim();
       const fontSize = 9 / effectiveScale;
       const tagWidth = labelText.length * (fontSize * 0.6) + tagPadding * 2;
+      const textX = detection.bounds.x1 + tagPadding;
+      const labelGroupTransform = flipped
+        ? `translate(${2 * detection.bounds.x1 + tagWidth}, 0) scale(-1,1)`
+        : undefined;
 
       items.push(
         <g
@@ -2263,25 +2318,27 @@ export function RenewPage() {
             strokeDasharray={detection.type === 'bonelevel' ? undefined : `${3 / effectiveScale} ${2 / effectiveScale}`}
             vectorEffect="non-scaling-stroke"
           />
-          <rect
-            x={detection.bounds.x1}
-            y={detection.bounds.y1 - tagHeight}
-            width={tagWidth}
-            height={tagHeight}
-            rx={3 / effectiveScale}
-            ry={3 / effectiveScale}
-            fill={isActive ? '#00C0F3' : strokeColor}
-            fillOpacity={0.92}
-          />
-          <text
-            x={detection.bounds.x1 + tagPadding}
-            y={detection.bounds.y1 - tagHeight / 2 + fontSize / 3}
-            fill="#fff"
-            fontSize={fontSize}
-            fontWeight="bold"
-          >
-            {labelText}
-          </text>
+          <g transform={labelGroupTransform}>
+            <rect
+              x={detection.bounds.x1}
+              y={detection.bounds.y1 - tagHeight}
+              width={tagWidth}
+              height={tagHeight}
+              rx={3 / effectiveScale}
+              ry={3 / effectiveScale}
+              fill={isActive ? '#00C0F3' : strokeColor}
+              fillOpacity={0.92}
+            />
+            <text
+              x={textX}
+              y={detection.bounds.y1 - tagHeight / 2 + fontSize / 3}
+              fill="#fff"
+              fontSize={fontSize}
+              fontWeight="bold"
+            >
+              {labelText}
+            </text>
+          </g>
         </g>
       );
     });
@@ -2537,7 +2594,7 @@ export function RenewPage() {
     const autoAnalyzeFile =
       originalFolderMode
         ? (selectedFolderSeries?.files?.[0] || null)
-        : (locationState.originalIsDicom ? (originalFile || null) : null);
+        : (originalFile || null);
 
     if (!autoAnalyzeFile) return;
 
@@ -3649,6 +3706,8 @@ export function RenewPage() {
           type="button"
           onClick={handleOpenStudies}
           aria-pressed={workspaceSection === 'studies'}
+          aria-label="Open studies"
+          title="Studies"
           style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(52), position: 'absolute', background: '#2D2D2D', padding: 0, cursor: 'pointer' }}
         >
           <img style={{ width: '100%', height: '100%', display: 'block' }} src={workspaceSection === 'studies' ? activeRailIcons.studies : displayRailIcons.studies} alt="" />
@@ -3657,6 +3716,8 @@ export function RenewPage() {
           type="button"
           onClick={() => { void handleStartReport(); }}
           aria-pressed={workspaceSection === 'report' || reportDrawerOpen}
+          aria-label="Open report workspace"
+          title="Report"
           style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(122), position: 'absolute', background: '#2D2D2D', padding: 0, cursor: 'pointer' }}
         >
           <img style={{ width: '100%', height: '100%', display: 'block' }} src={workspaceSection === 'report' || reportDrawerOpen ? activeRailIcons.captures : displayRailIcons.captures} alt="" />
@@ -3952,7 +4013,7 @@ export function RenewPage() {
         {isChartBodyVisible && upperLeftOrders.map((order, index) => {
           const width = Number(upperSizes[order - 1].split(' ')[0]);
           const height = Number(upperSizes[order - 1].split(' ')[1]);
-          const toothFdi = String(upperTeeth[index]);
+          const toothFdi = String(displayedUpperArch.left[index]);
           const toothStatus = toothStatusByFdi[toothFdi] || 'healthy';
           const matchesLegendFilter = !activeLegendFilter || toothStatus === activeLegendFilter;
           return (
@@ -3966,7 +4027,7 @@ export function RenewPage() {
               top={upperBaseline - height}
               width={width}
               height={height}
-              flipX
+              flipX={!flipped}
               active={activeTooth === toothFdi}
               hasDetection={(Boolean(detectionsByTooth[toothFdi]?.length) || Boolean(findingSignalByTooth[toothFdi])) && matchesLegendFilter}
               dimmed={!matchesLegendFilter}
@@ -3978,7 +4039,7 @@ export function RenewPage() {
         {isChartBodyVisible && upperRightOrders.map((order, index) => {
           const width = Number(upperSizes[order - 1].split(' ')[0]);
           const height = Number(upperSizes[order - 1].split(' ')[1]);
-          const toothFdi = String(upperRightTeeth[index]);
+          const toothFdi = String(displayedUpperArch.right[index]);
           const toothStatus = toothStatusByFdi[toothFdi] || 'healthy';
           const matchesLegendFilter = !activeLegendFilter || toothStatus === activeLegendFilter;
           return (
@@ -3992,6 +4053,7 @@ export function RenewPage() {
               top={upperBaseline - height}
               width={width}
               height={height}
+              flipX={flipped}
               active={activeTooth === toothFdi}
               hasDetection={(Boolean(detectionsByTooth[toothFdi]?.length) || Boolean(findingSignalByTooth[toothFdi])) && matchesLegendFilter}
               dimmed={!matchesLegendFilter}
@@ -4003,7 +4065,7 @@ export function RenewPage() {
         {isChartBodyVisible && lowerLeftOrders.map((order, index) => {
           const width = Number(lowerSizes[order - 1].split(' ')[0]);
           const height = Number(lowerSizes[order - 1].split(' ')[1]);
-          const toothFdi = String(lowerTeeth[index]);
+          const toothFdi = String(displayedLowerArch.left[index]);
           const toothStatus = toothStatusByFdi[toothFdi] || 'healthy';
           const matchesLegendFilter = !activeLegendFilter || toothStatus === activeLegendFilter;
           return (
@@ -4017,7 +4079,7 @@ export function RenewPage() {
               top={lowerTop}
               width={width}
               height={height}
-              flipX
+              flipX={!flipped}
               active={activeTooth === toothFdi}
               hasDetection={(Boolean(detectionsByTooth[toothFdi]?.length) || Boolean(findingSignalByTooth[toothFdi])) && matchesLegendFilter}
               dimmed={!matchesLegendFilter}
@@ -4029,7 +4091,7 @@ export function RenewPage() {
         {isChartBodyVisible && lowerRightOrders.map((order, index) => {
           const width = Number(lowerSizes[order - 1].split(' ')[0]);
           const height = Number(lowerSizes[order - 1].split(' ')[1]);
-          const toothFdi = String(lowerRightTeeth[index]);
+          const toothFdi = String(displayedLowerArch.right[index]);
           const toothStatus = toothStatusByFdi[toothFdi] || 'healthy';
           const matchesLegendFilter = !activeLegendFilter || toothStatus === activeLegendFilter;
           return (
@@ -4043,6 +4105,7 @@ export function RenewPage() {
               top={lowerTop}
               width={width}
               height={height}
+              flipX={flipped}
               active={activeTooth === toothFdi}
               hasDetection={(Boolean(detectionsByTooth[toothFdi]?.length) || Boolean(findingSignalByTooth[toothFdi])) && matchesLegendFilter}
               dimmed={!matchesLegendFilter}

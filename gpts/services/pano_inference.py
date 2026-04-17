@@ -526,6 +526,35 @@ class PanoPipeline:
         engine = RulesEngine(img_width=w, img_height=h)
         rule_result = engine.run(observations, caries_objects)
 
+        # Debug posterior lower-left slot assignment issues such as 45/46/47/48 drift.
+        debug_fdis = ("48", "47", "46", "45")
+        try:
+            print("[RULE DEBUG] Lower-left posterior slot assignment:", flush=True)
+            for debug_fdi in debug_fdis:
+                slot = rule_result.get('slots', {}).get(debug_fdi) or {}
+                candidates = slot.get('candidates') or []
+                candidate = candidates[0] if candidates else None
+                if candidate:
+                    print(
+                        f"[RULE DEBUG] slot {debug_fdi}: "
+                        f"status={slot.get('status')} "
+                        f"hard_anchor={slot.get('hard_anchor', False)} "
+                        f"obj_id={slot.get('object_id')} "
+                        f"type={candidate.get('type')} "
+                        f"label_hint={candidate.get('label_hint')} "
+                        f"conf={float(candidate.get('conf', 0.0) or 0.0):.3f} "
+                        f"cx={float(candidate.get('cx', 0.0) or 0.0):.1f} "
+                        f"box={candidate.get('box')}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[RULE DEBUG] slot {debug_fdi}: status={slot.get('status')} obj_id=None candidate=None",
+                        flush=True,
+                    )
+        except Exception as debug_error:
+            print(f"[RULE DEBUG] Failed to dump lower-left slots: {debug_error}", flush=True)
+
         # 8. Format Final Teeth Objects
         final_teeth_objects = []
         assigned_ids = set()

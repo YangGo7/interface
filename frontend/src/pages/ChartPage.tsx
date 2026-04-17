@@ -497,7 +497,7 @@ export function ChartPage(props?: ChartPageProps) {
     const autoAnalyzeFile =
       originalFolderMode
         ? (selectedFolderSeries?.files?.[0] || null)
-        : (locationState.originalIsDicom ? ((locationState.originalFile as File | undefined) || null) : null);
+        : ((locationState.originalFile as File | undefined) || null);
 
     if (!autoAnalyzeFile) return;
 
