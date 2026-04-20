@@ -1,11 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Database, Image as ImageIcon, RefreshCw, Search, X } from 'lucide-react';
+import { SettingsModal } from '../components/SettingsModal';
+import { readStoredNumberingSystem, writeStoredNumberingSystem, type AppNumberingSystem } from '../lib/appSettings';
 import type { FolderStudy } from '../features/upload/dicomFolderStudies';
+import { buildDicomFolderStudies } from '../features/upload/dicomFolderStudies';
 import {
   fetchServerFolderIndex,
+  pickServerFolderRootPath,
+  fetchServerFolderRootPath,
   materializeServerStudy,
   resolveServerAssetUrl,
+  updateServerFolderRootPath,
   type ServerFolderImage,
   type ServerFolderStudy,
 } from '../lib/folderLeaderApi';
@@ -22,8 +28,139 @@ function getStudyModality(study: ServerFolderStudy) {
   return study.modalities.length > 0 ? study.modalities.join(', ') : 'OT';
 }
 
+type EnrichedServerImage = ServerFolderImage & {
+  linkedStudy: ServerFolderStudy | null;
+  patientId: string;
+  patientName: string;
+  patientSex: string;
+  studyDate: string;
+  modality: string;
+  description: string;
+  linkedSeriesId: string | null;
+};
+
+type StudyListEntry =
+  | {
+      kind: 'study';
+      key: string;
+      patientId: string;
+      patientName: string;
+      studyDate: string;
+      description: string;
+      imageCount: number;
+      modality: string;
+      comment: string;
+      study: ServerFolderStudy;
+    }
+  | {
+      kind: 'image';
+      key: string;
+      patientId: string;
+      patientName: string;
+      studyDate: string;
+      description: string;
+      imageCount: number;
+      modality: string;
+      comment: string;
+      image: EnrichedServerImage;
+    };
+
+const normalizeRelativePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+
+const getParentDirectory = (value: string) => {
+  const normalized = normalizeRelativePath(value);
+  const lastSlash = normalized.lastIndexOf('/');
+  return lastSlash >= 0 ? normalized.slice(0, lastSlash) : '';
+};
+
+const splitSegments = (value: string) => normalizeRelativePath(value).split('/').filter(Boolean);
+
+const countSharedSegments = (left: string, right: string) => {
+  const leftParts = splitSegments(left);
+  const rightParts = splitSegments(right);
+  let count = 0;
+  while (count < leftParts.length && count < rightParts.length && leftParts[count] === rightParts[count]) {
+    count += 1;
+  }
+  return count;
+};
+
+const buildStudyDirectoryCandidates = (study: ServerFolderStudy) => {
+  const candidates = new Set<string>();
+  study.series.forEach((series) => {
+    series.files.forEach((file) => {
+      const folder = getParentDirectory(file.relativePath);
+      if (folder) candidates.add(folder);
+    });
+  });
+  return Array.from(candidates);
+};
+
+const findBestStudyForImage = (image: ServerFolderImage, studies: ServerFolderStudy[]) => {
+  const imageDirectory = getParentDirectory(image.relativePath);
+  let bestStudy: ServerFolderStudy | null = null;
+  let bestSeriesId: string | null = null;
+  let bestScore = -1;
+
+  studies.forEach((study) => {
+    const candidateDirectories = buildStudyDirectoryCandidates(study);
+    let studyBestScore = -1;
+    let studyBestSeriesId: string | null = null;
+
+    study.series.forEach((series) => {
+      series.files.forEach((file) => {
+        const fileDirectory = getParentDirectory(file.relativePath);
+        if (!fileDirectory) return;
+
+        let score = countSharedSegments(imageDirectory, fileDirectory);
+        if (imageDirectory && fileDirectory && (imageDirectory.startsWith(fileDirectory) || fileDirectory.startsWith(imageDirectory))) {
+          score += 100;
+        }
+        if (image.folderLabel && fileDirectory.toLowerCase().includes(image.folderLabel.toLowerCase())) {
+          score += 10;
+        }
+        if (score > studyBestScore) {
+          studyBestScore = score;
+          studyBestSeriesId = series.id;
+        }
+      });
+    });
+
+    if (studyBestScore < 0 && candidateDirectories.length === 0) return;
+    if (studyBestScore > bestScore) {
+      bestScore = studyBestScore;
+      bestStudy = study;
+      bestSeriesId = studyBestSeriesId || study.series[0]?.id || null;
+    }
+  });
+
+  return {
+    study: bestScore > 0 ? bestStudy : null,
+    seriesId: bestScore > 0 ? bestSeriesId : null,
+  };
+};
+
+const buildImagePatientName = (fileName: string) => fileName.replace(/\.[^.]+$/, '').trim() || fileName;
+
+const buildImagePseudoPatientId = (relativePath: string) => {
+  let hash = 0;
+  for (const char of relativePath) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return `IMG-${String(hash % 100000000).padStart(8, '0')}`;
+};
+
+const isDicomFile = (file: File) => /\.(dcm|dicom)$/i.test(file.name);
+const settingIcons = {
+  inactive: encodeURI('/imgs/botton/setting.png'),
+  active: encodeURI('/imgs/botton/setting click.png'),
+};
+
 export default function FolderLeaderVer2Page() {
   const navigate = useNavigate();
+  const uploadFileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadFolderInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadMenuRef = useRef<HTMLDivElement | null>(null);
   const [studies, setStudies] = useState<ServerFolderStudy[]>([]);
   const [images, setImages] = useState<ServerFolderImage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -33,6 +170,7 @@ export default function FolderLeaderVer2Page() {
   const [activeSection, setActiveSection] = useState<'studies' | 'images'>('studies');
   const [selectedStudyId, setSelectedStudyId] = useState<string | null>(null);
   const [selectedSeriesId, setSelectedSeriesId] = useState<string | null>(null);
+  const [selectedImageKey, setSelectedImageKey] = useState<string | null>(null);
   const [patientIdQuery, setPatientIdQuery] = useState('');
   const [patientNameQuery, setPatientNameQuery] = useState('');
   const [studyDateQuery, setStudyDateQuery] = useState('');
@@ -41,7 +179,15 @@ export default function FolderLeaderVer2Page() {
   const [descriptionQuery, setDescriptionQuery] = useState('');
   const [rootPath, setRootPath] = useState('');
   const [rootExists, setRootExists] = useState(true);
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
+  const [uploadingLocal, setUploadingLocal] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsRootDraft, setSettingsRootDraft] = useState('');
+  const [settingsNumberingDraft, setSettingsNumberingDraft] = useState<AppNumberingSystem>(() => readStoredNumberingSystem());
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
   const loadStudies = async (isManualRefresh = false) => {
@@ -83,6 +229,18 @@ export default function FolderLeaderVer2Page() {
   useEffect(() => {
     void loadStudies(false);
   }, []);
+
+  useEffect(() => {
+    if (!uploadMenuOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (uploadMenuRef.current?.contains(event.target as Node)) return;
+      setUploadMenuOpen(false);
+    };
+
+    window.addEventListener('mousedown', handlePointerDown);
+    return () => window.removeEventListener('mousedown', handlePointerDown);
+  }, [uploadMenuOpen]);
 
   const filteredStudies = useMemo(() => {
     const patientId = patientIdQuery.trim().toLowerCase();
@@ -139,6 +297,27 @@ export default function FolderLeaderVer2Page() {
   const selectedSeries =
     selectedStudy?.series.find((series) => series.id === selectedSeriesId) || selectedStudy?.series[0] || null;
 
+  const mergedImages = useMemo<EnrichedServerImage[]>(() => {
+    return images.map((image) => {
+      const directStudy = studies.find((study) => study.id === image.linkedStudyId) || null;
+      const match = directStudy ? { study: directStudy, seriesId: directStudy.series[0]?.id || null } : findBestStudyForImage(image, studies);
+      const linkedStudy = match.study;
+      const imagePatientName = buildImagePatientName(image.name);
+      const imagePatientId = buildImagePseudoPatientId(image.relativePath);
+      return {
+        ...image,
+        linkedStudy,
+        linkedSeriesId: match.seriesId,
+        patientId: imagePatientId,
+        patientName: imagePatientName,
+        patientSex: image.patientSex || linkedStudy?.patientSex || '',
+        studyDate: image.studyDate || linkedStudy?.studyDate || '',
+        modality: (image.modalities && image.modalities.length ? image.modalities.join(', ') : '') || (linkedStudy ? getStudyModality(linkedStudy) : ''),
+        description: image.description || linkedStudy?.description || linkedStudy?.label || '',
+      };
+    });
+  }, [images, studies]);
+
   const filteredImages = useMemo(() => {
     const patientId = patientIdQuery.trim().toLowerCase();
     const patientName = patientNameQuery.trim().toLowerCase();
@@ -147,12 +326,18 @@ export default function FolderLeaderVer2Page() {
     const modality = modalityQuery.trim().toLowerCase();
     const sex = sexQuery.trim().toLowerCase();
 
-    return images.filter((image) => {
+    return mergedImages.filter((image) => {
       const haystack = [
         image.name,
         image.folderLabel,
         image.relativePath,
         image.format,
+        image.patientId,
+        image.patientName,
+        image.patientSex,
+        image.studyDate,
+        image.modality,
+        image.description,
       ]
         .filter(Boolean)
         .join(' ')
@@ -166,9 +351,68 @@ export default function FolderLeaderVer2Page() {
       if (sex && !haystack.includes(sex)) return false;
       return true;
     });
-  }, [descriptionQuery, images, modalityQuery, patientIdQuery, patientNameQuery, sexQuery, studyDateQuery]);
+  }, [descriptionQuery, mergedImages, modalityQuery, patientIdQuery, patientNameQuery, sexQuery, studyDateQuery]);
+
+  const filteredStudyRows = useMemo<StudyListEntry[]>(() => {
+    const studyRows: StudyListEntry[] = filteredStudies.map((study) => ({
+      kind: 'study',
+      key: `study:${study.id}`,
+      patientId: study.patientId || '-',
+      patientName: buildPatientLabel(study),
+      studyDate: study.studyDate || '-',
+      description: study.description || study.label || '-',
+      imageCount: study.totalFiles,
+      modality: getStudyModality(study),
+      comment: study.series[0]?.orientation || '-',
+      study,
+    }));
+
+    const imageRows: StudyListEntry[] = filteredImages.map((image) => ({
+      kind: 'image',
+      key: `image:${image.relativePath}`,
+      patientId: image.patientId || '-',
+      patientName: image.patientName || image.patientId || image.folderLabel || '-',
+      studyDate: image.studyDate || '-',
+      description: image.description || image.folderLabel || image.name || '-',
+      imageCount: 1,
+      modality: image.modality || image.format || '-',
+      comment: image.folderLabel || image.format || '-',
+      image,
+    }));
+
+    return [...studyRows, ...imageRows];
+  }, [filteredImages, filteredStudies]);
 
   const previewUrl = selectedStudy?.previewUrl ? resolveServerAssetUrl(selectedStudy.previewUrl) : null;
+  const selectedImage = useMemo(
+    () => mergedImages.find((image) => image.relativePath === selectedImageKey) || null,
+    [mergedImages, selectedImageKey]
+  );
+  const selectedImagePreviewUrl = selectedImage ? resolveServerAssetUrl(selectedImage.downloadUrl) : null;
+  const hasSelection = activeSection === 'images' ? Boolean(selectedImage) : Boolean(selectedStudy || selectedImage);
+
+  useEffect(() => {
+    if (!selectedImageKey) return;
+    if (!filteredImages.some((image) => image.relativePath === selectedImageKey)) {
+      setSelectedImageKey(null);
+    }
+  }, [filteredImages, selectedImageKey]);
+
+  const selectStudy = (study: ServerFolderStudy) => {
+    setSelectedImageKey(null);
+    setSelectedStudyId((currentId) => (currentId === study.id ? null : study.id));
+    setSelectedSeriesId((currentId) => {
+      if (selectedStudy?.id === study.id) return null;
+      if (study.series.some((series) => series.id === currentId)) return currentId;
+      return study.series[0]?.id || null;
+    });
+  };
+
+  const selectImage = (image: EnrichedServerImage) => {
+    setSelectedStudyId(null);
+    setSelectedSeriesId(null);
+    setSelectedImageKey((currentKey) => (currentKey === image.relativePath ? null : image.relativePath));
+  };
 
   const clearFilters = () => {
     setPatientIdQuery('');
@@ -212,7 +456,7 @@ export default function FolderLeaderVer2Page() {
     await openStudyEntry(selectedStudy, selectedSeries?.id || selectedStudy.series[0]?.id || null);
   };
 
-  const openImage = async (image: ServerFolderImage) => {
+  const openImage = async (image: EnrichedServerImage) => {
     setOpeningImageKey(image.relativePath);
     setError(null);
     try {
@@ -235,6 +479,9 @@ export default function FolderLeaderVer2Page() {
           originalFileName: image.name,
           originalIsDicom: false,
           folderSource: 'server-image',
+          userName: image.patientName || buildImagePatientName(image.name) || 'Patient',
+          linkedStudyId: image.linkedStudy?.id || null,
+          linkedSeriesId: image.linkedSeriesId,
         },
       });
     } catch (nextError: any) {
@@ -247,6 +494,103 @@ export default function FolderLeaderVer2Page() {
   const closeSelection = () => {
     setSelectedStudyId(null);
     setSelectedSeriesId(null);
+    setSelectedImageKey(null);
+  };
+
+  const handleOpenSettings = async () => {
+    setIsSettingsOpen(true);
+    setSettingsError(null);
+    setSettingsRootDraft(rootPath);
+    setSettingsNumberingDraft(readStoredNumberingSystem());
+    setSettingsLoading(true);
+    try {
+      const data = await fetchServerFolderRootPath();
+      setSettingsRootDraft(data.root_path || '');
+    } catch (nextError: any) {
+      setSettingsError(nextError?.message || 'Failed to load current settings.');
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
+  const handleCloseSettings = () => {
+    setIsSettingsOpen(false);
+    setSettingsError(null);
+    setSettingsRootDraft(rootPath);
+    setSettingsNumberingDraft(readStoredNumberingSystem());
+  };
+
+  const handleSaveSettings = async () => {
+    const nextRootPath = settingsRootDraft.trim();
+    if (!nextRootPath) {
+      setSettingsError('Root folder path is required.');
+      return;
+    }
+
+    setSettingsSaving(true);
+    setSettingsError(null);
+    try {
+      const data = await updateServerFolderRootPath(nextRootPath);
+      setRootPath(data.root_path || nextRootPath);
+      setRootExists(data.root_exists !== false);
+      writeStoredNumberingSystem(settingsNumberingDraft);
+      setIsSettingsOpen(false);
+      void loadStudies(false);
+    } catch (nextError: any) {
+      setSettingsError(nextError?.message || 'Failed to save settings.');
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const handleBrowseRootFolder = async () => {
+    setSettingsError(null);
+    setSettingsLoading(true);
+    try {
+      const data = await pickServerFolderRootPath();
+      setSettingsRootDraft(data.root_path || '');
+    } catch (nextError: any) {
+      setSettingsError(nextError?.message || 'Failed to pick a folder.');
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
+  const handleLocalFilePick = (file: File | null) => {
+    if (!file) return;
+    setUploadMenuOpen(false);
+    navigate('/renew', {
+      state: {
+        originalFile: file,
+        originalFileName: file.name,
+        originalIsDicom: isDicomFile(file),
+      },
+    });
+  };
+
+  const handleLocalFolderPick = async (files: File[]) => {
+    if (!files.length) return;
+    setUploadMenuOpen(false);
+    setUploadingLocal(true);
+    setError(null);
+    try {
+      const folderStudies = await buildDicomFolderStudies(files);
+      const firstSeries = folderStudies.flatMap((study) => study.series)[0] || null;
+      navigate('/renew', {
+        state: {
+          originalFolderMode: true,
+          originalFolderStudies: folderStudies,
+          folderSelectedSeriesId: firstSeries?.id || null,
+          originalIsDicom: true,
+          originalFileName: firstSeries?.label || files[0]?.name || 'DICOM Folder',
+        },
+      });
+    } catch (nextError: any) {
+      setError(nextError?.message || 'Failed to read the selected folder.');
+    } finally {
+      setUploadingLocal(false);
+      if (uploadFolderInputRef.current) uploadFolderInputRef.current.value = '';
+    }
   };
 
   return (
@@ -258,7 +602,7 @@ export default function FolderLeaderVer2Page() {
             <Database className="h-4 w-4" />
             Master Database
           </div>
-          <div className="folder-leader-v2-db-box">
+          <div className="folder-leader-v2-db-box relative">
             <div className="folder-leader-v2-db-icon">
               <Database className="h-7 w-7" />
             </div>
@@ -272,14 +616,90 @@ export default function FolderLeaderVer2Page() {
                 {lastUpdatedAt ? ` / Updated ${lastUpdatedAt.toLocaleTimeString()}` : ''}
               </div>
             </div>
-            <div className="folder-leader-v2-db-actions">
-              <button type="button" onClick={() => loadStudies(true)} disabled={loading || refreshing}>
+            <div className="folder-leader-v2-db-actions relative" ref={uploadMenuRef}>
+              <button type="button" onClick={() => loadStudies(true)} disabled={loading || refreshing || uploadingLocal}>
                 <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
                 Refresh
               </button>
-              <Link to="/folder-leader">Grid</Link>
-              <Link to="/upload">Upload</Link>
+              <button
+                type="button"
+                onClick={() => setUploadMenuOpen((current) => !current)}
+                disabled={uploadingLocal}
+              >
+                Upload
+              </button>
+              {uploadMenuOpen && (
+                <div className="absolute right-0 top-full z-20 mt-2 flex min-w-[140px] flex-col overflow-hidden rounded border border-slate-300 bg-white shadow-lg">
+                  <button
+                    type="button"
+                    className="border-b border-slate-200 px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100"
+                    onClick={() => uploadFileInputRef.current?.click()}
+                  >
+                    Upload File
+                  </button>
+                  <button
+                    type="button"
+                    className="px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100"
+                    onClick={() => uploadFolderInputRef.current?.click()}
+                  >
+                    Upload Folder
+                  </button>
+                </div>
+              )}
+              <input
+                ref={uploadFileInputRef}
+                type="file"
+                accept="image/*,.dcm,.dicom,application/dicom"
+                hidden
+                onChange={(event) => {
+                  handleLocalFilePick(event.target.files?.[0] || null);
+                  event.currentTarget.value = '';
+                }}
+              />
+              <input
+                type="file"
+                hidden
+                multiple
+                ref={(node) => {
+                  uploadFolderInputRef.current = node;
+                  if (!node) return;
+                  node.setAttribute('webkitdirectory', '');
+                  node.setAttribute('directory', '');
+                }}
+                onChange={(event) => {
+                  void handleLocalFolderPick(Array.from(event.target.files || []));
+                }}
+              />
             </div>
+            <button
+              type="button"
+              onClick={() => { void handleOpenSettings(); }}
+              aria-pressed={isSettingsOpen}
+              aria-label="Open settings"
+              title="Settings"
+              style={{
+                position: 'absolute',
+                right: '10px',
+                bottom: '10px',
+                width: '38px',
+                height: '38px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                border: '1px solid #6D6D6D',
+                background: '#3E3E3E',
+                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)',
+                padding: 0,
+                cursor: 'pointer',
+              }}
+            >
+              <img
+                src={isSettingsOpen ? settingIcons.active : settingIcons.inactive}
+                alt=""
+                draggable={false}
+                style={{ width: '24px', height: '24px', objectFit: 'contain', display: 'block' }}
+              />
+            </button>
           </div>
         </section>
 
@@ -318,7 +738,7 @@ export default function FolderLeaderVer2Page() {
 
             <div className="folder-leader-v2-search-actions">
               <div className="folder-leader-v2-search-status">
-                <span>{formatCount(filteredStudies.length, 'result')}</span>
+                <span>{formatCount(filteredStudyRows.length, 'result')}</span>
                 <span>{formatCount(studies.reduce((sum, study) => sum + study.totalSeries, 0), 'series')}</span>
                 <span>{formatCount(filteredImages.length, 'image')}</span>
               </div>
@@ -343,51 +763,133 @@ export default function FolderLeaderVer2Page() {
 
         {error ? <div className="folder-leader-v2-error">{error}</div> : null}
 
-        <section className={`folder-leader-v2-workspace ${activeSection === 'studies' && selectedStudy ? 'has-selection' : ''}`}>
+        <section className={`folder-leader-v2-workspace ${hasSelection ? 'has-selection' : ''}`}>
           {activeSection === 'images' ? (
-            <div className="folder-leader-v2-table-panel" style={{ gridColumn: '1 / -1' }}>
-              <div className="folder-leader-v2-table-header" style={{ gridTemplateColumns: '1.4fr 1fr 0.7fr 0.6fr 0.5fr' }}>
-                <div>Name</div>
-                <div>Folder</div>
-                <div>Format</div>
-                <div>Size</div>
-                <div>Open</div>
-              </div>
-              <div className="folder-leader-v2-table-body">
-                {loading ? (
-                  <div className="folder-leader-v2-empty">Scanning image files...</div>
-                ) : filteredImages.length === 0 ? (
-                  <div className="folder-leader-v2-empty">No matching image files.</div>
-                ) : (
-                  filteredImages.map((image) => (
-                    <div
-                      key={image.relativePath}
-                      className="folder-leader-v2-table-row"
-                      style={{ gridTemplateColumns: '1.4fr 1fr 0.7fr 0.6fr 0.5fr', alignItems: 'center' }}
-                      onDoubleClick={() => void openImage(image)}
-                    >
-                      <div className="folder-leader-v2-cell-name" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <ImageIcon className="h-4 w-4" />
-                        {image.name}
-                      </div>
-                      <div>{image.folderLabel || '-'}</div>
-                      <div>{image.format || '-'}</div>
-                      <div>{image.size ? `${Math.max(1, Math.round(image.size / 1024))} KB` : '-'}</div>
-                      <div>
-                        <button
-                          type="button"
-                          onClick={() => void openImage(image)}
-                          disabled={openingImageKey === image.relativePath}
-                          className="folder-leader-v2-join"
+            <>
+              <div className="folder-leader-v2-table-panel">
+                <div className="folder-leader-v2-table-header" style={{ gridTemplateColumns: '1.2fr 1.1fr 0.8fr 1fr 0.7fr 0.6fr 0.5fr' }}>
+                  <div>Name</div>
+                  <div>Patient</div>
+                  <div>Date</div>
+                  <div>Folder</div>
+                  <div>Format</div>
+                  <div>Size</div>
+                  <div>Open</div>
+                </div>
+                <div className="folder-leader-v2-table-body">
+                  {loading ? (
+                    <div className="folder-leader-v2-empty">Scanning image files...</div>
+                  ) : filteredImages.length === 0 ? (
+                    <div className="folder-leader-v2-empty">No matching image files.</div>
+                  ) : (
+                    filteredImages.map((image) => {
+                      const isSelected = image.relativePath === selectedImage?.relativePath;
+                      return (
+                        <div
+                          key={image.relativePath}
+                          className={`folder-leader-v2-table-row ${isSelected ? 'is-selected' : ''}`}
+                          style={{ gridTemplateColumns: '1.2fr 1.1fr 0.8fr 1fr 0.7fr 0.6fr 0.5fr', alignItems: 'center' }}
+                          onClick={() => selectImage(image)}
+                          onDoubleClick={() => void openImage(image)}
                         >
-                          {openingImageKey === image.relativePath ? 'Opening...' : 'Open'}
-                        </button>
+                          <div className="folder-leader-v2-cell-name" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <ImageIcon className="h-4 w-4" />
+                            {image.name}
+                          </div>
+                          <div>{image.patientName || image.patientId || '-'}</div>
+                          <div>{image.studyDate || '-'}</div>
+                          <div>{image.folderLabel || '-'}</div>
+                          <div>{image.format || '-'}</div>
+                          <div>{image.size ? `${Math.max(1, Math.round(image.size / 1024))} KB` : '-'}</div>
+                          <div>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void openImage(image);
+                              }}
+                              disabled={openingImageKey === image.relativePath}
+                              className="folder-leader-v2-join"
+                            >
+                              {openingImageKey === image.relativePath ? 'Opening...' : 'Open'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+              {selectedImage ? (
+                <div className="folder-leader-v2-detail-panel">
+                  <div className="folder-leader-v2-detail-head">
+                    <div>
+                      <div className="folder-leader-v2-detail-title">Selected Image</div>
+                      <div className="folder-leader-v2-detail-name">{selectedImage.name}</div>
+                    </div>
+                    <div className="folder-leader-v2-detail-actions">
+                      <button
+                        type="button"
+                        onClick={() => void openImage(selectedImage)}
+                        disabled={openingImageKey === selectedImage.relativePath}
+                        className="folder-leader-v2-join"
+                      >
+                        {openingImageKey === selectedImage.relativePath ? 'Opening...' : 'Join'}
+                        <ArrowRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="folder-leader-v2-detail-body">
+                    <div className="folder-leader-v2-preview-box">
+                      {selectedImagePreviewUrl ? (
+                        <img
+                          src={selectedImagePreviewUrl}
+                          alt={selectedImage.name}
+                          className="folder-leader-v2-preview-image"
+                          onError={(event) => {
+                            const target = event.currentTarget;
+                            const fallbackSvg =
+                              '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="160" viewBox="0 0 400 160"><rect width="400" height="160" fill="#0d0d0d"/><rect x="40" y="28" width="320" height="104" fill="#2c2c2c" stroke="#8a8a8a"/><path d="M80 108h240M110 72h180" stroke="#bdbdbd" stroke-width="10" stroke-linecap="round"/></svg>';
+                            target.onerror = null;
+                            target.src = `data:image/svg+xml,${encodeURIComponent(fallbackSvg)}`;
+                          }}
+                        />
+                      ) : (
+                        <div className="folder-leader-v2-preview-placeholder">Preview unavailable</div>
+                      )}
+                    </div>
+
+                    <div className="folder-leader-v2-detail-grid">
+                      <div>
+                        <span>Patient</span>
+                        <strong>{selectedImage.patientName || selectedImage.patientId || '-'}</strong>
+                      </div>
+                      <div>
+                        <span>Date Created</span>
+                        <strong>{selectedImage.studyDate || '-'}</strong>
+                      </div>
+                      <div>
+                        <span>Format</span>
+                        <strong>{selectedImage.format || '-'}</strong>
+                      </div>
+                      <div>
+                        <span>Size</span>
+                        <strong>{selectedImage.size ? `${Math.max(1, Math.round(selectedImage.size / 1024))} KB` : '-'}</strong>
+                      </div>
+                      <div>
+                        <span>Dimensions</span>
+                        <strong>{selectedImage.width && selectedImage.height ? `${selectedImage.width} x ${selectedImage.height}` : '-'}</strong>
+                      </div>
+                      <div>
+                        <span>Folder</span>
+                        <strong>{selectedImage.folderLabel || '-'}</strong>
                       </div>
                     </div>
-                  ))
-                )}
-              </div>
-            </div>
+                  </div>
+                </div>
+              ) : null}
+            </>
           ) : (
             <>
           <div className="folder-leader-v2-table-panel">
@@ -404,23 +906,38 @@ export default function FolderLeaderVer2Page() {
             <div className="folder-leader-v2-table-body">
               {loading ? (
                 <div className="folder-leader-v2-empty">Scanning the configured DICOM folder...</div>
-              ) : filteredStudies.length === 0 ? (
-                <div className="folder-leader-v2-empty">No matching DICOM studies.</div>
+              ) : filteredStudyRows.length === 0 ? (
+                <div className="folder-leader-v2-empty">No matching studies or images.</div>
               ) : (
-                filteredStudies.map((study) => {
+                filteredStudyRows.map((entry) => {
+                  if (entry.kind === 'image') {
+                    const image = entry.image;
+                    return (
+                      <button
+                        key={entry.key}
+                        type="button"
+                        onClick={() => selectImage(image)}
+                        onDoubleClick={() => void openImage(image)}
+                        className={`folder-leader-v2-table-row ${selectedImage?.relativePath === image.relativePath ? 'is-selected' : ''}`}
+                      >
+                        <div className="folder-leader-v2-cell-id">{entry.patientId}</div>
+                        <div className="folder-leader-v2-cell-name">{entry.patientName}</div>
+                        <div>{entry.studyDate}</div>
+                        <div className="folder-leader-v2-cell-description">{entry.description}</div>
+                        <div>{entry.imageCount}</div>
+                        <div>{entry.modality}</div>
+                        <div>{entry.comment}</div>
+                      </button>
+                    );
+                  }
+
+                  const study = entry.study;
                   const isSelected = study.id === selectedStudy?.id;
                   return (
                     <button
-                      key={study.id}
+                      key={entry.key}
                       type="button"
-                      onClick={() => {
-                        if (selectedStudy?.id === study.id) {
-                          closeSelection();
-                          return;
-                        }
-                        setSelectedStudyId(study.id);
-                        setSelectedSeriesId(study.series[0]?.id || null);
-                      }}
+                      onClick={() => selectStudy(study)}
                       onDoubleClick={() => void openStudyEntry(study, study.series[0]?.id || null)}
                       className={`folder-leader-v2-table-row ${isSelected ? 'is-selected' : ''}`}
                     >
@@ -438,7 +955,75 @@ export default function FolderLeaderVer2Page() {
             </div>
           </div>
 
-          {selectedStudy ? (
+          {selectedImage ? (
+            <div className="folder-leader-v2-detail-panel">
+              <div className="folder-leader-v2-detail-head">
+                <div>
+                  <div className="folder-leader-v2-detail-title">Selected Image</div>
+                  <div className="folder-leader-v2-detail-name">{selectedImage.name}</div>
+                </div>
+                <div className="folder-leader-v2-detail-actions">
+                  <button
+                    type="button"
+                    onClick={() => void openImage(selectedImage)}
+                    disabled={openingImageKey === selectedImage.relativePath}
+                    className="folder-leader-v2-join"
+                  >
+                    {openingImageKey === selectedImage.relativePath ? 'Opening...' : 'Join'}
+                    <ArrowRight className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="folder-leader-v2-detail-body">
+                <div className="folder-leader-v2-preview-box">
+                  {selectedImagePreviewUrl ? (
+                    <img
+                      src={selectedImagePreviewUrl}
+                      alt={selectedImage.name}
+                      className="folder-leader-v2-preview-image"
+                      onError={(event) => {
+                        const target = event.currentTarget;
+                        const fallbackSvg =
+                          '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="160" viewBox="0 0 400 160"><rect width="400" height="160" fill="#0d0d0d"/><rect x="40" y="28" width="320" height="104" fill="#2c2c2c" stroke="#8a8a8a"/><path d="M80 108h240M110 72h180" stroke="#bdbdbd" stroke-width="10" stroke-linecap="round"/></svg>';
+                        target.onerror = null;
+                        target.src = `data:image/svg+xml,${encodeURIComponent(fallbackSvg)}`;
+                      }}
+                    />
+                  ) : (
+                    <div className="folder-leader-v2-preview-placeholder">Preview unavailable</div>
+                  )}
+                </div>
+
+                <div className="folder-leader-v2-detail-grid">
+                  <div>
+                    <span>Patient</span>
+                    <strong>{selectedImage.patientName || selectedImage.patientId || '-'}</strong>
+                  </div>
+                  <div>
+                    <span>Date Created</span>
+                    <strong>{selectedImage.studyDate || '-'}</strong>
+                  </div>
+                  <div>
+                    <span>Format</span>
+                    <strong>{selectedImage.format || '-'}</strong>
+                  </div>
+                  <div>
+                    <span>Size</span>
+                    <strong>{selectedImage.size ? `${Math.max(1, Math.round(selectedImage.size / 1024))} KB` : '-'}</strong>
+                  </div>
+                  <div>
+                    <span>Dimensions</span>
+                    <strong>{selectedImage.width && selectedImage.height ? `${selectedImage.width} x ${selectedImage.height}` : '-'}</strong>
+                  </div>
+                  <div>
+                    <span>Folder</span>
+                    <strong>{selectedImage.folderLabel || '-'}</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : selectedStudy ? (
             <div className="folder-leader-v2-detail-panel">
               <div className="folder-leader-v2-detail-head">
                 <div>
@@ -538,6 +1123,20 @@ export default function FolderLeaderVer2Page() {
           )}
         </section>
       </main>
+
+      <SettingsModal
+        visible={isSettingsOpen}
+        rootFolderPath={settingsRootDraft}
+        onRootFolderPathChange={setSettingsRootDraft}
+        onBrowseRootFolder={() => { void handleBrowseRootFolder(); }}
+        numberingSystem={settingsNumberingDraft}
+        onNumberingSystemChange={setSettingsNumberingDraft}
+        onClose={handleCloseSettings}
+        onSave={() => { void handleSaveSettings(); }}
+        saving={settingsSaving}
+        loading={settingsLoading}
+        error={settingsError}
+      />
     </div>
   );
 }

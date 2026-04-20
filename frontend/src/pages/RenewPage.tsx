@@ -10,7 +10,8 @@ import { RenewToolSubmenu } from '../components/chart/RenewToolSubmenu';
 import { ReportWorkspaceControls } from '../components/chart/ReportWorkspaceControls';
 import { ToothHoverHud } from '../components/chart/ToothHoverHud';
 import { WebReportDrawer } from '../components/WebReportDrawer';
-import { createWebReportFromChart } from '../lib/webReportApi';
+import { readStoredNumberingSystem, writeStoredNumberingSystem } from '../lib/appSettings';
+import { createWebReportFromChart, patchWebReportOverrides } from '../lib/webReportApi';
 import { fetchServerFolderIndex, materializeServerStudy } from '../lib/folderLeaderApi';
 import type { FolderStudy } from '../features/upload/dicomFolderStudies';
 import { requestAsyncDetection } from '../features/upload/uploadApi';
@@ -71,6 +72,7 @@ const PANO_LENS_EDGE_PADDING = 10;
 const AI_CONFIDENCE_THRESHOLD = 0.35;
 const PANO_DEFAULT_BRIGHTNESS = 88;
 const PANO_DEFAULT_CONTRAST = 100;
+const heatmapOpacityPresets = [30, 50, 70];
 
 const loadImageFromUrl = (src: string) =>
   new Promise<HTMLImageElement>((resolve, reject) => {
@@ -708,6 +710,7 @@ type ToolbarKey =
   | 'measure-reset'
   | 'output-capture'
   | 'output-save'
+  | 'output-report'
   | 'task-original'
   | 'task-heatmap';
 
@@ -730,12 +733,17 @@ type MeasureShape = {
   type: MeasureSubtoolKey;
   points: ImagePoint[];
   text?: string;
+  anchorLeft?: number;
+  anchorTop?: number;
 };
 
 type OutputCaptureItem = {
   id: string;
   dataUrl: string;
   createdAt: number;
+  label?: string;
+  size?: string;
+  note?: string;
 };
 
 function getToothAsset(tooth: number) {
@@ -996,15 +1004,27 @@ export function RenewPage() {
   const [measureShapes, setMeasureShapes] = useState<MeasureShape[]>([]);
   const [pendingMeasurePoints, setPendingMeasurePoints] = useState<ImagePoint[]>([]);
   const [measurePreviewPoint, setMeasurePreviewPoint] = useState<ImagePoint | null>(null);
+  const [pendingTextAnnotation, setPendingTextAnnotation] = useState<{
+    point: ImagePoint;
+    text: string;
+    anchorLeft: number;
+    anchorTop: number;
+  } | null>(null);
   const [capturedOutputs, setCapturedOutputs] = useState<OutputCaptureItem[]>([]);
+  const [selectedReportCaptureIds, setSelectedReportCaptureIds] = useState<string[]>([]);
   const [isCapturePanelCollapsed, setIsCapturePanelCollapsed] = useState(true);
   const [reportSessionId, setReportSessionId] = useState<string | null>(locationState?.reportSessionId || null);
   const [reportDrawerOpen, setReportDrawerOpen] = useState(false);
   const [reportStartState, setReportStartState] = useState<'idle' | 'creating'>('idle');
   const [reportError, setReportError] = useState<string | null>(null);
+  const [reportPreviewRefreshToken, setReportPreviewRefreshToken] = useState(0);
+  const lastSyncedReportCapturesRef = useRef('');
+  const lastRefreshedReportCaptureStructureRef = useRef('');
+  const textAnnotationInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const textAnnotationWasOpenRef = useRef(false);
   const [inverted, setInverted] = useState(false);
   const [flipped, setFlipped] = useState(false);
-  const [numberingSystem, setNumberingSystem] = useState<NumberingSystem>('fdi');
+  const [numberingSystem, setNumberingSystem] = useState<NumberingSystem>(() => readStoredNumberingSystem());
   const [viewMode, setViewMode] = useState<'original' | 'overlay' | 'heatmap'>(() => {
     const initialResult = locationState?.result;
     const hasInitialStructuredOverlay = Boolean(
@@ -1019,6 +1039,10 @@ export function RenewPage() {
   const [panoOffset, setPanoOffset] = useState({ x: 0, y: 0 });
   const [panoBrightness, setPanoBrightness] = useState(PANO_DEFAULT_BRIGHTNESS);
   const [panoContrast, setPanoContrast] = useState(PANO_DEFAULT_CONTRAST);
+  const [heatmapOpacity, setHeatmapOpacity] = useState(50);
+  const [isHeatmapControlsExpanded, setIsHeatmapControlsExpanded] = useState(false);
+  const [isHeatmapPresetMenuVisible, setIsHeatmapPresetMenuVisible] = useState(false);
+  const [heatmapControlsPosition, setHeatmapControlsPosition] = useState({ x: 88, y: 458 });
   const [panoDisplaySize, setPanoDisplaySize] = useState({ width: 0, height: 0 });
   const [panoNaturalSize, setPanoNaturalSize] = useState({ width: 0, height: 0 });
   const [isOverlayPresetMenuVisible, setIsOverlayPresetMenuVisible] = useState(false);
@@ -1060,6 +1084,7 @@ export function RenewPage() {
   const autoAnalyzeTriggeredRef = useRef(false);
   const pollStartedAtRef = useRef<number | null>(null);
   const status404CountRef = useRef(0);
+  const heatmapControlsTimeoutRef = useRef<number | null>(null);
   const autoWindowAppliedRef = useRef<string | null>(null);
   const previousSelectedFolderSeriesIdRef = useRef<string | null>(selectedFolderSeriesId);
   const panoDragRef = useRef<{
@@ -1116,6 +1141,8 @@ export function RenewPage() {
   const measureLabelTop = 195;
   const outputLabelTop = 315;
   const sectionArrowOffsetY = 6;
+  const heatmapControlsTop = 458;
+  const outputCaptureTop = viewMode === 'heatmap' ? 494 : 472;
   const panoFrameHeight = isChartVisible ? 755 : 1019;
   const reportTop = chartContentTop + 130;
   const fdiLeft = rightEdge - 82;
@@ -1183,6 +1210,48 @@ export function RenewPage() {
       width: img.naturalWidth * fitScale,
       height: img.naturalHeight * fitScale,
     });
+  };
+
+  const clearHeatmapControlsTimeout = () => {
+    if (heatmapControlsTimeoutRef.current !== null) {
+      window.clearTimeout(heatmapControlsTimeoutRef.current);
+      heatmapControlsTimeoutRef.current = null;
+    }
+  };
+
+  const scheduleHeatmapControlsCollapse = (_delay = 2600) => {
+    clearHeatmapControlsTimeout();
+  };
+
+  const showHeatmapControls = (_delay = 2600) => {
+    setIsHeatmapControlsExpanded(true);
+    clearHeatmapControlsTimeout();
+  };
+
+  const handleHeatmapControlsDragStart = (event: React.PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    clearHeatmapControlsTimeout();
+    const startPointer = { x: event.clientX, y: event.clientY };
+    const startPosition = heatmapControlsPosition;
+    const panelWidth = 140;
+    const panelHeight = isHeatmapControlsExpanded ? 40 : 20;
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const deltaX = (moveEvent.clientX - startPointer.x) / Math.max(scale, 0.001);
+      const deltaY = (moveEvent.clientY - startPointer.y) / Math.max(scale, 0.001);
+      const nextX = clamp(startPosition.x + deltaX, 0, Math.max(0, designCanvasWidth - panelWidth));
+      const nextY = clamp(startPosition.y + deltaY, 49, Math.max(49, DESIGN_HEIGHT - panelHeight - 18));
+      setHeatmapControlsPosition({ x: nextX, y: nextY });
+    };
+
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
   };
 
   const drawSvgOverlayOnContext = async (
@@ -1253,6 +1322,77 @@ export function RenewPage() {
     }
     context.restore();
     return canvas;
+  };
+
+  const trimCaptureCanvas = (sourceCanvas: HTMLCanvasElement) => {
+    const context = sourceCanvas.getContext('2d');
+    if (!context) return sourceCanvas;
+
+    const { width, height } = sourceCanvas;
+    const imageData = context.getImageData(0, 0, width, height);
+    const pixels = imageData.data;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = (y * width + x) * 4;
+        const r = pixels[index];
+        const g = pixels[index + 1];
+        const b = pixels[index + 2];
+        const a = pixels[index + 3];
+        if (a < 8) continue;
+
+        const maxChannel = Math.max(r, g, b);
+        const minChannel = Math.min(r, g, b);
+        const luminance = (r + g + b) / 3;
+        const chroma = maxChannel - minChannel;
+        const isInformativePixel = (luminance > 14 && luminance < 246) || chroma > 18;
+        if (!isInformativePixel) continue;
+
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+
+    if (maxX < minX || maxY < minY) {
+      return sourceCanvas;
+    }
+
+    const padding = 8;
+    const cropLeft = Math.max(0, minX - padding);
+    const cropTop = Math.max(0, minY - padding);
+    const cropRight = Math.min(width, maxX + padding + 1);
+    const cropBottom = Math.min(height, maxY + padding + 1);
+    const croppedWidth = Math.max(1, cropRight - cropLeft);
+    const croppedHeight = Math.max(1, cropBottom - cropTop);
+
+    if (croppedWidth >= width && croppedHeight >= height) {
+      return sourceCanvas;
+    }
+
+    const trimmedCanvas = document.createElement('canvas');
+    trimmedCanvas.width = croppedWidth;
+    trimmedCanvas.height = croppedHeight;
+    const trimmedContext = trimmedCanvas.getContext('2d');
+    if (!trimmedContext) return sourceCanvas;
+
+    trimmedContext.drawImage(
+      sourceCanvas,
+      cropLeft,
+      cropTop,
+      croppedWidth,
+      croppedHeight,
+      0,
+      0,
+      croppedWidth,
+      croppedHeight
+    );
+    return trimmedCanvas;
   };
 
   const combinedStudies = useMemo(() => {
@@ -1836,6 +1976,54 @@ export function RenewPage() {
     };
   };
 
+  const overlayPointToViewportPosition = (point: ImagePoint) => {
+    const displayRect = panoDisplayRef.current?.getBoundingClientRect();
+    const viewportRect = panoViewportRef.current?.getBoundingClientRect();
+    if (!displayRect || !viewportRect || !overlayCoordinateSize.width || !overlayCoordinateSize.height) return null;
+
+    const normalizedX = clamp(point.x / Math.max(1, overlayCoordinateSize.width), 0, 1);
+    const normalizedY = clamp(point.y / Math.max(1, overlayCoordinateSize.height), 0, 1);
+    const renderedX = (flipped ? 1 - normalizedX : normalizedX) * displayRect.width;
+    const renderedY = normalizedY * displayRect.height;
+
+    return {
+      left: displayRect.left - viewportRect.left + renderedX,
+      top: displayRect.top - viewportRect.top + renderedY,
+    };
+  };
+
+  const commitPendingTextAnnotation = () => {
+    if (!pendingTextAnnotation) return;
+    const nextText = pendingTextAnnotation.text.trim();
+    if (nextText) {
+      setMeasureShapes((current) => [
+        ...current,
+        {
+          type: 'text',
+          points: [pendingTextAnnotation.point],
+          text: nextText,
+          anchorLeft: pendingTextAnnotation.anchorLeft,
+          anchorTop: pendingTextAnnotation.anchorTop,
+        },
+      ]);
+    }
+    setPendingTextAnnotation(null);
+  };
+
+  const cancelPendingTextAnnotation = () => {
+    setPendingTextAnnotation(null);
+  };
+
+  useEffect(() => {
+    if (!pendingTextAnnotation) {
+      textAnnotationWasOpenRef.current = false;
+      return;
+    }
+    if (textAnnotationWasOpenRef.current) return;
+    textAnnotationWasOpenRef.current = true;
+    textAnnotationInputRef.current?.focus();
+  }, [pendingTextAnnotation]);
+
   const focusedCondition = useMemo(() => {
     if (activeTooth) return toothStatusByFdi[activeTooth] || 'healthy';
     if (activeDetection?.toothFdi) return toothStatusByFdi[activeDetection.toothFdi] || 'healthy';
@@ -1865,8 +2053,9 @@ export function RenewPage() {
     const points = isTemp && measurePreviewPoint ? [...shape.points, measurePreviewPoint] : shape.points;
     if (!points.length) return null;
 
-    const stroke = 'rgba(0, 192, 243, 0.95)';
-    const glow = 'rgba(255, 255, 255, 0.9)';
+    const stroke = 'rgba(57, 255, 20, 0.98)';
+    const glow = 'rgba(196, 255, 168, 0.92)';
+    const fill = 'rgba(57, 255, 20, 0.14)';
     const strokeWidth = 1.2 / effectiveScale;
     const distance = (a: ImagePoint, b: ImagePoint) => Math.hypot(b.x - a.x, b.y - a.y);
 
@@ -1915,8 +2104,8 @@ export function RenewPage() {
       const cy = y + h / 2;
       return (
         <g>
-          <rect x={x} y={y} width={w} height={h} fill="rgba(0, 192, 243, 0.08)" stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
-          <rect x={x} y={y} width={w} height={h} fill="rgba(0, 192, 243, 0.08)" stroke={stroke} strokeWidth={strokeWidth} />
+          <rect x={x} y={y} width={w} height={h} fill={fill} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
+          <rect x={x} y={y} width={w} height={h} fill={fill} stroke={stroke} strokeWidth={strokeWidth} />
           <line x1={x} y1={cy} x2={x + w} y2={cy} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
           <line x1={x} y1={cy} x2={x + w} y2={cy} stroke={stroke} strokeWidth={strokeWidth} />
           <line x1={cx} y1={y} x2={cx} y2={y + h} stroke={glow} strokeWidth={strokeWidth + 1 / effectiveScale} />
@@ -1979,10 +2168,10 @@ export function RenewPage() {
     const points = isTemp && measurePreviewPoint ? [...shape.points, measurePreviewPoint] : shape.points;
     if (!points.length) return null;
 
-    const stroke = 'rgba(0, 192, 243, 0.95)';
-    const glow = 'rgba(255, 255, 255, 0.9)';
+    const stroke = 'rgba(57, 255, 20, 0.98)';
+    const glow = 'rgba(196, 255, 168, 0.92)';
     const strokeWidth = 1.2 / effectiveScale;
-    const fill = 'rgba(0, 192, 243, 0.12)';
+    const fill = 'rgba(57, 255, 20, 0.14)';
     const distance = (a: ImagePoint, b: ImagePoint) => Math.hypot(b.x - a.x, b.y - a.y);
 
     const renderLabel = (x: number, y: number, lines: string[]) => (
@@ -2010,9 +2199,7 @@ export function RenewPage() {
       </g>
     );
 
-    if (shape.type === 'text') {
-      return renderLabel(points[0].x + 12 / effectiveScale, points[0].y - 8 / effectiveScale, [shape.text || 'Note']);
-    }
+    if (shape.type === 'text') return null;
 
     if (shape.type === 'arrow' && points.length >= 2) {
       return (
@@ -2384,6 +2571,7 @@ export function RenewPage() {
     if (viewMode !== 'heatmap' || !result) return null;
 
     const items: any[] = [];
+    const heatmapOpacityScale = heatmapOpacity / 100;
     const cariesEntries = Object.entries(result.caries_by_tooth_best || result.analysis_result?.caries_by_tooth_best || {});
     const periapicalEntries = Object.entries(result.periapical_by_tooth_best || result.analysis_result?.periapical_by_tooth_best || {});
     const teeth = Array.isArray(result.teeth)
@@ -2417,7 +2605,7 @@ export function RenewPage() {
         <g
           key={`renew-risk-caries-${tooth}-${idx}`}
           filter="url(#renewRiskBlurStrong)"
-          style={{ mixBlendMode: 'normal', opacity: 0.62 }}
+          style={{ mixBlendMode: 'normal', opacity: 0.62 * heatmapOpacityScale }}
         >
           <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#renewCariesGlow)" fillOpacity={opacity} />
         </g>
@@ -2440,7 +2628,7 @@ export function RenewPage() {
         <g
           key={`renew-risk-peri-${tooth}-${idx}`}
           filter="url(#renewRiskBlurStrong)"
-          style={{ mixBlendMode: 'normal', opacity: 0.6 }}
+          style={{ mixBlendMode: 'normal', opacity: 0.6 * heatmapOpacityScale }}
         >
           <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#renewPeriGlow)" fillOpacity={opacity} />
         </g>
@@ -2467,7 +2655,7 @@ export function RenewPage() {
         <g
           key={`renew-risk-bone-${label}-${idx}`}
           filter="url(#renewRiskBlurSoft)"
-          style={{ mixBlendMode: 'normal', opacity: 0.48 }}
+          style={{ mixBlendMode: 'normal', opacity: 0.48 * heatmapOpacityScale }}
         >
           <polygon points={points} fill={fill} />
         </g>
@@ -2739,6 +2927,10 @@ export function RenewPage() {
   }, [isProcessing]);
 
   useEffect(() => {
+    writeStoredNumberingSystem(numberingSystem);
+  }, [numberingSystem]);
+
+  useEffect(() => {
     if (!result) return;
 
     const nextHasStructuredOverlay = Boolean(
@@ -2752,6 +2944,21 @@ export function RenewPage() {
       setViewMode((current) => (current === 'original' ? 'overlay' : current));
     }
   }, [result]);
+
+  useEffect(() => {
+    clearHeatmapControlsTimeout();
+
+    if (viewMode === 'heatmap') {
+      setIsHeatmapControlsExpanded(true);
+    } else {
+      setIsHeatmapControlsExpanded(false);
+      setIsHeatmapPresetMenuVisible(false);
+    }
+
+    return () => {
+      clearHeatmapControlsTimeout();
+    };
+  }, [viewMode]);
 
   useEffect(() => {
     setPanoZoom(1);
@@ -2860,10 +3067,12 @@ export function RenewPage() {
       event.preventDefault();
 
       if (activeMeasureSubtool === 'text') {
-        const text = window.prompt('Text Annotation:', 'Note')?.trim();
-        if (text) {
-          setMeasureShapes((current) => [...current, { type: 'text', points: [point], text }]);
-        }
+        const viewportRect = panoViewportRef.current?.getBoundingClientRect();
+        const viewportScaleX = viewportRect ? viewportRect.width / Math.max(1, panoBodyWidth) : 1;
+        const viewportScaleY = viewportRect ? viewportRect.height / Math.max(1, panoBodyHeight) : 1;
+        const anchorLeft = viewportRect ? (event.clientX - viewportRect.left) / Math.max(viewportScaleX, 0.0001) + 12 : 12;
+        const anchorTop = viewportRect ? (event.clientY - viewportRect.top) / Math.max(viewportScaleY, 0.0001) - 12 : 0;
+        setPendingTextAnnotation({ point, text: '', anchorLeft, anchorTop });
         setPendingMeasurePoints([]);
         setMeasurePreviewPoint(null);
         return;
@@ -3093,9 +3302,9 @@ export function RenewPage() {
   }, [panoMagnifierViewport, panoBrightness, panoContrast, inverted, flipped]);
 
   const handleOutputCapture = async () => {
-    const canvas = await buildPanoCaptureCanvas();
-    if (!canvas) return;
-
+    const rawCanvas = await buildPanoCaptureCanvas();
+    if (!rawCanvas) return;
+    const canvas = trimCaptureCanvas(rawCanvas);
     const dataUrl = canvas.toDataURL('image/png');
     setCapturedOutputs((current) => [
       {
@@ -3118,6 +3327,107 @@ export function RenewPage() {
       console.error('Failed to copy pano capture', error);
     }
   };
+
+  const toggleReportCaptureSelection = (captureId: string) => {
+    setSelectedReportCaptureIds((current) =>
+      current.includes(captureId) ? current.filter((id) => id !== captureId) : [...current, captureId]
+    );
+  };
+
+  const updateReportCaptureNote = (captureId: string, note: string) => {
+    setCapturedOutputs((current) =>
+      current.map((capture) => (capture.id === captureId ? { ...capture, note } : capture))
+    );
+  };
+
+  useEffect(() => {
+    setSelectedReportCaptureIds((current) => current.filter((id) => capturedOutputs.some((capture) => capture.id === id)));
+  }, [capturedOutputs]);
+
+  useEffect(() => {
+    lastSyncedReportCapturesRef.current = '';
+    lastRefreshedReportCaptureStructureRef.current = '';
+  }, [reportSessionId]);
+
+  useEffect(() => {
+    const handlePreviewMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data || data.source !== 'web-report-preview') return;
+      if (data.action === 'capture-note-change') {
+        const captureId = String(data.captureId || '');
+        if (!captureId) return;
+        updateReportCaptureNote(captureId, String(data.note || ''));
+        return;
+      }
+      if (data.action === 'toggle-tooth') {
+        const toothLabel = String(data.toothLabel || '');
+        if (!reportSessionId || !toothLabel) return;
+        void patchWebReportOverrides(reportSessionId, {
+          tooth_overrides: {
+            [toothLabel]: {
+              included: Boolean(data.checked),
+            },
+          },
+        })
+          .then(() => {
+            setReportPreviewRefreshToken((current) => current + 1);
+          })
+          .catch((error) => {
+            console.error('Failed to update report tooth visibility', error);
+          });
+      }
+    };
+
+    window.addEventListener('message', handlePreviewMessage);
+    return () => {
+      window.removeEventListener('message', handlePreviewMessage);
+    };
+  }, [reportSessionId]);
+
+  useEffect(() => {
+    if (!reportSessionId || reportStartState === 'creating') return;
+
+    const selectedCaptures = capturedOutputs.filter((capture) => selectedReportCaptureIds.includes(capture.id));
+    const mappedCaptures = selectedCaptures.map((capture, index) => ({
+      id: capture.id || `capture-${index}`,
+      dataUrl: capture.dataUrl,
+      reportDataUrl: capture.dataUrl,
+      createdAt: capture.createdAt,
+      label: capture.label || `Capture ${index + 1}`,
+      size: capture.size,
+      note: capture.note || '',
+    }));
+    const nextPayload = JSON.stringify(mappedCaptures);
+    const nextStructureSignature = JSON.stringify(
+      mappedCaptures.map((capture) => ({
+        id: capture.id,
+        dataUrl: capture.dataUrl,
+        createdAt: capture.createdAt,
+        label: capture.label,
+        size: capture.size,
+      }))
+    );
+    if (nextPayload === lastSyncedReportCapturesRef.current) return;
+
+    const timer = window.setTimeout(async () => {
+      try {
+        await patchWebReportOverrides(reportSessionId, {
+          attached_captures: mappedCaptures,
+        });
+        lastSyncedReportCapturesRef.current = nextPayload;
+        if (nextStructureSignature !== lastRefreshedReportCaptureStructureRef.current) {
+          lastRefreshedReportCaptureStructureRef.current = nextStructureSignature;
+          setReportPreviewRefreshToken((current) => current + 1);
+        }
+      } catch (error) {
+        console.error('Failed to sync report captures', error);
+      }
+    }, 300);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [capturedOutputs, reportSessionId, reportStartState, selectedReportCaptureIds]);
 
   const handleOutputSave = async () => {
     const canvas = await buildPanoCaptureCanvas();
@@ -3145,6 +3455,7 @@ export function RenewPage() {
     setActiveMeasureSubtool(tool);
     setPendingMeasurePoints([]);
     setMeasurePreviewPoint(null);
+    setPendingTextAnnotation(null);
 
     switch (tool) {
       case 'length':
@@ -3260,6 +3571,7 @@ export function RenewPage() {
         setMeasureShapes([]);
         setPendingMeasurePoints([]);
         setMeasurePreviewPoint(null);
+        setPendingTextAnnotation(null);
         flashToolbarActive('measure-clear');
         setSelectedToolbarButton('pointer');
         setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
@@ -3272,6 +3584,7 @@ export function RenewPage() {
         setMeasureShapes([]);
         setPendingMeasurePoints([]);
         setMeasurePreviewPoint(null);
+        setPendingTextAnnotation(null);
         setInverted(false);
         setFlipped(false);
         setViewMode('original');
@@ -3296,6 +3609,9 @@ export function RenewPage() {
         flashToolbarActive('output-save');
         void handleOutputSave();
         return;
+      case 'output-report':
+        void handleOpenReportPanel();
+        return;
       case 'task-original':
         setPanoMagnifier({ visible: false, clientX: 0, clientY: 0, viewerX: 0, viewerY: 0, imgX: 0, imgY: 0 });
         if (viewMode === 'overlay') {
@@ -3313,9 +3629,13 @@ export function RenewPage() {
         if (viewMode === 'heatmap') {
           setViewMode('original');
           setSelectedToolbarButton('pointer');
+          setIsHeatmapControlsExpanded(false);
+          setIsHeatmapPresetMenuVisible(false);
+          clearHeatmapControlsTimeout();
         } else {
           setViewMode('heatmap');
           setSelectedToolbarButton('task-heatmap');
+          showHeatmapControls();
         }
         return;
       default:
@@ -3343,6 +3663,18 @@ export function RenewPage() {
     }
   }, [isCustomMeasureTool]);
 
+  const resolveReportPatientName = () => {
+    const candidates = [
+      locationState.userName,
+      result?.patient_name,
+      dicomHudMetadata?.patientName,
+    ];
+    const normalized = candidates
+      .map((value) => String(value || '').trim())
+      .find((value) => value && value.toLowerCase() !== 'patient');
+    return normalized || 'Patient';
+  };
+
   const ensureReportSession = async () => {
     if (reportStartState === 'creating') return;
     if (reportSessionId) return reportSessionId;
@@ -3360,6 +3692,7 @@ export function RenewPage() {
         source_url: result?.image_url,
         overlay_url: result?.overlay_url,
         language: 'English',
+        patient_name: resolveReportPatientName(),
       });
       setReportSessionId(response.session_id);
       return response.session_id;
@@ -3669,10 +4002,10 @@ export function RenewPage() {
                       >
                         <defs>
                           <marker id="renewMeasureArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(0, 192, 243, 0.95)" />
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(57, 255, 20, 0.98)" />
                           </marker>
                           <marker id="renewMeasureArrowGlow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-                            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(255, 255, 255, 0.9)" />
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(196, 255, 168, 0.92)" />
                           </marker>
                         </defs>
                         {measureShapes.map((shape, index) => (
@@ -3702,6 +4035,165 @@ export function RenewPage() {
                     No panorama source
                   </div>
                 )}
+                {measureShapes
+                  .map((shape, index) => ({
+                    shape,
+                    index,
+                    position:
+                      shape.type === 'text'
+                        ? shape.anchorLeft != null && shape.anchorTop != null
+                          ? { left: shape.anchorLeft, top: shape.anchorTop }
+                          : overlayPointToViewportPosition(shape.points[0])
+                        : null,
+                  }))
+                  .filter(({ shape, position }) => shape.type === 'text' && position)
+                  .map(({ shape, index, position }) => (
+                    <div
+                      key={`measure-text-${index}`}
+                      style={{
+                        position: 'absolute',
+                        left: `${position!.left}px`,
+                        top: `${position!.top}px`,
+                        transform: 'translateY(-100%)',
+                        zIndex: 20,
+                        pointerEvents: 'none',
+                        color: 'rgba(57, 255, 20, 0.98)',
+                        fontSize: scalePx(12),
+                        fontWeight: 700,
+                        lineHeight: 1.4,
+                        whiteSpace: 'pre-wrap',
+                        textShadow: '0 0 1px rgba(0, 0, 0, 0.35)',
+                      }}
+                    >
+                      {shape.text || 'Note'}
+                    </div>
+                  ))}
+                {pendingTextAnnotation ? (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      left: `${pendingTextAnnotation.anchorLeft}px`,
+                      top: `${pendingTextAnnotation.anchorTop}px`,
+                      transform: 'translateY(-100%)',
+                      zIndex: 30,
+                      padding: '8px 10px',
+                      border: `${scalePx(1)} solid #00C0F3`,
+                      background: '#111111',
+                      boxShadow: '0 10px 24px rgba(0, 0, 0, 0.35)',
+                    }}
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onMouseDown={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                    }}
+                  >
+                    <textarea
+                      ref={textAnnotationInputRef}
+                      value={pendingTextAnnotation.text}
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                      }}
+                      onMouseDown={(event) => {
+                        event.stopPropagation();
+                      }}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                      }}
+                      onChange={(event) => {
+                        setPendingTextAnnotation((current) =>
+                          current ? { ...current, text: event.target.value } : current
+                        );
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault();
+                          commitPendingTextAnnotation();
+                          return;
+                        }
+                        if (event.key === 'Escape') {
+                          event.preventDefault();
+                          cancelPendingTextAnnotation();
+                        }
+                      }}
+                      rows={2}
+                      style={{
+                        width: wp(180),
+                        minHeight: hp(44),
+                        resize: 'none',
+                        border: 'none',
+                        background: 'transparent',
+                        color: 'rgba(57, 255, 20, 0.98)',
+                        padding: 0,
+                        fontSize: scalePx(12),
+                        lineHeight: 1.4,
+                        outline: 'none',
+                        boxShadow: 'none',
+                        overflow: 'hidden',
+                      }}
+                    />
+                    <div
+                      style={{
+                        marginTop: hp(8),
+                        display: 'flex',
+                        justifyContent: 'flex-end',
+                        gap: wp(6),
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          commitPendingTextAnnotation();
+                        }}
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                        }}
+                        onMouseDown={(event) => {
+                          event.stopPropagation();
+                        }}
+                        style={{
+                          minWidth: wp(42),
+                          height: hp(24),
+                          border: `${scalePx(1)} solid #00C0F3`,
+                          background: '#1B1B1B',
+                          color: '#00FF66',
+                          fontSize: scalePx(11),
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        OK
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          cancelPendingTextAnnotation();
+                        }}
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                        }}
+                        onMouseDown={(event) => {
+                          event.stopPropagation();
+                        }}
+                        style={{
+                          minWidth: wp(58),
+                          height: hp(24),
+                          border: `${scalePx(1)} solid #6A6A6A`,
+                          background: '#1B1B1B',
+                          color: '#D0D0D0',
+                          fontSize: scalePx(11),
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
                 {isProcessing && (
                   <div
                     style={{
@@ -3783,8 +4275,8 @@ export function RenewPage() {
                   <div
                     style={{
                       position: 'absolute',
-                      left: wp(18),
-                      bottom: hp(18),
+                      right: wp(18),
+                      top: hp(18),
                       width: wp(190),
                       zIndex: 9,
                     }}
@@ -3964,6 +4456,10 @@ export function RenewPage() {
             sessionId={reportSessionId}
             isLoading={reportStartState === 'creating'}
             error={reportError}
+            availableCaptures={capturedOutputs}
+            selectedCaptureIds={selectedReportCaptureIds}
+            onToggleCaptureSelection={toggleReportCaptureSelection}
+            previewRefreshToken={reportPreviewRefreshToken}
             onClose={() => {
               setWorkspaceSection('none');
               setIsReportActive(false);
@@ -3996,7 +4492,6 @@ export function RenewPage() {
         >
           <img style={{ width: '100%', height: '100%', display: 'block' }} src={workspaceSection === 'report' || reportDrawerOpen ? activeRailIcons.captures : displayRailIcons.captures} alt="" />
         </button>
-
         <div style={{ width: wp(154), height: hp(1019), left: wp(82), top: hp(49), position: 'absolute', background: '#2D2D2D' }} />
         <div style={{ width: wp(154), height: hp(1019), left: wp(82), top: hp(49), position: 'absolute', border: `${scalePx(1)} solid #4C4C4C`, pointerEvents: 'none' }} />
         <div style={{ width: wp(148), height: hp(336), left: wp(86), top: hp(49), position: 'absolute', background: '#333333' }} />
@@ -4088,13 +4583,38 @@ export function RenewPage() {
           { key: 'measure-reset' as ToolbarKey, x: 181.5, y: 261, label: 'Reset', active: flashToolbarButton === 'measure-reset' },
           { key: 'output-capture' as ToolbarKey, x: 92, y: 336, label: 'Capture', active: flashToolbarButton === 'output-capture' },
           { key: 'output-save' as ToolbarKey, x: 139, y: 336, label: 'Capture save', active: flashToolbarButton === 'output-save' },
-          { key: 'task-original' as ToolbarKey, x: 92, y: 416, label: 'Overlay', active: viewMode === 'overlay' },
-          { key: 'task-heatmap' as ToolbarKey, x: 139, y: 416, label: 'Heatmap', active: viewMode === 'heatmap' },
+          {
+            key: 'output-report' as ToolbarKey,
+            x: 186,
+            y: 336,
+            label: 'Report',
+            active: isReportActive || reportDrawerOpen,
+            icon: displayReportButtonIcons.inactive,
+            activeIcon: displayReportButtonIcons.active,
+          },
+          {
+            key: 'task-original' as ToolbarKey,
+            x: 92,
+            y: 416,
+            label: 'Overlay',
+            active: viewMode === 'overlay',
+            icon: displayToolbarIcons[14],
+            activeIcon: activeToolbarIcons[14],
+          },
+          {
+            key: 'task-heatmap' as ToolbarKey,
+            x: 139,
+            y: 416,
+            label: 'Heatmap',
+            active: viewMode === 'heatmap',
+            icon: displayToolbarIcons[15],
+            activeIcon: activeToolbarIcons[15],
+          },
         ].map((item, index) => (
           <ToolIcon
             key={item.key}
-            icon={displayToolbarIcons[index]}
-            activeIcon={activeToolbarIcons[index]}
+            icon={item.icon ?? displayToolbarIcons[index]}
+            activeIcon={item.activeIcon ?? activeToolbarIcons[index]}
             left={item.x}
             top={item.y}
             active={item.active}
@@ -4112,6 +4632,202 @@ export function RenewPage() {
             label={item.label}
           />
         ))}
+        {viewMode === 'heatmap' && (
+          <div
+            style={{
+              width: wp(140),
+              left: wp(heatmapControlsPosition.x),
+              top: hp(heatmapControlsPosition.y),
+              position: 'absolute',
+              zIndex: 3,
+            }}
+            onMouseEnter={() => clearHeatmapControlsTimeout()}
+          >
+            {isHeatmapControlsExpanded ? (
+              <div
+                style={{
+                  width: wp(140),
+                  minHeight: hp(40),
+                  padding: `${hp(4)} ${wp(6)}`,
+                  border: `${scalePx(1)} solid #5A5A5A`,
+                  background: 'rgba(65, 65, 65, 0.8)',
+                  boxSizing: 'border-box',
+                  position: 'relative',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: wp(4),
+                    marginBottom: hp(3),
+                  }}
+                >
+                  <button
+                    type="button"
+                    onPointerDown={handleHeatmapControlsDragStart}
+                    aria-label="Drag heatmap opacity panel"
+                    style={{
+                      width: wp(12),
+                      height: hp(12),
+                      border: 'none',
+                      background: 'transparent',
+                      padding: 0,
+                      cursor: 'grab',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <img
+                      src={assetPath('7 7.png')}
+                      alt=""
+                      draggable={false}
+                      style={{
+                        width: scalePx(7),
+                        height: scalePx(7),
+                        display: 'block',
+                        objectFit: 'contain',
+                      }}
+                    />
+                  </button>
+                  <span
+                    style={{
+                      color: '#D9D9D9',
+                      fontSize: scalePx(10),
+                      fontWeight: 700,
+                      lineHeight: 1,
+                      minWidth: wp(28),
+                    }}
+                  >
+                    {heatmapOpacity}%
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsHeatmapPresetMenuVisible((current) => !current);
+                      showHeatmapControls(4200);
+                    }}
+                    style={{
+                      width: wp(36),
+                      height: hp(16),
+                      border: `${scalePx(1)} solid #666666`,
+                      background: 'rgba(75, 75, 75, 0.8)',
+                      color: '#F1F1F1',
+                      fontSize: scalePx(9),
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      padding: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: wp(3),
+                      marginLeft: 'auto',
+                    }}
+                  >
+                    <span>{heatmapOpacity}%</span>
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        width: 0,
+                        height: 0,
+                        borderLeft: `${scalePx(3)} solid transparent`,
+                        borderRight: `${scalePx(3)} solid transparent`,
+                        borderTop: `${scalePx(5)} solid rgba(255, 255, 255, 0.82)`,
+                      }}
+                    />
+                  </button>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={heatmapOpacity}
+                  onChange={(event) => {
+                    setHeatmapOpacity(Number(event.target.value));
+                    showHeatmapControls();
+                  }}
+                  style={{
+                    width: '100%',
+                    height: hp(12),
+                    accentColor: '#9A9A9A',
+                    cursor: 'pointer',
+                    margin: 0,
+                    display: 'block',
+                  }}
+                />
+                {isHeatmapPresetMenuVisible && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      right: wp(6),
+                      top: hp(19),
+                      width: wp(44),
+                      border: `${scalePx(1)} solid #5A5A5A`,
+                      background: 'rgba(65, 65, 65, 0.8)',
+                      boxShadow: '0 8px 14px rgba(0, 0, 0, 0.24)',
+                    }}
+                  >
+                    {heatmapOpacityPresets.map((preset) => {
+                      const active = heatmapOpacity === preset;
+                      return (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => {
+                            setHeatmapOpacity(preset);
+                            setIsHeatmapPresetMenuVisible(false);
+                            showHeatmapControls();
+                          }}
+                          style={{
+                            width: '100%',
+                            height: hp(18),
+                            border: 'none',
+                            borderBottom: preset === heatmapOpacityPresets[heatmapOpacityPresets.length - 1]
+                              ? 'none'
+                              : `${scalePx(1)} solid #575757`,
+                            background: active ? 'rgba(106, 106, 106, 0.8)' : 'rgba(65, 65, 65, 0.8)',
+                            color: '#F1F1F1',
+                            fontSize: scalePx(9),
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                            padding: 0,
+                          }}
+                        >
+                          {preset}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsHeatmapPresetMenuVisible(false);
+                  showHeatmapControls();
+                }}
+                style={{
+                  width: wp(140),
+                  height: hp(20),
+                  border: `${scalePx(1)} solid #5A5A5A`,
+                  background: '#414141',
+                  color: '#D9D9D9',
+                  fontSize: scalePx(10),
+                  fontWeight: 700,
+                  textAlign: 'left',
+                  padding: `0 ${wp(7)}`,
+                  cursor: 'pointer',
+                }}
+              >
+                {heatmapOpacity}%
+              </button>
+            )}
+          </div>
+        )}
         <RenewToolSubmenu
           visible={toolSubmenu?.menu === 'measure'}
           left={wp(toolSubmenu?.left ?? 0)}
@@ -4150,13 +4866,15 @@ export function RenewPage() {
           visible
           collapsed={isCapturePanelCollapsed}
           left={wp(88)}
-          top={hp(472)}
+          top={hp(outputCaptureTop)}
           width={wp(140)}
           height={hp(590)}
           captures={capturedOutputs}
+          selectedCaptureIds={selectedReportCaptureIds}
           onToggle={() => {
             setIsCapturePanelCollapsed((current) => !current);
           }}
+          onSelectCapture={toggleReportCaptureSelection}
           onRemove={(id) => {
             setCapturedOutputs((current) => current.filter((item) => item.id !== id));
           }}
@@ -4197,32 +4915,6 @@ export function RenewPage() {
               draggable={false}
               style={{ width: scalePx(7), height: scalePx(7), left: wp(240), top: hp(809), position: 'absolute', zIndex: 2 }}
             />
-            <button
-              type="button"
-              onClick={() => {
-                setIsChartVisible(false);
-              }}
-              aria-label="Minimize dental chart"
-              style={{
-                width: wp(18),
-                height: hp(14),
-                left: wp(chartHeaderHideLeft),
-                top: hp(806),
-                position: 'absolute',
-                border: `${scalePx(1)} solid #2C2C2C`,
-                background: '#8D8D8D',
-                color: '#111111',
-                fontSize: scalePx(10),
-                fontWeight: 700,
-                lineHeight: hp(12),
-                textAlign: 'center',
-                cursor: 'pointer',
-                zIndex: 3,
-                padding: 0,
-              }}
-            >
-              -
-            </button>
           </>
         )}
 
@@ -4409,7 +5101,7 @@ export function RenewPage() {
         />
 
         <ReportWorkspaceControls
-          showReportButton={isChartBodyVisible}
+          showReportButton={false}
           reportButtonLeft={wp(reportLeft)}
           reportButtonTop={hp(reportTop)}
           reportButtonWidth={wp(77)}
