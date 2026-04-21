@@ -160,7 +160,6 @@ export default function FolderLeaderVer2Page() {
   const navigate = useNavigate();
   const uploadFileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadFolderInputRef = useRef<HTMLInputElement | null>(null);
-  const uploadMenuRef = useRef<HTMLDivElement | null>(null);
   const [studies, setStudies] = useState<ServerFolderStudy[]>([]);
   const [images, setImages] = useState<ServerFolderImage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -179,7 +178,6 @@ export default function FolderLeaderVer2Page() {
   const [descriptionQuery, setDescriptionQuery] = useState('');
   const [rootPath, setRootPath] = useState('');
   const [rootExists, setRootExists] = useState(true);
-  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [uploadingLocal, setUploadingLocal] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsRootDraft, setSettingsRootDraft] = useState('');
@@ -229,18 +227,6 @@ export default function FolderLeaderVer2Page() {
   useEffect(() => {
     void loadStudies(false);
   }, []);
-
-  useEffect(() => {
-    if (!uploadMenuOpen) return;
-
-    const handlePointerDown = (event: MouseEvent) => {
-      if (uploadMenuRef.current?.contains(event.target as Node)) return;
-      setUploadMenuOpen(false);
-    };
-
-    window.addEventListener('mousedown', handlePointerDown);
-    return () => window.removeEventListener('mousedown', handlePointerDown);
-  }, [uploadMenuOpen]);
 
   const filteredStudies = useMemo(() => {
     const patientId = patientIdQuery.trim().toLowerCase();
@@ -560,7 +546,6 @@ export default function FolderLeaderVer2Page() {
 
   const handleLocalFilePick = (file: File | null) => {
     if (!file) return;
-    setUploadMenuOpen(false);
     navigate('/renew', {
       state: {
         originalFile: file,
@@ -572,7 +557,6 @@ export default function FolderLeaderVer2Page() {
 
   const handleLocalFolderPick = async (files: File[]) => {
     if (!files.length) return;
-    setUploadMenuOpen(false);
     setUploadingLocal(true);
     setError(null);
     try {
@@ -618,36 +602,17 @@ export default function FolderLeaderVer2Page() {
                 {lastUpdatedAt ? ` / Updated ${lastUpdatedAt.toLocaleTimeString()}` : ''}
               </div>
             </div>
-            <div className="folder-leader-v2-db-actions relative" ref={uploadMenuRef}>
+            <div className="folder-leader-v2-db-actions">
               <button type="button" onClick={() => loadStudies(true)} disabled={loading || refreshing || uploadingLocal}>
                 <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
                 Refresh
               </button>
-              <button
-                type="button"
-                onClick={() => setUploadMenuOpen((current) => !current)}
-                disabled={uploadingLocal}
-              >
-                Upload
+              <button type="button" onClick={() => uploadFileInputRef.current?.click()} disabled={uploadingLocal}>
+                Upload Image
               </button>
-              {uploadMenuOpen && (
-                <div className="absolute right-0 top-full z-20 mt-2 flex min-w-[140px] flex-col overflow-hidden rounded border border-slate-300 bg-white shadow-lg">
-                  <button
-                    type="button"
-                    className="border-b border-slate-200 px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100"
-                    onClick={() => uploadFileInputRef.current?.click()}
-                  >
-                    Upload File
-                  </button>
-                  <button
-                    type="button"
-                    className="px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100"
-                    onClick={() => uploadFolderInputRef.current?.click()}
-                  >
-                    Upload Folder
-                  </button>
-                </div>
-              )}
+              <button type="button" onClick={() => uploadFolderInputRef.current?.click()} disabled={uploadingLocal}>
+                Upload Folder
+              </button>
               <input
                 ref={uploadFileInputRef}
                 type="file"
@@ -747,9 +712,6 @@ export default function FolderLeaderVer2Page() {
               <div className="folder-leader-v2-search-buttons">
                 <button type="button" onClick={() => setActiveSection('studies')} className={activeSection === 'studies' ? 'is-active' : ''}>
                   Studies
-                </button>
-                <button type="button" onClick={() => setActiveSection('images')} className={activeSection === 'images' ? 'is-active' : ''}>
-                  Images
                 </button>
                 <button type="button" onClick={() => loadStudies(true)} disabled={loading || refreshing}>
                   Search
