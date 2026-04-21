@@ -20,9 +20,7 @@ type OutputCapturePanelProps = {
   width: string;
   height: string;
   captures: OutputCaptureItem[];
-  selectedCaptureIds?: string[];
   onToggle: () => void;
-  onSelectCapture?: (id: string) => void;
   onRemove: (id: string) => void;
   onClear: () => void;
 };
@@ -35,9 +33,7 @@ export function OutputCapturePanel({
   width,
   height,
   captures,
-  selectedCaptureIds = [],
   onToggle,
-  onSelectCapture,
   onRemove,
   onClear,
 }: OutputCapturePanelProps) {
@@ -160,7 +156,6 @@ export function OutputCapturePanel({
       setPreviewCaptureId(null);
       return;
     }
-    onSelectCapture?.(captureId);
     previewWasDraggedRef.current = false;
     setPreviewCaptureId(captureId);
   };
@@ -290,11 +285,11 @@ export function OutputCapturePanel({
                     type="button"
                     onClick={() => handleCaptureClick(capture.id)}
                     style={{
-                      border: selectedCaptureIds.includes(capture.id) ? '1px solid #00C0F3' : '1px solid #555555',
+                      border: previewCaptureId === capture.id ? '1px solid #00C0F3' : '1px solid #555555',
                       background: previewCaptureId === capture.id ? '#243744' : '#2B2B2B',
                       padding: '6px',
                       textAlign: 'left',
-                      boxShadow: selectedCaptureIds.includes(capture.id) ? 'inset 0 0 0 1px rgba(0, 192, 243, 0.35)' : 'none',
+                      boxShadow: previewCaptureId === capture.id ? 'inset 0 0 0 1px rgba(0, 192, 243, 0.35)' : 'none',
                       cursor: 'pointer',
                     }}
                   >

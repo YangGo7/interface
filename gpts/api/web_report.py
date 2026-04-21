@@ -1,4 +1,5 @@
 import copy
+import json
 import threading
 import shutil
 from pathlib import Path
@@ -9,6 +10,7 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 
 from services.pano_inference import load_image_any
+from services.file_validation import validate_upload_file
 from services.report_dictation_service import ReportDictationService
 from services.web_report_merge_service import WebReportMergeService
 from services.web_report_report_service import WebReportReportService
@@ -163,7 +165,7 @@ def _run_session_analysis(app, session_id: str, source_path: Path, language: str
             )
             report_info = report_service.generate_report(
                 session_id=session_id,
-                user_name=f"WebReport_{session_id[:8]}",
+                user_name=_resolve_patient_name(session.get("patient_name")),
                 image_path=source_path,
                 overlay_path=overlay_path,
                 bl_viz_path=bl_viz_path,
@@ -192,10 +194,18 @@ def _copy_asset(src: Optional[Path], dst: Path) -> Optional[Path]:
     return dst
 
 
+def _resolve_patient_name(value: Optional[str], fallback: str = "Patient") -> str:
+    normalized = str(value or "").strip()
+    return normalized or fallback
+
+
 @web_report_api.route("/session", methods=["POST"])
 def create_session():
     payload = request.get_json(silent=True) or {}
-    session_id = session_service.create_session(payload.get("language", "English"))
+    session_id = session_service.create_session(
+        payload.get("language", "English"),
+        _resolve_patient_name(payload.get("patient_name")),
+    )
     return jsonify({"success": True, "session_id": session_id})
 
 
@@ -214,7 +224,12 @@ def create_from_chart():
         if source_path is None:
             return jsonify({"success": False, "error": "Could not resolve source image from chart result"}), 400
 
-        session_id = session_service.create_session(payload.get("language", "English"))
+        patient_name = _resolve_patient_name(
+            payload.get("patient_name")
+            or payload.get("user_name")
+            or payload.get("result", {}).get("patient_name")
+        )
+        session_id = session_service.create_session(payload.get("language", "English"), patient_name)
         paths = _ensure_dirs(session_id)
 
         copied_source = _copy_asset(source_path, paths["source"] / source_path.name)
@@ -266,7 +281,7 @@ def create_from_chart():
         )
         report_info = report_service.generate_report(
             session_id=session_id,
-            user_name=f"WebReport_{session_id[:8]}",
+            user_name=patient_name,
             image_path=copied_source,
             overlay_path=overlay_path,
             bl_viz_path=bl_viz_path,
@@ -318,6 +333,14 @@ def upload_session_file(session_id: str):
     suffix = Path(filename).suffix or ".png"
     source_path = paths["source"] / f"original{suffix}"
     file.save(source_path)
+
+    validation = validate_upload_file(source_path, filename)
+    if not validation.ok:
+        try:
+            source_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return jsonify({"success": False, "error": validation.reason}), 400
 
     preview_path: Optional[Path] = None
     if suffix.lower() in (".dcm", ".dicom"):
@@ -386,10 +409,12 @@ def get_session(session_id: str):
             "status": session["status"],
             "error": session["error"],
             "language": session["language"],
+            "patient_name": session.get("patient_name"),
             "created_at": session["created_at"],
             "updated_at": session["updated_at"],
             "finalized_at": session["finalized_at"],
             "is_finalized": session["is_finalized"],
+            "current_report_version": session.get("current_report_version"),
             "assets": public_assets,
             "ai_result": session.get("ai_result"),
             "doctor_overrides": session.get("doctor_overrides") or {},
@@ -490,7 +515,7 @@ def _generate_report_version(session_id: str, version_status: str) -> Dict[str, 
     )
     report_info = report_service.generate_report(
         session_id=session_id,
-        user_name=f"WebReport_{session_id[:8]}_{version_status}",
+        user_name=_resolve_patient_name(session.get("patient_name")),
         image_path=source_path,
         overlay_path=overlay_path,
         bl_viz_path=bl_viz_path,
@@ -508,6 +533,29 @@ def _generate_report_version(session_id: str, version_status: str) -> Dict[str, 
     if version_status == "final":
         session_service.set_status(session_id, "finalized")
     return {"version": version, **report_info}
+
+
+def _build_live_preview_snapshot(snapshot: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    preview_snapshot = copy.deepcopy(snapshot or {})
+    override_teeth = (overrides or {}).get("teeth", {}) or {}
+
+    def _apply_tooth_overrides(items: Any) -> None:
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tooth_label = str(item.get("tooth_label", ""))
+            if not tooth_label or tooth_label not in override_teeth:
+                continue
+            item.update(copy.deepcopy(override_teeth[tooth_label]))
+
+    _apply_tooth_overrides(preview_snapshot.get("teeth"))
+    _apply_tooth_overrides(preview_snapshot.get("report_teeth"))
+    _apply_tooth_overrides(preview_snapshot.get("missing_teeth"))
+    preview_snapshot["report_note"] = (overrides or {}).get("report_note", "")
+    preview_snapshot["attached_captures"] = copy.deepcopy((overrides or {}).get("attached_captures") or [])
+    return preview_snapshot
 
 
 @web_report_api.route("/session/<session_id>/report/regenerate", methods=["POST"])
@@ -556,15 +604,94 @@ def list_report_versions(session_id: str):
     return jsonify({"success": True, "versions": session_service.list_report_versions(session_id)})
 
 
+@web_report_api.route("/session/<session_id>/report/rollback", methods=["POST"])
+def rollback_report_version(session_id: str):
+    session = session_service.get_session(session_id)
+    if session is None:
+        return jsonify({"success": False, "error": "Invalid session"}), 404
+    if session.get("is_finalized"):
+        return jsonify({"success": False, "error": "Finalized sessions are read-only"}), 409
+
+    payload = request.get_json(silent=True) or {}
+    version = payload.get("version")
+    if not version:
+        return jsonify({"success": False, "error": "Version is required"}), 400
+
+    version_info = session_service.get_report_version(session_id, int(version))
+    if version_info is None:
+        return jsonify({"success": False, "error": "Version not found"}), 404
+
+    snapshot = json.loads(version_info.get("snapshot_json") or "{}")
+    restored_overrides = merge_service.build_overrides_from_snapshot(
+        session.get("ai_result") or {},
+        snapshot or {},
+        session.get("doctor_overrides") or {},
+    )
+    session_service.save_overrides(session_id, restored_overrides)
+    refreshed = session_service.get_session(session_id)
+    effective_result = merge_service.build_effective_result(
+        session_id,
+        refreshed["ai_result"] or {},
+        refreshed["assets"] or {},
+        refreshed["doctor_overrides"] or {},
+    )
+    return jsonify(
+        {
+            "success": True,
+            "doctor_overrides": refreshed["doctor_overrides"],
+            "effective_result": effective_result,
+            "restored_version": int(version),
+        }
+    )
+
+
 @web_report_api.route("/session/<session_id>/report", methods=["GET"])
 def get_report_html(session_id: str):
     session = session_service.get_session(session_id)
     if session is None:
         return jsonify({"success": False, "error": "Invalid session"}), 404
-    report = session.get("report")
+    version = request.args.get("version", type=int)
+    report = session_service.get_report_version(session_id, version)
     if not report or not report.get("html_path"):
         return jsonify({"success": False, "error": "Report not ready"}), 404
     return send_file(report["html_path"], mimetype="text/html")
+
+
+@web_report_api.route("/session/<session_id>/report/preview", methods=["GET"])
+def get_report_preview_html(session_id: str):
+    session = session_service.get_session(session_id)
+    if session is None:
+        return jsonify({"success": False, "error": "Invalid session"}), 404
+
+    version = request.args.get("version", type=int) or session.get("current_report_version")
+    if not version:
+        return jsonify({"success": False, "error": "Report not ready"}), 404
+
+    version_info = session_service.get_report_version(session_id, int(version))
+    if version_info is None:
+        return jsonify({"success": False, "error": "Version not found"}), 404
+
+    snapshot = json.loads(version_info.get("snapshot_json") or "{}")
+    preview_snapshot = _build_live_preview_snapshot(snapshot, session.get("doctor_overrides") or {})
+    assets = session.get("assets") or {}
+    source_path = Path(assets["source_path"])
+    overlay_path = Path(assets["overlay_path"]) if assets.get("overlay_path") else None
+    bl_viz_path = Path(assets["bl_viz_path"]) if assets.get("bl_viz_path") else None
+    preview_dir = Path(assets["reports_dir"]) / "_preview"
+
+    report_info = report_service.generate_report(
+        session_id=session_id,
+        user_name=_resolve_patient_name(session.get("patient_name")),
+        image_path=source_path,
+        overlay_path=overlay_path,
+        bl_viz_path=bl_viz_path,
+        effective_result=preview_snapshot,
+        output_dir=preview_dir,
+        language=session.get("language", "English"),
+    )
+    if not report_info.get("html_path"):
+        return jsonify({"success": False, "error": "Preview not ready"}), 404
+    return send_file(report_info["html_path"], mimetype="text/html")
 
 
 @web_report_api.route("/session/<session_id>/report/pdf", methods=["GET"])
@@ -572,7 +699,8 @@ def get_report_pdf(session_id: str):
     session = session_service.get_session(session_id)
     if session is None:
         return jsonify({"success": False, "error": "Invalid session"}), 404
-    report = session.get("report")
+    version = request.args.get("version", type=int)
+    report = session_service.get_report_version(session_id, version)
     if not report or not report.get("pdf_path"):
         return jsonify({"success": False, "error": "PDF not available"}), 404
     return send_file(report["pdf_path"], mimetype="application/pdf")

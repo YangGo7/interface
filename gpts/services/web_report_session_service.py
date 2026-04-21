@@ -33,6 +33,7 @@ class WebReportSessionService:
                 status TEXT NOT NULL,
                 error TEXT,
                 language TEXT NOT NULL DEFAULT 'English',
+                patient_name TEXT NOT NULL DEFAULT 'Patient',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 finalized_at TEXT,
@@ -41,6 +42,10 @@ class WebReportSessionService:
             )
             """
         )
+        cur.execute("PRAGMA table_info(web_report_sessions)")
+        session_columns = {row[1] for row in cur.fetchall()}
+        if "patient_name" not in session_columns:
+            cur.execute("ALTER TABLE web_report_sessions ADD COLUMN patient_name TEXT NOT NULL DEFAULT 'Patient'")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS web_report_assets (
@@ -91,18 +96,19 @@ class WebReportSessionService:
         conn.commit()
         conn.close()
 
-    def create_session(self, language: str = "English") -> str:
+    def create_session(self, language: str = "English", patient_name: str = "Patient") -> str:
         session_id = str(uuid.uuid4())
         now = utc_now()
+        normalized_patient_name = str(patient_name or "Patient").strip() or "Patient"
         conn = self._connect()
         cur = conn.cursor()
         cur.execute(
             """
             INSERT INTO web_report_sessions (
-                id, status, language, created_at, updated_at, is_finalized, current_report_version
-            ) VALUES (?, ?, ?, ?, ?, 0, 0)
+                id, status, language, patient_name, created_at, updated_at, is_finalized, current_report_version
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, 0)
             """,
-            (session_id, "waiting", language, now, now),
+            (session_id, "waiting", language, normalized_patient_name, now, now),
         )
         cur.execute(
             """
@@ -289,11 +295,10 @@ class WebReportSessionService:
         report_row = cur.execute(
             """
             SELECT * FROM web_report_report_versions
-            WHERE session_id = ?
-            ORDER BY version DESC
+            WHERE session_id = ? AND version = ?
             LIMIT 1
             """,
-            (session_id,),
+            (session_id, int(session_row["current_report_version"])),
         ).fetchone()
         conn.close()
 
@@ -302,6 +307,7 @@ class WebReportSessionService:
             "status": session_row["status"],
             "error": session_row["error"],
             "language": session_row["language"],
+            "patient_name": session_row["patient_name"],
             "created_at": session_row["created_at"],
             "updated_at": session_row["updated_at"],
             "finalized_at": session_row["finalized_at"],
@@ -322,6 +328,33 @@ class WebReportSessionService:
                 else None
             ),
         }
+
+    def get_report_version(self, session_id: str, version: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cur = conn.cursor()
+        if version is None:
+            row = cur.execute(
+                """
+                SELECT version, status, html_path, pdf_path, snapshot_json, created_at
+                FROM web_report_report_versions
+                WHERE session_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+        else:
+            row = cur.execute(
+                """
+                SELECT version, status, html_path, pdf_path, snapshot_json, created_at
+                FROM web_report_report_versions
+                WHERE session_id = ? AND version = ?
+                LIMIT 1
+                """,
+                (session_id, int(version)),
+            ).fetchone()
+        conn.close()
+        return dict(row) if row else None
 
     def list_report_versions(self, session_id: str) -> list[Dict[str, Any]]:
         conn = self._connect()

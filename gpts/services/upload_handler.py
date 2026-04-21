@@ -1,10 +1,11 @@
-import os
 import tempfile
 import base64
 from pathlib import Path
 from flask import current_app
 from werkzeug.utils import secure_filename
+import os
 from services.image_loader import load_image_any
+from services.file_validation import validate_upload_file
 
 
 class CustomUploadResult:
@@ -43,6 +44,14 @@ def parse_any_upload(request, save_dir: Path, enforce_filename: str = None) -> C
         user_name = request.args.get("user_name", "Patient")
         language = request.args.get("language", "English")
         
+        validation = validate_upload_file(Path(save_path), filename)
+        if not validation.ok:
+            try:
+                os.remove(save_path)
+            except Exception:
+                pass
+            return CustomUploadResult(False, validation.reason)
+
         _, is_volume = load_image_any(Path(save_path), return_meta=True)
         return CustomUploadResult(True, save_path=save_path, filename=filename, user_name=user_name, language=language, is_volume=is_volume)
 
@@ -62,6 +71,14 @@ def parse_any_upload(request, save_dir: Path, enforce_filename: str = None) -> C
                 user_name = data.get("user_name", "Patient")
                 language = data.get("language", "English")
                 
+                validation = validate_upload_file(Path(save_path), filename)
+                if not validation.ok:
+                    try:
+                        os.remove(save_path)
+                    except Exception:
+                        pass
+                    return CustomUploadResult(False, validation.reason)
+
                 _, is_volume = load_image_any(Path(save_path), return_meta=True)
                 return CustomUploadResult(True, save_path=save_path, filename=filename, user_name=user_name, language=language, is_volume=is_volume)
             except Exception as e:
@@ -83,6 +100,14 @@ def parse_any_upload(request, save_dir: Path, enforce_filename: str = None) -> C
         user_name = request.form.get("user_name", "Patient")
         language = request.form.get("language", "English")
         
+        validation = validate_upload_file(Path(save_path), filename)
+        if not validation.ok:
+            try:
+                os.remove(save_path)
+            except Exception:
+                pass
+            return CustomUploadResult(False, validation.reason)
+
         _, is_volume = load_image_any(Path(save_path), return_meta=True)
         return CustomUploadResult(True, save_path=save_path, filename=filename, user_name=user_name, language=language, is_volume=is_volume)
 

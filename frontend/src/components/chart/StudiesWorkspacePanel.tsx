@@ -14,6 +14,8 @@ type FlatStudyRow = {
   id: string;
   selected: boolean;
   primarySeriesId: string | null;
+  displayName: string;
+  searchText: string;
 };
 
 const PANEL_BACKGROUND = '#353535';
@@ -35,12 +37,23 @@ export function StudiesWorkspacePanel({
     () =>
       studies.map((study, index) => {
         const id = String(study.id || study.label || study.description || `study-${index + 1}`);
+        const displayName = String(study.label || study.description || study.id || `study-${index + 1}`);
         const selected = (study.series || []).some((series) => series.id === selectedSeriesId);
         return {
           index,
           id,
           selected,
           primarySeriesId: study.series?.[0]?.id || null,
+          displayName,
+          searchText: [
+            displayName,
+            study.description,
+            study.patientId,
+            ...(study.modalities || []),
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase(),
         } satisfies FlatStudyRow;
       }),
     [selectedSeriesId, studies]
@@ -49,7 +62,7 @@ export function StudiesWorkspacePanel({
   const filteredRows = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
     if (!query) return normalizedStudies;
-    return normalizedStudies.filter((row) => row.id.toLowerCase().includes(query));
+    return normalizedStudies.filter((row) => row.searchText.includes(query));
   }, [normalizedStudies, searchTerm]);
 
   if (!isVisible) return null;
@@ -104,7 +117,7 @@ export function StudiesWorkspacePanel({
             <span style={{ width: 3, height: 3, borderRadius: 999, background: TEXT_COLOR }} />
             <span style={{ width: 3, height: 3, borderRadius: 999, background: TEXT_COLOR }} />
           </span>
-          <span style={{ transform: 'translateY(-0.5px)' }}>Serch</span>
+          <span style={{ transform: 'translateY(-0.5px)' }}>Search</span>
         </div>
         <div
           style={{
@@ -261,7 +274,7 @@ export function StudiesWorkspacePanel({
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  {row.id}
+                  {row.displayName}
                 </span>
               </div>
             </button>

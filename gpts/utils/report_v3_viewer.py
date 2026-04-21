@@ -404,6 +404,27 @@ class ReportV3ViewerMixin:
         .treatments h4 { font-size: 1.1rem; font-weight: 700; margin-bottom: 12px; color: #FFFFFF; }
         .treatments ol { padding-left: 20px; color: #B7B7B7; }
         .treatments li { margin-bottom: 8px; }
+        .condition-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin: 16px 0 0;
+        }
+        .condition-check {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 40px;
+            padding: 10px 12px;
+            border: 1px solid #4C4C4C;
+            background: #373737;
+            color: #E2E8F0;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        .condition-check input {
+            accent-color: #00C0F3;
+        }
         
         .footer { 
             display: flex; 
@@ -511,9 +532,17 @@ class ReportV3ViewerMixin:
         if attached_captures:
             capture_cards_html = "".join(
                 f"""
-                <div style="padding:16px; border-radius:18px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.06);">
-                    <img src="{html_lib.escape(str(capture.get('dataUrl') or ''))}" alt="{html_lib.escape(str(capture.get('label') or 'Capture'))}" style="display:block; width:100%; max-height:220px; object-fit:contain; border-radius:12px; background:#000;" />
-                    <div style="margin-top:14px; font-size:0.9rem; color:#F1F5F9; font-weight:800;">{html_lib.escape(str(capture.get('createdAt') or capture.get('label') or 'Capture'))}</div>
+                <div style="padding:16px; border-radius:0; background:#2D2D2D; border:1px solid #4C4C4C;">
+                    <div style="border:1px solid #4C4C4C; background:#111111; padding:0; height:380px; overflow:hidden;">
+                        <img src="{html_lib.escape(str(capture.get('dataUrl') or ''))}" alt="{html_lib.escape(str(capture.get('label') or 'Capture'))}" style="display:block; width:100%; height:100%; object-fit:cover; object-position:center; background:#111111;" />
+                    </div>
+                    <div style="margin-top:14px; font-size:0.9rem; color:#F1F5F9; font-weight:800;">{html_lib.escape(str(capture.get('label') or capture.get('createdAt') or 'Capture'))}</div>
+                    <textarea
+                        data-capture-id="{html_lib.escape(str(capture.get('id') or ''))}"
+                        data-capture-note="true"
+                        placeholder="Memo"
+                        style="display:block; width:100%; min-height:120px; margin-top:10px; padding:12px; border:1px solid #4C4C4C; background:#E5E7EB; color:#111827; resize:vertical; font:inherit;"
+                    >{html_lib.escape(str(capture.get("note") or ""))}</textarea>
                 </div>
                 """
                 for capture in attached_captures
@@ -523,8 +552,8 @@ class ReportV3ViewerMixin:
                 attached_captures_html = f"""
                 <div class="divider"></div>
                 <div class="renew-section">
-                    <div class="renew-section-header"><span class="marker"></span><span>Attached Secondary Findings</span></div>
-                    <div class="renew-section-body" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px;">
+                    <div class="renew-section-header"><span class="marker"></span><span>Capture</span></div>
+                    <div class="renew-section-body" style="display:grid; grid-template-columns: 1fr; gap: 20px;">
                         {capture_cards_html}
                     </div>
                 </div>
@@ -545,6 +574,10 @@ class ReportV3ViewerMixin:
             body:not(.use-universal) .format-univ {{ display: none !important; }}
             </style>
             <script>
+            window.notifyParentEditor = function(action, toothLabel) {{
+                if (!window.parent || window.parent === window) return;
+                window.parent.postMessage({{ source: 'web-report-preview', action, toothLabel: String(toothLabel || '') }}, '*');
+            }};
             window.updateNotationButtons = function() {{
                 const isUniv = document.body.classList.contains('use-universal');
                 document.querySelectorAll('.odonto-notation-toggle').forEach(btn => {{
@@ -556,9 +589,115 @@ class ReportV3ViewerMixin:
                 document.body.classList.toggle('use-universal');
                 window.updateNotationButtons();
             }};
+            window.registerPreviewInteractions = function() {{
+                document.querySelectorAll('[data-tooth]').forEach(node => {{
+                    const toothLabel = node.getAttribute('data-tooth');
+                    if (!toothLabel) return;
+                    node.addEventListener('click', function() {{
+                        window.notifyParentEditor('select-tooth', toothLabel);
+                    }});
+                    node.addEventListener('contextmenu', function(event) {{
+                        event.preventDefault();
+                        window.notifyParentEditor('context-tooth', toothLabel);
+                    }});
+                }});
+                document.querySelectorAll('[data-tooth-toggle]').forEach(node => {{
+                    const toothLabel = node.getAttribute('data-tooth-toggle');
+                    if (!toothLabel) return;
+                    node.addEventListener('click', function(event) {{
+                        event.stopPropagation();
+                    }});
+                    node.addEventListener('change', function(event) {{
+                        const target = event.target;
+                        if (target && typeof target.checked === 'boolean') {{
+                            String(toothLabel)
+                                .split(',')
+                                .map(function(value) {{ return String(value || '').trim(); }})
+                                .filter(Boolean)
+                                .forEach(function(label) {{
+                                    window.parent.postMessage({{
+                                        source: 'web-report-preview',
+                                        action: 'toggle-tooth',
+                                        toothLabel: String(label),
+                                        checked: Boolean(target.checked),
+                                    }}, '*');
+                                }});
+                        }}
+                    }});
+                }});
+                document.querySelectorAll('[data-tooth-condition]').forEach(node => {{
+                    const toothLabel = node.getAttribute('data-tooth');
+                    const field = node.getAttribute('data-tooth-condition');
+                    if (!toothLabel || !field) return;
+                    node.addEventListener('click', function(event) {{
+                        event.stopPropagation();
+                    }});
+                    node.addEventListener('change', function(event) {{
+                        const target = event.target;
+                        if (target && typeof target.checked === 'boolean') {{
+                            window.parent.postMessage({{
+                                source: 'web-report-preview',
+                                action: 'toggle-condition',
+                                toothLabel: String(toothLabel),
+                                field: String(field),
+                                checked: Boolean(target.checked),
+                            }}, '*');
+                        }}
+                    }});
+                }});
+                document.querySelectorAll('[data-tooth-note]').forEach(node => {{
+                    const toothLabel = node.getAttribute('data-tooth');
+                    if (!toothLabel) return;
+                    node.addEventListener('click', function(event) {{
+                        event.stopPropagation();
+                    }});
+                    node.addEventListener('input', function(event) {{
+                        const target = event.target;
+                        if (target && typeof target.value === 'string') {{
+                            window.parent.postMessage({{
+                                source: 'web-report-preview',
+                                action: 'note-change',
+                                toothLabel: String(toothLabel),
+                                note: String(target.value || ''),
+                            }}, '*');
+                        }}
+                    }});
+                }});
+                document.querySelectorAll('[data-capture-note]').forEach(node => {{
+                    const captureId = node.getAttribute('data-capture-id');
+                    if (!captureId) return;
+                    node.addEventListener('click', function(event) {{
+                        event.stopPropagation();
+                    }});
+                    node.addEventListener('input', function(event) {{
+                        const target = event.target;
+                        if (target && typeof target.value === 'string' && window.parent && window.parent !== window) {{
+                            window.parent.postMessage({{
+                                source: 'web-report-preview',
+                                action: 'capture-note-change',
+                                captureId: String(captureId),
+                                note: String(target.value || ''),
+                            }}, '*');
+                        }}
+                    }});
+                }});
+                document.querySelectorAll('[data-tooth-capture-add]').forEach(node => {{
+                    const toothLabel = node.getAttribute('data-tooth-capture-add');
+                    if (!toothLabel) return;
+                    node.addEventListener('click', function(event) {{
+                        event.preventDefault();
+                        event.stopPropagation();
+                        window.parent.postMessage({{
+                            source: 'web-report-preview',
+                            action: 'open-capture',
+                            toothLabel: String(toothLabel),
+                        }}, '*');
+                    }});
+                }});
+            }};
             </script>
         </head>
-        <body onload="window.updateNotationButtons()">
+        <body onload="window.updateNotationButtons(); window.registerPreviewInteractions();">
             <div class="header">
                 <h1 style="color: #F1F5F9;">Dental AI Analysis Report</h1>
                 <p style="color: #9A9A9A;">Generated by Dental AI Assistant</p>
@@ -618,7 +757,6 @@ class ReportV3ViewerMixin:
             <!-- ODONTOGRAM_PLACEHOLDER -->
             
             {report_reference_html}
-            {attached_captures_html}
              
             <div class="divider"></div>
              
@@ -711,8 +849,8 @@ class ReportV3ViewerMixin:
                     
                     if icon_b64:
                         html_row += f'''
-                        <div class="odonto-cell" onclick="document.getElementById('tooth-{fdi_str}')?.scrollIntoView({{behavior:'smooth',block:'center'}})">
-                            <div class="odonto-tooth {status} {flip_class}">
+                        <div class="odonto-cell" data-tooth="{fdi_str}" onclick="document.getElementById('tooth-{fdi_str}')?.scrollIntoView({{behavior:'smooth',block:'center'}})">
+                            <div class="odonto-tooth {status} {flip_class}" data-tooth="{fdi_str}">
                                 <img src="data:image/png;base64,{icon_b64}" alt="Tooth {fdi_str}">
                             </div>
                             <span class="odonto-label {status} format-fdi">{fdi_str}</span>
@@ -851,6 +989,34 @@ class ReportV3ViewerMixin:
         if svg_hotspots:
             hotspots_html = '\n'.join(svg_hotspots)
             html = html.replace('<!-- Hotspots will be added dynamically -->', hotspots_html)
+
+        def _render_condition_checkbox(tooth_label, field, label, checked):
+            checked_attr = "checked" if checked else ""
+            return (
+                f'<label class="condition-check">'
+                f'<input type="checkbox" data-tooth="{tooth_label}" data-tooth-condition="{field}" {checked_attr} />'
+                f'<span>{label}</span>'
+                f'</label>'
+            )
+
+        def _render_condition_grid(tooth_label, conditions):
+            if not conditions:
+                return ""
+            return f'<div class="condition-grid">{"".join(conditions)}</div>'
+
+        def _render_note_editor(tooth_label, note_value):
+            escaped = html_lib.escape(str(note_value or ""))
+            return (
+                '<div style="margin-top:12px; padding:12px 14px; background:rgba(255, 255, 255, 0.03); border:1px solid rgba(255, 255, 255, 0.08); border-radius:10px;">'
+                '<div style="font-size:0.75rem; font-weight:800; letter-spacing:0.1em; text-transform:uppercase; color:#94A3B8; margin-bottom:8px;">Note</div>'
+                f'<textarea data-tooth="{tooth_label}" data-tooth-note="true" placeholder="Write note for this tooth" '
+                'style="display:block; width:100%; min-height:88px; resize:vertical; border:1px solid #4C4C4C; background:#353535; color:#E2E8F0; border-radius:8px; padding:10px 12px; font:inherit;">'
+                f'{escaped}</textarea>'
+                '</div>'
+            )
+
+        def _render_capture_space(tooth_label, capture_items):
+            return ""
 
         # Problematic Teeth Generation
         # Logic: PBL > 3mm OR Caries OR Periapical OR Bone Loss
@@ -1033,11 +1199,20 @@ class ReportV3ViewerMixin:
                     elif gap_dist_mm > 0:
                         space_note = f'&#x26A0;&#xFE0F; Total space <strong>{gap_dist_mm:.1f}mm</strong> — limited; orthodontic evaluation or narrow fixtures recommended.'
 
+                    include_checked = "checked" if all(bool((mt or {}).get("included", True)) for mt in group_mts) else ""
+                    group_toggle_value = ",".join(str(label) for label in group_labels)
+
                     html += f"""
-                    <div class="tooth-card missing" id="tooth-{lbl}">
+                    <div class="tooth-card missing" id="tooth-{lbl}" data-tooth="{lbl}">
                         {crop_html_grp}
                     <div class="tooth-details">
-                        <h3>Missing Teeth: {all_labels_str}</h3>
+                        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:14px;">
+                            <h3 style="margin:0;">Missing Teeth: {all_labels_str}</h3>
+                            <label style="display:flex; align-items:center; gap:8px; color:#CBD5E1; font-size:0.8rem; white-space:nowrap;">
+                                <input type="checkbox" data-tooth-toggle="{group_toggle_value}" {include_checked} />
+                                Include
+                            </label>
+                        </div>
                         <br/>
                         <div style="margin-bottom:10px; font-size:1rem; font-weight:700; color:#f8fafc;">Analysis:</div>
                         <p>Consecutive missing teeth ({len(group_labels)} teeth) are detected between {'Tooth #' + str(left_t.get('tooth_label','?')) if left_t else 'the edge'} and {'Tooth #' + str(right_t.get('tooth_label','?')) if right_t else 'the edge'}.</p>
@@ -1397,33 +1572,37 @@ class ReportV3ViewerMixin:
                     elif gap < 6.0 and not llm_space:
                         llm_space = f' Mesiodistal space <strong>{gap:.1f}mm</strong> — narrow fixture may be required.'
 
-                missing_note = html_lib.escape(str(mt.get('note') or '').strip()) if isinstance(mt, dict) else ""
-                missing_note_html = (
-                    f"""
-                    <div style='margin-top:12px; padding:12px 14px; background:rgba(34, 211, 238, 0.05); border:1px solid rgba(34, 211, 238, 0.2); border-radius:10px;'>
-                        <div style='font-size:0.74rem; font-weight:800; letter-spacing:0.1em; text-transform:uppercase; color:#22D3EE; margin-bottom:6px;'>Note</div>
-                        <div style='font-size:0.95rem; color:#E2E8F0; white-space:pre-wrap;'>{missing_note}</div>
-                    </div>
-                    """
-                    if missing_note
-                    else ""
-                )
+                missing_note = str(mt.get('note') or '').strip() if isinstance(mt, dict) else ""
                 missing_analysis = llm_obs or mt.get('missing_reason', 'No tooth structure detected in the expected position; adjacent teeth present with edentulous gap.')
                 if llm_space:
                     missing_analysis += f" {llm_space}"
 
+                include_checked = "checked" if mt.get("included", True) else ""
+                capture_items = [
+                    capture
+                    for capture in (attached_captures or [])
+                    if str(capture.get("toothId") or "") == str(lbl)
+                ]
+
                 html += f"""
-                <div class="tooth-card missing" id="tooth-{lbl}">
+                <div class="tooth-card missing" id="tooth-{lbl}" data-tooth="{lbl}">
                         {crop_html}
                     <div class="tooth-details">
-                        <h3>
-                            <span class="format-fdi">Tooth #{lbl} <span style="font-size:0.8rem;color:#6b7280;font-weight:normal;">(Univ #{self.get_universal_label(str(lbl))})</span></span>
-                            <span class="format-univ" style="display:none">Tooth #{self.get_universal_label(str(lbl))} <span style="font-size:0.8rem;color:#6b7280;font-weight:normal;">(FDI #{lbl})</span></span>
-                        </h3>
+                        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:14px;">
+                            <h3 style="margin:0;">
+                                <span class="format-fdi">Tooth #{lbl} <span style="font-size:0.8rem;color:#6b7280;font-weight:normal;">(Univ #{self.get_universal_label(str(lbl))})</span></span>
+                                <span class="format-univ" style="display:none">Tooth #{self.get_universal_label(str(lbl))} <span style="font-size:0.8rem;color:#6b7280;font-weight:normal;">(FDI #{lbl})</span></span>
+                            </h3>
+                            <label style="display:flex; align-items:center; gap:8px; color:#CBD5E1; font-size:0.8rem; white-space:nowrap;">
+                                <input type="checkbox" data-tooth-toggle="{lbl}" {include_checked} />
+                                Include
+                            </label>
+                        </div>
                         <br />
                         <div style="margin-bottom:10px; font-size:1rem; font-weight:700; color:#f8fafc;">Analysis:</div>
                         <p>{missing_analysis}</p>
-                        {missing_note_html}
+                        {_render_note_editor(lbl, missing_note)}
+                        {_render_capture_space(lbl, capture_items)}
                     </div>
                 </div>
                 """
@@ -1857,28 +2036,30 @@ class ReportV3ViewerMixin:
                  # Use Clinical Title
                  finding_title = title
                  
-                 tooth_note_html = (
-                     f"""
-                     <div style='margin-top:12px; padding:12px 14px; background:rgba(255, 255, 255, 0.03); border:1px solid rgba(255, 255, 255, 0.08); border-radius:10px;'>
-                         <div style='font-size:0.75rem; font-weight:800; letter-spacing:0.1em; text-transform:uppercase; color:#94A3B8; margin-bottom:6px;'>Note</div>
-                         <div style='font-size:0.95rem; color:#E2E8F0; white-space:pre-wrap;'>{html_lib.escape(tooth_note)}</div>
-                     </div>
-                     """
-                     if tooth_note
-                     else ""
-                 )
-
+                 include_checked = "checked" if item.get("included", True) else ""
+                 capture_items = [
+                     capture
+                     for capture in (attached_captures or [])
+                     if str(capture.get("toothId") or "") == str(tooth_label)
+                 ]
                  html += f"""
-                 <div class="tooth-card {card_class}" id="tooth-{tooth_label}">
+                 <div class="tooth-card {card_class}" id="tooth-{tooth_label}" data-tooth="{tooth_label}">
                      <img class="crop-img" src="data:image/jpeg;base64,{crop_b64}">
                      <div class="tooth-details">
-                         <h3>
-                              <span class="format-fdi">Tooth #{tooth_label} <span style="font-size:0.8rem;color:#94A3B8;font-weight:normal;">(Univ #{self.get_universal_label(str(tooth_label))})</span></span>
-                              <span class="format-univ" style="display:none">Tooth #{self.get_universal_label(str(tooth_label))} <span style="font-size:0.8rem;color:#94A3B8;font-weight:normal;">(FDI #{tooth_label})</span></span>
-                          </h3>
+                         <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:14px;">
+                             <h3 style="margin:0;">
+                                  <span class="format-fdi">Tooth #{tooth_label} <span style="font-size:0.8rem;color:#94A3B8;font-weight:normal;">(Univ #{self.get_universal_label(str(tooth_label))})</span></span>
+                                  <span class="format-univ" style="display:none">Tooth #{self.get_universal_label(str(tooth_label))} <span style="font-size:0.8rem;color:#94A3B8;font-weight:normal;">(FDI #{tooth_label})</span></span>
+                              </h3>
+                              <label style="display:flex; align-items:center; gap:8px; color:#CBD5E1; font-size:0.8rem; white-space:nowrap;">
+                                  <input type="checkbox" data-tooth-toggle="{tooth_label}" {include_checked} />
+                                  Include
+                              </label>
+                          </div>
                          <div style="margin:12px 0 8px; font-size:1.1rem; font-weight:800; color:#FFFFFF;">Clinical Analysis:</div>
                          <div style="color:#E2E8F0; line-height:1.6; font-size:0.98rem;">{' '.join(desc).replace('<strong>Analysis:</strong><br>', '', 1)}</div>
-                         {tooth_note_html}
+                         {_render_note_editor(tooth_label, tooth_note)}
+                         {_render_capture_space(tooth_label, capture_items)}
                          {treatment_html}
                          {caution_msg}
                      </div>
@@ -1896,6 +2077,7 @@ class ReportV3ViewerMixin:
             """
 
         html += f"""
+                {attached_captures_html}
                 </div>
             </div>
             <div class="footer">

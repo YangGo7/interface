@@ -3,12 +3,109 @@ import os
 import uuid
 from pathlib import Path
 from services.image_loader import extract_dicom_meta
+from services.file_validation import validate_browser_dicom_meta, validate_browser_raster
 
 dicom_browser_api = Blueprint('dicom_browser_api', __name__)
 
 # [CONFIG] Default DICOM Root Path
 DICOM_ROOT = Path("C:/interface/case")
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
+
+
+def _normalize_relative_path(value: str) -> str:
+    return str(value or "").replace("\\", "/").strip("/")
+
+
+def _parent_directory(value: str) -> str:
+    normalized = _normalize_relative_path(value)
+    if "/" not in normalized:
+        return ""
+    return normalized.rsplit("/", 1)[0]
+
+
+def _shared_prefix_score(left: str, right: str) -> int:
+    left_parts = [part for part in _normalize_relative_path(left).split("/") if part]
+    right_parts = [part for part in _normalize_relative_path(right).split("/") if part]
+    score = 0
+    for left_part, right_part in zip(left_parts, right_parts):
+        if left_part != right_part:
+            break
+        score += 1
+    return score
+
+
+def _set_dicom_root(next_root: str):
+    global DICOM_ROOT
+    raw = (next_root or "").strip()
+    if not raw:
+        raise ValueError("Root path is required.")
+    DICOM_ROOT = Path(os.path.abspath(os.path.expanduser(raw)))
+    return DICOM_ROOT
+
+
+@dicom_browser_api.route('/root-path', methods=['GET'])
+def get_root_path():
+    return jsonify({
+        "success": True,
+        "root_path": str(DICOM_ROOT),
+        "root_exists": DICOM_ROOT.exists(),
+    })
+
+
+@dicom_browser_api.route('/root-path', methods=['POST'])
+def update_root_path():
+    payload = request.get_json(silent=True) or {}
+    try:
+        next_root = _set_dicom_root(payload.get("root_path", ""))
+    except ValueError as exc:
+        return jsonify({
+            "success": False,
+            "message": str(exc),
+            "root_path": str(DICOM_ROOT),
+            "root_exists": DICOM_ROOT.exists(),
+        }), 400
+
+    return jsonify({
+        "success": True,
+        "message": "Root path updated.",
+        "root_path": str(next_root),
+        "root_exists": next_root.exists(),
+    })
+
+
+@dicom_browser_api.route('/root-path/pick', methods=['POST'])
+def pick_root_path():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askdirectory(initialdir=str(DICOM_ROOT), mustexist=False)
+        root.destroy()
+    except Exception as exc:
+        return jsonify({
+            "success": False,
+            "message": f"Failed to open folder dialog: {exc}",
+            "root_path": str(DICOM_ROOT),
+            "root_exists": DICOM_ROOT.exists(),
+        }), 500
+
+    if not selected:
+        return jsonify({
+            "success": False,
+            "message": "Folder selection was cancelled.",
+            "root_path": str(DICOM_ROOT),
+            "root_exists": DICOM_ROOT.exists(),
+        }), 400
+
+    next_root = Path(os.path.abspath(os.path.expanduser(selected)))
+    return jsonify({
+        "success": True,
+        "root_path": str(next_root),
+        "root_exists": next_root.exists(),
+    })
 
 @dicom_browser_api.route('/studies', methods=['GET'])
 def list_studies():
@@ -19,6 +116,7 @@ def list_studies():
     root_exists = DICOM_ROOT.exists()
     study_map = {} # study_uid -> study_data
     images = []
+    rejected_files = []
     
     if root_exists:
         # 1. Exhaustive recursive scan for all DICOM files
@@ -30,6 +128,13 @@ def list_studies():
         for dcm_path in all_dcm_files:
             try:
                 meta = extract_dicom_meta(dcm_path)
+                validation = validate_browser_dicom_meta(dcm_path, str(meta.get("Modality", "") or ""))
+                if not validation.ok:
+                    rejected_files.append({
+                        "path": dcm_path.relative_to(DICOM_ROOT).as_posix(),
+                        "reason": validation.reason,
+                    })
+                    continue
                 study_uid = meta.get("StudyInstanceUID")
                 if not study_uid:
                     # Fallback unique key
@@ -49,7 +154,8 @@ def list_studies():
                         "modalities": set(),
                         "totalFiles": 0,
                         "previewUrl": f"/api/dicom-server/preview?path={rel_p}",
-                        "files": []
+                        "files": [],
+                        "directories": set(),
                     }
                 
                 entry = study_map[study_uid]
@@ -61,6 +167,7 @@ def list_studies():
                     "relativePath": dcm_path.relative_to(DICOM_ROOT).as_posix(),
                     "downloadUrl": f"/api/dicom-server/download?path={dcm_path.relative_to(DICOM_ROOT).as_posix()}"
                 })
+                entry["directories"].add(_parent_directory(dcm_path.relative_to(DICOM_ROOT).as_posix()))
                 
             except Exception as e:
                 print(f"Error parsing {dcm_path}: {e}")
@@ -110,7 +217,29 @@ def list_studies():
         for img_path in DICOM_ROOT.rglob("*"):
             if not img_path.is_file() or not img_path.name.lower().endswith(IMAGE_EXTENSIONS):
                 continue
+            validation = validate_browser_raster(img_path)
+            if not validation.ok:
+                rejected_files.append({
+                    "path": img_path.relative_to(DICOM_ROOT).as_posix(),
+                    "reason": validation.reason,
+                })
+                continue
             rel_path = img_path.relative_to(DICOM_ROOT).as_posix()
+            image_dir = _parent_directory(rel_path)
+            best_match = None
+            best_score = -1
+
+            for data in study_map.values():
+                for directory in data.get("directories", set()):
+                    score = _shared_prefix_score(image_dir, directory)
+                    if image_dir and directory and (image_dir.startswith(directory) or directory.startswith(image_dir)):
+                        score += 100
+                    if img_path.parent.name and directory.lower().find(img_path.parent.name.lower()) >= 0:
+                        score += 10
+                    if score > best_score:
+                        best_score = score
+                        best_match = data
+
             images.append({
                 "name": img_path.name,
                 "relativePath": rel_path,
@@ -120,6 +249,14 @@ def list_studies():
                 "height": 0,
                 "format": img_path.suffix.lstrip(".").upper(),
                 "size": img_path.stat().st_size,
+                "linkedStudyId": best_match["id"] if best_match and best_score > 0 else None,
+                "patientId": best_match.get("patientId", "") if best_match and best_score > 0 else "",
+                "patientName": best_match.get("patientName", "") if best_match and best_score > 0 else "",
+                "patientAge": best_match.get("patientAge", "") if best_match and best_score > 0 else "",
+                "patientSex": best_match.get("patientSex", "") if best_match and best_score > 0 else "",
+                "studyDate": best_match.get("studyDate", "") if best_match and best_score > 0 else "",
+                "modalities": list(best_match.get("modalities", [])) if best_match and best_score > 0 else [],
+                "description": best_match.get("description", "") if best_match and best_score > 0 else "",
             })
 
         return jsonify({
@@ -128,6 +265,7 @@ def list_studies():
             "root_exists": root_exists,
             "studies": formatted_studies,
             "images": images,
+            "rejected_files": rejected_files,
         })
 
     return jsonify({
@@ -137,6 +275,7 @@ def list_studies():
         "root_exists": False,
         "studies": [],
         "images": [],
+        "rejected_files": [],
     })
 
 @dicom_browser_api.route('/preview', methods=['GET'])

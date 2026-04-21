@@ -131,7 +131,7 @@ Copy-Item -Path (Join-Path $RepoRoot "docs\BUILD_OTHER_PC.md") -Destination (Joi
 $releaseEnv = @"
 FLASK_ENV=production
 SECRET_KEY=change-me
-PANO_DEVICE=cpu
+PANO_DEVICE=cuda
 # GEMINI_API_KEY=
 "@
 Set-Content -Path (Join-Path $PackageDir "gpts\.env") -Value $releaseEnv -Encoding ASCII

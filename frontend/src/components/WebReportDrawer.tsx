@@ -175,6 +175,49 @@ export function WebReportDrawer({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [dragPosition, setDragPosition] = useState<{ left: number; top: number } | null>(null);
+  const dragStateRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
+  const isDock = layout === 'dock';
+
+  useEffect(() => {
+    if (!open) {
+      dragStateRef.current = null;
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const dragState = dragStateRef.current;
+      const root = rootRef.current;
+      if (!dragState || !root || !isDock) return;
+
+      const frameRect =
+        positionMode === 'absolute'
+          ? root.parentElement?.getBoundingClientRect() ?? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+          : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+      const maxLeft = Math.max(0, frameRect.width - root.offsetWidth);
+      const maxTop = Math.max(0, frameRect.height - root.offsetHeight);
+      const nextLeft = Math.min(Math.max(0, event.clientX - frameRect.left - dragState.offsetX), maxLeft);
+      const nextTop = Math.min(Math.max(0, event.clientY - frameRect.top - dragState.offsetY), maxTop);
+      setDragPosition({ left: nextLeft, top: nextTop });
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      if (dragStateRef.current?.pointerId === event.pointerId) {
+        dragStateRef.current = null;
+      }
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
+    };
+  }, [isDock, positionMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -631,7 +674,6 @@ export function WebReportDrawer({
   const hasPdf = Boolean(session?.report?.pdf_path);
   const pdfUrl = `/api/web_report/session/${sessionId}/report/pdf`;
   const statusLabel = session?.is_finalized ? 'Final' : 'Draft';
-  const isDock = layout === 'dock';
   const dockBodyShellStyle = isDock
     ? { margin: '0 6px 6px', background: '#2B2B2B', border: '1px solid #3A3A3A', borderTop: 'none' }
     : undefined;
@@ -657,10 +699,10 @@ export function WebReportDrawer({
   const rootStyle = isDock
       ? {
         position: positionMode,
-        right: 24,
-        bottom: 112,
-        top: 'auto',
-        left: 'auto',
+        right: dragPosition ? 'auto' : isDock ? 120 : 24,
+        bottom: dragPosition ? 'auto' : isDock ? 24 : 112,
+        top: dragPosition ? dragPosition.top : 'auto',
+        left: dragPosition ? dragPosition.left : 'auto',
         zIndex: positionMode === 'absolute' ? 40 : 2147482900,
         width: 420,
         maxWidth: positionMode === 'absolute' ? 'calc(100% - 24px)' : 'calc(100vw - 2rem)',
@@ -685,7 +727,7 @@ export function WebReportDrawer({
 
 
   return (
-    <div className={`${rootClassName} ${isInactive ? 'opacity-40 pointer-events-none' : ''}`} style={rootStyle}>
+    <div ref={rootRef} className={`${rootClassName} ${isInactive ? 'opacity-40 pointer-events-none' : ''}`} style={rootStyle}>
       {!isDock && (
         <>
           <div className={`pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2 ${isDock ? 'right-14 md:left-auto md:translate-x-0' : 'md:left-auto md:right-14 md:translate-x-0'}`}>
@@ -698,6 +740,17 @@ export function WebReportDrawer({
       )}
       {isDock && (
         <div
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            const root = rootRef.current;
+            if (!root) return;
+            const rect = root.getBoundingClientRect();
+            dragStateRef.current = {
+              pointerId: event.pointerId,
+              offsetX: event.clientX - rect.left,
+              offsetY: event.clientY - rect.top,
+            };
+          }}
           style={{
             position: 'absolute',
             inset: '0 0 auto 0',
@@ -705,6 +758,8 @@ export function WebReportDrawer({
             background: '#4A4F55',
             borderBottom: '1px solid #5A5A5A',
             zIndex: 2,
+            cursor: 'grab',
+            touchAction: 'none',
           }}
         >
           <div
@@ -724,6 +779,9 @@ export function WebReportDrawer({
       <button
         type="button"
         onClick={onClose}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+        }}
         className={isDock ? 'absolute right-6 top-6 inline-flex items-center justify-center border text-white' : 'absolute right-5 top-5 inline-flex h-8 w-auto shrink-0 items-center justify-center rounded-full border-2 border-white/90 bg-cyan-400 px-3 py-1.5 text-[13px] font-semibold leading-none text-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.22)] hover:bg-cyan-300'}
         style={{
           position: 'absolute',

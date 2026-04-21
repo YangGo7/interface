@@ -71,6 +71,21 @@ export type ServerFolderImage = {
   height: number;
   format: string;
   size?: number;
+  linkedStudyId?: string | null;
+  patientId?: string;
+  patientName?: string;
+  patientAge?: string;
+  patientSex?: string;
+  studyDate?: string;
+  modalities?: string[];
+  description?: string;
+};
+
+export type ServerFolderRootPathResponse = {
+  success?: boolean;
+  root_path?: string;
+  root_exists?: boolean;
+  message?: string;
 };
 
 export function resolveServerAssetUrl(path: string) {
@@ -115,6 +130,45 @@ export async function fetchServerFolderIndex() {
 
   if (!response.ok || !data.success) {
     throw new Error(data.message || 'Failed to load DICOM server studies.');
+  }
+
+  return data;
+}
+
+export async function fetchServerFolderRootPath() {
+  const response = await fetchApi('/api/dicom-server/root-path');
+  const data = await readJsonOrThrow<ServerFolderRootPathResponse>(response);
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || 'Failed to load DICOM server root path.');
+  }
+
+  return data;
+}
+
+export async function updateServerFolderRootPath(rootPath: string) {
+  const response = await fetchApi('/api/dicom-server/root-path', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ root_path: rootPath }),
+  });
+  const data = await readJsonOrThrow<ServerFolderRootPathResponse>(response);
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || 'Failed to update DICOM server root path.');
+  }
+
+  return data;
+}
+
+export async function pickServerFolderRootPath() {
+  const response = await fetchApi('/api/dicom-server/root-path/pick', {
+    method: 'POST',
+  });
+  const data = await readJsonOrThrow<ServerFolderRootPathResponse>(response);
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || 'Failed to pick DICOM server root path.');
   }
 
   return data;

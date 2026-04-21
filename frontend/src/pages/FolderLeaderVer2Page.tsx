@@ -479,6 +479,8 @@ export default function FolderLeaderVer2Page() {
           originalFileName: image.name,
           originalIsDicom: false,
           folderSource: 'server-image',
+          imageRelativePath: image.relativePath,
+          folderSelectedSeriesId: `server-image:${image.relativePath}`,
           userName: image.patientName || buildImagePatientName(image.name) || 'Patient',
           linkedStudyId: image.linkedStudy?.id || null,
           linkedSeriesId: image.linkedSeriesId,

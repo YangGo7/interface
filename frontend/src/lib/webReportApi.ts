@@ -5,10 +5,12 @@ export type WebReportSessionResponse = {
     status: string;
     error?: string | null;
     language: string;
+    patient_name?: string;
     created_at: string;
     updated_at: string;
     finalized_at?: string | null;
     is_finalized: boolean;
+    current_report_version?: number;
     assets: Record<string, string | null>;
     ai_result?: any;
     doctor_overrides?: any;
@@ -18,12 +20,21 @@ export type WebReportSessionResponse = {
       status?: string;
       html_path?: string | null;
       pdf_path?: string | null;
+      created_at?: string | null;
       page_url?: string | null;
       html_url?: string | null;
       pdf_url?: string | null;
     } | null;
   };
   error?: string;
+};
+
+export type WebReportVersionSummary = {
+  version: number;
+  status: string;
+  html_path?: string | null;
+  pdf_path?: string | null;
+  created_at?: string | null;
 };
 
 const resolveDirectApiBase = () => {
@@ -85,11 +96,11 @@ async function fetchWebReportApi(input: string, init?: RequestInit) {
   return response;
 }
 
-export async function createWebReportSession(language: string) {
+export async function createWebReportSession(language: string, patientName?: string) {
   const response = await fetchWebReportApi('/api/web_report/session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ language }),
+    body: JSON.stringify({ language, patient_name: patientName }),
   });
   return readJson<{ success: boolean; session_id: string }>(response);
 }
@@ -109,6 +120,7 @@ export async function createWebReportFromChart(payload: {
   source_url?: string | null;
   overlay_url?: string | null;
   language?: string;
+  patient_name?: string;
 }) {
   const response = await fetchWebReportApi('/api/web_report/from-chart', {
     method: 'POST',
@@ -121,6 +133,11 @@ export async function createWebReportFromChart(payload: {
 export async function fetchWebReportSession(sessionId: string) {
   const response = await fetchWebReportApi(`/api/web_report/session/${sessionId}`);
   return readJson<WebReportSessionResponse>(response);
+}
+
+export async function listWebReportVersions(sessionId: string) {
+  const response = await fetchWebReportApi(`/api/web_report/session/${sessionId}/report/versions`);
+  return readJson<{ success: boolean; versions: WebReportVersionSummary[] }>(response);
 }
 
 export async function patchWebReportOverrides(
@@ -152,6 +169,15 @@ export async function finalizeWebReport(sessionId: string) {
     method: 'POST',
   });
   return readJson<{ success: boolean; version: number; report_url: string; pdf_url: string }>(response);
+}
+
+export async function rollbackWebReportVersion(sessionId: string, version: number) {
+  const response = await fetchWebReportApi(`/api/web_report/session/${sessionId}/report/rollback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
+  });
+  return readJson<{ success: boolean; doctor_overrides: any; effective_result: any; restored_version: number }>(response);
 }
 
 export async function transcribeWebReportDictation(

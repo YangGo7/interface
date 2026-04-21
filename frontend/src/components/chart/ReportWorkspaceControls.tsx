@@ -105,13 +105,39 @@ export function ReportWorkspaceControls({
             left: reportErrorLeft,
             top: reportErrorTop,
             position: 'absolute',
-            color: '#FFB4B4',
-            fontSize: reportErrorFontSize,
-            fontWeight: 700,
-            zIndex: 20,
+            zIndex: 95,
+            maxWidth: 'min(420px, calc(100% - 32px))',
+            padding: '10px 12px',
+            borderRadius: '12px',
+            border: '1px solid rgba(255, 104, 104, 0.42)',
+            background: 'rgba(37, 10, 14, 0.88)',
+            boxShadow: '0 14px 30px rgba(0, 0, 0, 0.35)',
+            backdropFilter: 'blur(10px)',
+            WebkitBackdropFilter: 'blur(10px)',
           }}
         >
-          {reportError}
+          <div
+            style={{
+              color: '#FF8E8E',
+              fontSize: '10px',
+              fontWeight: 800,
+              letterSpacing: '0.16em',
+              textTransform: 'uppercase',
+            }}
+          >
+            Viewer HUD
+          </div>
+          <div
+            style={{
+              marginTop: '4px',
+              color: '#FFE0E0',
+              fontSize: reportErrorFontSize,
+              fontWeight: 700,
+              lineHeight: 1.4,
+            }}
+          >
+            {reportError}
+          </div>
         </div>
       )}
 

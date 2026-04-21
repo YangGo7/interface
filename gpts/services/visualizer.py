@@ -115,6 +115,51 @@ class PanoVisualizer:
         weight_accum[y1:y2, x1:x2] += gaussian
         color_accum[y1:y2, x1:x2] += gaussian[..., None] * np.array(color, dtype=np.float32)
 
+    def _add_focus_blob(
+        self,
+        color_accum: np.ndarray,
+        weight_accum: np.ndarray,
+        center: Tuple[float, float],
+        radius: int,
+        strength: float,
+        color: Tuple[int, int, int],
+        sigma_scale: float = 0.26,
+        percentile: float = 97.5,
+        post_blur_sigma: float = 4.5,
+    ):
+        h, w = weight_accum.shape
+        radius = max(14, int(radius))
+        cx, cy = int(center[0]), int(center[1])
+        x1 = max(0, cx - radius)
+        x2 = min(w, cx + radius + 1)
+        y1 = max(0, cy - radius)
+        y2 = min(h, cy + radius + 1)
+        if x1 >= x2 or y1 >= y2:
+            return None
+
+        yy, xx = np.mgrid[y1:y2, x1:x2]
+        sigma = max(radius * float(sigma_scale), 3.5)
+        gaussian = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma * sigma)).astype(np.float32)
+        if gaussian.max() <= 1e-8:
+            return None
+        gaussian /= gaussian.max()
+
+        active = gaussian[gaussian > 0]
+        threshold = float(np.percentile(active, percentile)) if active.size else 1.0
+        focused = np.clip((gaussian - threshold) / max(1.0 - threshold, 1e-6), 0.0, 1.0)
+        if float(focused.max()) <= 1e-8:
+            focused = gaussian
+
+        kernel_size = max(3, int(math.ceil(post_blur_sigma * 4.0)) | 1)
+        focused = cv2.GaussianBlur(focused, (kernel_size, kernel_size), post_blur_sigma)
+        if focused.max() > 1e-8:
+            focused /= focused.max()
+
+        focused *= float(max(0.0, min(1.0, strength)))
+        weight_accum[y1:y2, x1:x2] += focused
+        color_accum[y1:y2, x1:x2] += focused[..., None] * np.array(color, dtype=np.float32)
+        return focused, x1, y1, x2, y2
+
     def _add_mask_glow(
         self,
         color_accum: np.ndarray,
@@ -137,6 +182,7 @@ class PanoVisualizer:
         caries_objects: List[dict],
         periapical_objects: List[dict],
         pbl_dict: Dict[str, dict],
+        nerve_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Build a pseudo-heatmap from findings and bone-loss severity.
@@ -145,9 +191,11 @@ class PanoVisualizer:
         h, w = base.shape[:2]
         color_accum = np.zeros((h, w, 3), dtype=np.float32)
         weight_accum = np.zeros((h, w), dtype=np.float32)
+        disease_weight_accum = np.zeros((h, w), dtype=np.float32)
 
         caries_color = (0, 140, 255)      # Orange-red in BGR
         periapical_color = (24, 24, 255)  # Red
+        nerve_color = (255, 0, 255)       # Magenta
 
         for item in caries_objects or []:
             box = item.get("box") or []
@@ -156,10 +204,23 @@ class PanoVisualizer:
             x1, y1, x2, y2 = [float(v) for v in box]
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
-            radius = int(max(x2 - x1, y2 - y1) * 0.95)
+            radius = int(max(x2 - x1, y2 - y1) * 0.85)
             conf = float(item.get("confidence", item.get("conf", 0.55)) or 0.55)
-            strength = 0.25 + min(max(conf, 0.0), 1.0) * 0.55
-            self._add_blob(color_accum, weight_accum, (cx, cy), radius, strength, caries_color)
+            strength = 0.28 + min(max(conf, 0.0), 1.0) * 0.58
+            focus_patch = self._add_focus_blob(
+                color_accum,
+                weight_accum,
+                (cx, cy),
+                radius,
+                strength,
+                caries_color,
+                sigma_scale=0.22,
+                percentile=96.8,
+                post_blur_sigma=3.8,
+            )
+            if focus_patch is not None:
+                focused, fx1, fy1, fx2, fy2 = focus_patch
+                disease_weight_accum[fy1:fy2, fx1:fx2] += focused * 1.35
 
         for item in periapical_objects or []:
             box = item.get("box") or []
@@ -168,10 +229,36 @@ class PanoVisualizer:
             x1, y1, x2, y2 = [float(v) for v in box]
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
-            radius = int(max(x2 - x1, y2 - y1) * 1.2)
+            radius = int(max(x2 - x1, y2 - y1) * 1.08)
             conf = float(item.get("confidence", item.get("conf", 0.6)) or 0.6)
-            strength = 0.32 + min(max(conf, 0.0), 1.0) * 0.58
-            self._add_blob(color_accum, weight_accum, (cx, cy), radius, strength, periapical_color)
+            strength = 0.34 + min(max(conf, 0.0), 1.0) * 0.62
+            focus_patch = self._add_focus_blob(
+                color_accum,
+                weight_accum,
+                (cx, cy),
+                radius,
+                strength,
+                periapical_color,
+                sigma_scale=0.25,
+                percentile=96.0,
+                post_blur_sigma=4.2,
+            )
+            if focus_patch is not None:
+                focused, fx1, fy1, fx2, fy2 = focus_patch
+                disease_weight_accum[fy1:fy2, fx1:fx2] += focused * 1.6
+
+        # Nerve is rendered as a mask-based heat region, not a probabilistic output.
+        # We soften the binary canal mask so the saved heatmap asset carries the nerve
+        # signal directly instead of relying on a separate frontend-only glow layer.
+        if nerve_mask is not None and np.count_nonzero(nerve_mask) > 0:
+            self._add_mask_glow(
+                color_accum,
+                weight_accum,
+                nerve_mask,
+                strength=0.34,
+                color=nerve_color,
+                blur_size=35,
+            )
 
         for tooth in teeth_objects or []:
             tooth_label = str(tooth.get("tooth_label") or "")
@@ -206,12 +293,15 @@ class PanoVisualizer:
             self._add_mask_glow(color_accum, weight_accum, mask, strength, color, blur_size=41)
 
         weight_accum = np.clip(weight_accum, 0.0, 1.0)
+        disease_weight_accum = np.clip(disease_weight_accum, 0.0, 1.0)
         mixed_color = np.zeros_like(color_accum)
         valid = weight_accum > 1e-6
         mixed_color[valid] = color_accum[valid] / weight_accum[valid, None]
-        mixed_color = np.clip(mixed_color * 1.08, 0, 255)
+        mixed_color = np.clip(mixed_color * 1.12, 0, 255)
 
-        alpha_map = np.clip(weight_accum * 0.58, 0.0, 0.72)[..., None]
+        alpha_base = weight_accum * 0.48
+        alpha_disease = disease_weight_accum * 0.62
+        alpha_map = np.clip(alpha_base + alpha_disease, 0.0, 0.82)[..., None]
         base_f = base.astype(np.float32)
         risk_overlay = base_f * (1.0 - alpha_map) + mixed_color * alpha_map
         return np.clip(risk_overlay, 0, 255).astype(np.uint8)

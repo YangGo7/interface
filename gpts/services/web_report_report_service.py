@@ -10,7 +10,7 @@ class WebReportReportService:
 
     def build_analysis_result(self, effective_result: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "teeth": effective_result.get("teeth", []),
+            "teeth": effective_result.get("report_teeth", effective_result.get("teeth", [])),
             "missing_teeth": effective_result.get("missing_teeth", []),
             "caries": effective_result.get("caries", []),
             "periapical": effective_result.get("periapical", []),

@@ -675,11 +675,15 @@ export function ChartPage(props?: ChartPageProps) {
     setReportStartState('creating');
     setReportError(null);
     try {
+      const patientName = [locationState.userName, result?.patient_name, dicomHudMetadata?.patientName]
+        .map((value) => String(value || '').trim())
+        .find((value) => value && value.toLowerCase() !== 'patient') || 'Patient';
       const response = await createWebReportFromChart({
         result,
         source_url: result?.image_url,
         overlay_url: result?.overlay_url,
         language: 'English',
+        patient_name: patientName,
       });
       setReportSessionId(response.session_id);
       setReportDrawerOpen(true);

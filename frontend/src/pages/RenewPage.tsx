@@ -12,7 +12,12 @@ import { ToothHoverHud } from '../components/chart/ToothHoverHud';
 import { WebReportDrawer } from '../components/WebReportDrawer';
 import { readStoredNumberingSystem, writeStoredNumberingSystem } from '../lib/appSettings';
 import { createWebReportFromChart, patchWebReportOverrides } from '../lib/webReportApi';
-import { fetchServerFolderIndex, materializeServerStudy } from '../lib/folderLeaderApi';
+import {
+  fetchServerFolderIndex,
+  materializeServerStudy,
+  resolveServerAssetUrl,
+  type ServerFolderImage,
+} from '../lib/folderLeaderApi';
 import type { FolderStudy } from '../features/upload/dicomFolderStudies';
 import { requestAsyncDetection } from '../features/upload/uploadApi';
 import { clearAllAnnotations, setActiveTool as setCornerstoneActiveTool } from '../viewer/cornerstone/tools';
@@ -73,6 +78,7 @@ const AI_CONFIDENCE_THRESHOLD = 0.35;
 const PANO_DEFAULT_BRIGHTNESS = 88;
 const PANO_DEFAULT_CONTRAST = 100;
 const heatmapOpacityPresets = [30, 50, 70];
+const SERVER_IMAGE_SERIES_PREFIX = 'server-image:';
 
 const loadImageFromUrl = (src: string) =>
   new Promise<HTMLImageElement>((resolve, reject) => {
@@ -137,8 +143,8 @@ const readJsonOrThrow = async <T,>(response: Response): Promise<T> => {
 };
 
 const reportButtonIcons = {
-  inactive: assetPath('메인-비활성화 아이콘/report버튼 (94 94).png'),
-  active: assetPath('메인-클릭/report버튼 (94 94).png'),
+  inactive: assetPath('botton/report.png'),
+  active: assetPath('botton/report click.png'),
 };
 
 const railIcons = {
@@ -220,8 +226,8 @@ const activeToolbarIcons = [
 ];
 
 const displayReportButtonIcons = {
-  inactive: assetPath('mian_deactive/report_deactive.png'),
-  active: assetPath('main_active/report_active (94 94).png'),
+  inactive: assetPath('botton/report.png'),
+  active: assetPath('botton/report click.png'),
 };
 
 const legendItems = [
@@ -988,6 +994,7 @@ export function RenewPage() {
     });
   });
   const [serverStudies, setServerStudies] = useState<any[]>([]);
+  const [serverImages, setServerImages] = useState<ServerFolderImage[]>([]);
   const [isReportActive, setIsReportActive] = useState(false);
   const [isChartVisible, setIsChartVisible] = useState(true);
   const [workspaceSection, setWorkspaceSection] = useState<'studies' | 'report' | 'none'>(
@@ -1190,6 +1197,10 @@ export function RenewPage() {
   const heatmapPanoUrl = getUrlWithCacheBuster(
     result?.heatmap_overlay_url || result?.overlay_url || result?.image_url || result?.preview_url || locationState.previewUrl || null
   );
+  const realHeatmapOverlayUrl =
+    viewMode === 'heatmap' && hasHeatmapAsset
+      ? getUrlWithCacheBuster(result?.heatmap_overlay_url || null)
+      : null;
   const panoUsesPreviewRaster = Boolean(
     originalIsDicom &&
     originalRasterUrl &&
@@ -1285,6 +1296,32 @@ export function RenewPage() {
     }
   };
 
+  const drawRasterOverlayOnContext = async (
+    context: CanvasRenderingContext2D,
+    imageUrl: string | null,
+    drawLeft: number,
+    drawTop: number,
+    drawWidth: number,
+    drawHeight: number,
+    opacity = 1,
+    useCenteredTransform = false
+  ) => {
+    if (!imageUrl || opacity <= 0) return;
+
+    const overlayImage = await loadImageFromUrl(imageUrl);
+    const previousAlpha = context.globalAlpha;
+    context.globalAlpha = previousAlpha * Math.min(1, Math.max(0, opacity));
+    try {
+      if (useCenteredTransform) {
+        context.drawImage(overlayImage, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      } else {
+        context.drawImage(overlayImage, drawLeft, drawTop, drawWidth, drawHeight);
+      }
+    } finally {
+      context.globalAlpha = previousAlpha;
+    }
+  };
+
   const buildPanoCaptureCanvas = async () => {
     const img = panoImageRef.current;
     if (!img || !panoDisplaySize.width || !panoDisplaySize.height) return null;
@@ -1309,12 +1346,31 @@ export function RenewPage() {
       context.translate(drawLeft + drawWidth / 2, drawTop + drawHeight / 2);
       context.scale(-1, 1);
       context.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+      await drawRasterOverlayOnContext(
+        context,
+        realHeatmapOverlayUrl,
+        drawLeft,
+        drawTop,
+        drawWidth,
+        drawHeight,
+        heatmapOpacity / 100,
+        true
+      );
       if (viewMode !== 'original') {
         await drawSvgOverlayOnContext(context, panoOverlaySvgRef.current, drawLeft, drawTop, drawWidth, drawHeight, true);
       }
       await drawSvgOverlayOnContext(context, panoMeasureSvgRef.current, drawLeft, drawTop, drawWidth, drawHeight, true);
     } else {
       context.drawImage(img, drawLeft, drawTop, drawWidth, drawHeight);
+      await drawRasterOverlayOnContext(
+        context,
+        realHeatmapOverlayUrl,
+        drawLeft,
+        drawTop,
+        drawWidth,
+        drawHeight,
+        heatmapOpacity / 100
+      );
       if (viewMode !== 'original') {
         await drawSvgOverlayOnContext(context, panoOverlaySvgRef.current, drawLeft, drawTop, drawWidth, drawHeight);
       }
@@ -1404,14 +1460,40 @@ export function RenewPage() {
       if (activeFingerprints.has(fingerprint)) return false;
       return true;
     });
-    const merged = [...activeFolderStudies, ...additional];
+    const imageStudies = serverImages.map((image) => ({
+      id: `${SERVER_IMAGE_SERIES_PREFIX}${image.relativePath}`,
+      label: image.name,
+      description: image.description || image.folderLabel || image.format || 'Image',
+      patientId: image.patientId || '',
+      studyDate: image.studyDate || '',
+      modalities: image.modalities?.length ? image.modalities : [image.format || 'IMG'],
+      totalFiles: 1,
+      totalSeries: 1,
+      series: [
+        {
+          id: `${SERVER_IMAGE_SERIES_PREFIX}${image.relativePath}`,
+          studyId: `${SERVER_IMAGE_SERIES_PREFIX}${image.relativePath}`,
+          label: image.name,
+          description: image.description || image.folderLabel || 'Image',
+          modality: image.format || 'IMG',
+          files: [],
+          orientation: 'Unknown' as const,
+          sliceCount: 1,
+          spacingLabel: '',
+          compression: 'None',
+          isCompressed: false,
+          volumeEligible: false,
+        },
+      ],
+    }));
+    const merged = [...activeFolderStudies, ...additional, ...imageStudies];
     const seen = new Set<string>();
     return merged.filter((study) => {
       if (seen.has(study.id)) return false;
       seen.add(study.id);
       return true;
     });
-  }, [activeFolderStudies, serverStudies]);
+  }, [activeFolderStudies, serverImages, serverStudies]);
 
   const toothGeometries = useMemo(() => {
     const toothList = Array.isArray(result?.teeth)
@@ -2014,6 +2096,15 @@ export function RenewPage() {
     setPendingTextAnnotation(null);
   };
 
+  const dismissPendingTextAnnotation = (event?: {
+    preventDefault?: () => void;
+    stopPropagation?: () => void;
+  }) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    cancelPendingTextAnnotation();
+  };
+
   useEffect(() => {
     if (!pendingTextAnnotation) {
       textAnnotationWasOpenRef.current = false;
@@ -2572,6 +2663,10 @@ export function RenewPage() {
 
     const items: any[] = [];
     const heatmapOpacityScale = heatmapOpacity / 100;
+    const shouldFocusSingleTooth = Boolean(activeTooth);
+    const shouldShowNerve =
+      !shouldFocusSingleTooth &&
+      (overlayPreset === 'all' || overlayPreset === 'nerve' || overlayPreset === 'nerve-lower-tooth');
     const cariesEntries = Object.entries(result.caries_by_tooth_best || result.analysis_result?.caries_by_tooth_best || {});
     const periapicalEntries = Object.entries(result.periapical_by_tooth_best || result.analysis_result?.periapical_by_tooth_best || {});
     const teeth = Array.isArray(result.teeth)
@@ -2589,78 +2684,122 @@ export function RenewPage() {
       return toothFdi === activeTooth;
     };
 
-    cariesEntries.forEach(([tooth, data]: any, idx) => {
-      const toothFdi = String(tooth);
-      if (!matchesFilter(toothFdi) || !matchesToothSelection(toothFdi)) return;
-      const box = data?.box;
-      if (!box || box.length < 4) return;
-      const conf = Number(data?.conf || 0.65);
-      const [x1, y1, x2, y2] = box;
-      const cx = (x1 + x2) / 2;
-      const cy = (y1 + y2) / 2;
-      const rx = Math.max((x2 - x1) * 0.85, 18);
-      const ry = Math.max((y2 - y1) * 0.85, 18);
-      const opacity = Math.min(0.5, 0.18 + conf * 0.22);
-      items.push(
-        <g
-          key={`renew-risk-caries-${tooth}-${idx}`}
-          filter="url(#renewRiskBlurStrong)"
-          style={{ mixBlendMode: 'normal', opacity: 0.62 * heatmapOpacityScale }}
-        >
-          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#renewCariesGlow)" fillOpacity={opacity} />
-        </g>
-      );
-    });
+    if (!hasHeatmapAsset) {
+      cariesEntries.forEach(([tooth, data]: any, idx) => {
+        const toothFdi = String(tooth);
+        if (!matchesFilter(toothFdi) || !matchesToothSelection(toothFdi)) return;
+        const box = data?.box;
+        if (!box || box.length < 4) return;
+        const conf = Number(data?.conf || 0.65);
+        const [x1, y1, x2, y2] = box;
+        const cx = (x1 + x2) / 2;
+        const cy = (y1 + y2) / 2;
+        const rx = Math.max((x2 - x1) * 0.85, 18);
+        const ry = Math.max((y2 - y1) * 0.85, 18);
+        const opacity = Math.min(0.5, 0.18 + conf * 0.22);
+        items.push(
+          <g
+            key={`renew-risk-caries-${tooth}-${idx}`}
+            filter="url(#renewRiskBlurStrong)"
+            style={{ mixBlendMode: 'normal', opacity: 0.62 * heatmapOpacityScale }}
+          >
+            <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#renewCariesGlow)" fillOpacity={opacity} />
+          </g>
+        );
+      });
 
-    periapicalEntries.forEach(([tooth, data]: any, idx) => {
-      const toothFdi = String(tooth);
-      if (!matchesFilter(toothFdi) || !matchesToothSelection(toothFdi)) return;
-      const box = data?.box;
-      if (!box || box.length < 4) return;
-      const conf = Number(data?.conf || 0.72);
-      const [x1, y1, x2, y2] = box;
-      const cx = (x1 + x2) / 2;
-      const cy = (y1 + y2) / 2;
-      const rx = Math.max((x2 - x1) * 0.95, 22);
-      const ry = Math.max((y2 - y1) * 0.95, 22);
-      const opacity = Math.min(0.52, 0.2 + conf * 0.22);
-      items.push(
-        <g
-          key={`renew-risk-peri-${tooth}-${idx}`}
-          filter="url(#renewRiskBlurStrong)"
-          style={{ mixBlendMode: 'normal', opacity: 0.6 * heatmapOpacityScale }}
-        >
-          <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#renewPeriGlow)" fillOpacity={opacity} />
-        </g>
-      );
-    });
+      periapicalEntries.forEach(([tooth, data]: any, idx) => {
+        const toothFdi = String(tooth);
+        if (!matchesFilter(toothFdi) || !matchesToothSelection(toothFdi)) return;
+        const box = data?.box;
+        if (!box || box.length < 4) return;
+        const conf = Number(data?.conf || 0.72);
+        const [x1, y1, x2, y2] = box;
+        const cx = (x1 + x2) / 2;
+        const cy = (y1 + y2) / 2;
+        const rx = Math.max((x2 - x1) * 0.95, 22);
+        const ry = Math.max((y2 - y1) * 0.95, 22);
+        const opacity = Math.min(0.52, 0.2 + conf * 0.22);
+        items.push(
+          <g
+            key={`renew-risk-peri-${tooth}-${idx}`}
+            filter="url(#renewRiskBlurStrong)"
+            style={{ mixBlendMode: 'normal', opacity: 0.6 * heatmapOpacityScale }}
+          >
+            <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#renewPeriGlow)" fillOpacity={opacity} />
+          </g>
+        );
+      });
+    }
 
-    teeth.forEach((tooth: any, idx: number) => {
-      const label = String(tooth?.tooth_label || tooth?.label || tooth?.tooth || '');
-      if (!matchesFilter(label) || !matchesToothSelection(label)) return;
-      const boneLossPct = Number(
-        result?.bonelevel?.[label]?.percent ??
-        tooth?.bone_loss_pct ??
-        0
-      );
-      if (!label || boneLossPct < 15) return;
-      const severity = Math.min(1, Math.max(0, (boneLossPct - 15) / 30));
-      const opacity = Math.min(0.32, 0.12 + severity * 0.16);
-      const green = Math.round(224 - severity * 140);
-      const fill = `rgba(255,${green},71,${opacity})`;
-      const contour = tooth?.contour;
-      if (!Array.isArray(contour) || contour.length < 3) return;
-      const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
-      items.push(
-        <g
-          key={`renew-risk-bone-${label}-${idx}`}
-          filter="url(#renewRiskBlurSoft)"
-          style={{ mixBlendMode: 'normal', opacity: 0.48 * heatmapOpacityScale }}
-        >
-          <polygon points={points} fill={fill} />
-        </g>
-      );
-    });
+    if (shouldShowNerve && Array.isArray(result.nerve_contours)) {
+      result.nerve_contours.forEach((contour: any, idx: number) => {
+        if (!Array.isArray(contour) || contour.length < 2) return;
+        const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
+        items.push(
+          <g
+            key={`renew-risk-nerve-${idx}`}
+            style={{ mixBlendMode: 'screen', opacity: (hasHeatmapAsset ? 0.5 : 0.42) * heatmapOpacityScale }}
+          >
+            {contour.length >= 3 ? (
+              <polygon
+                points={points}
+                fill={hasHeatmapAsset ? 'rgba(255, 0, 255, 0.12)' : 'rgba(255, 0, 255, 0.08)'}
+                filter="url(#renewRiskBlurSoft)"
+              />
+            ) : null}
+            <polyline
+              points={points}
+              fill="none"
+              stroke={hasHeatmapAsset ? 'rgba(255, 88, 255, 0.38)' : 'rgba(255, 88, 255, 0.28)'}
+              strokeWidth={(hasHeatmapAsset ? 5 : 4) / effectiveScale}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+              filter="url(#renewRiskBlurStrong)"
+            />
+            <polyline
+              points={points}
+              fill="none"
+              stroke={hasHeatmapAsset ? 'rgba(255, 240, 255, 0.72)' : 'rgba(255, 232, 255, 0.58)'}
+              strokeWidth={(hasHeatmapAsset ? 1.2 : 1) / effectiveScale}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          </g>
+        );
+      });
+    }
+
+    if (!hasHeatmapAsset) {
+      teeth.forEach((tooth: any, idx: number) => {
+        const label = String(tooth?.tooth_label || tooth?.label || tooth?.tooth || '');
+        if (!matchesFilter(label) || !matchesToothSelection(label)) return;
+        const boneLossPct = Number(
+          result?.bonelevel?.[label]?.percent ??
+          tooth?.bone_loss_pct ??
+          0
+        );
+        if (!label || boneLossPct < 15) return;
+        const severity = Math.min(1, Math.max(0, (boneLossPct - 15) / 30));
+        const opacity = Math.min(0.32, 0.12 + severity * 0.16);
+        const green = Math.round(224 - severity * 140);
+        const fill = `rgba(255,${green},71,${opacity})`;
+        const contour = tooth?.contour;
+        if (!Array.isArray(contour) || contour.length < 3) return;
+        const points = contour.map((pt: any) => `${pt[0]},${pt[1]}`).join(' ');
+        items.push(
+          <g
+            key={`renew-risk-bone-${label}-${idx}`}
+            filter="url(#renewRiskBlurSoft)"
+            style={{ mixBlendMode: 'normal', opacity: 0.48 * heatmapOpacityScale }}
+          >
+            <polygon points={points} fill={fill} />
+          </g>
+        );
+      });
+    }
 
     return <g id="renew-risk-overlay-layer">{items}</g>;
   };
@@ -2672,7 +2811,48 @@ export function RenewPage() {
     setReportError(null);
   };
 
+  const handleOpenServerImage = async (image: ServerFolderImage) => {
+    try {
+      const imageUrl = resolveServerAssetUrl(image.downloadUrl);
+      const response = await fetch(imageUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to load ${image.name}.`);
+      }
+      const blob = await response.blob();
+      const originalFile = new File([blob], image.name, {
+        type: blob.type || `image/${(image.format || 'png').toLowerCase()}`,
+        lastModified: Date.now(),
+      });
+
+      navigate('/renew', {
+        state: {
+          previewUrl: imageUrl,
+          imageUrl,
+          originalFile,
+          originalFileName: image.name,
+          originalIsDicom: false,
+          folderSource: 'server-image',
+          imageRelativePath: image.relativePath,
+          folderSelectedSeriesId: `${SERVER_IMAGE_SERIES_PREFIX}${image.relativePath}`,
+          userName: image.patientName || locationState.userName || 'Patient',
+          linkedStudyId: image.linkedStudyId || null,
+        },
+      });
+    } catch (error) {
+      console.error('Failed to open server image inside RenewPage', error);
+    }
+  };
+
   const handleSelectSeries = async (seriesId: string) => {
+    if (seriesId.startsWith(SERVER_IMAGE_SERIES_PREFIX)) {
+      const relativePath = seriesId.slice(SERVER_IMAGE_SERIES_PREFIX.length);
+      const targetImage = serverImages.find((image) => image.relativePath === relativePath);
+      if (targetImage) {
+        await handleOpenServerImage(targetImage);
+      }
+      return;
+    }
+
     const existingSeries = activeFolderStudies.flatMap((study) => study.series).find((series) => series.id === seriesId);
     if (existingSeries) {
       setSelectedFolderSeriesId(seriesId);
@@ -2685,6 +2865,23 @@ export function RenewPage() {
 
     try {
       const materialized = await materializeServerStudy(targetStudy);
+      if (!originalFolderMode) {
+        navigate('/renew', {
+          state: {
+            originalFolderMode: true,
+            originalFolderStudies: [materialized],
+            folderSelectedSeriesId: seriesId,
+            previewUrl: targetStudy.previewUrl ? resolveServerAssetUrl(targetStudy.previewUrl) : undefined,
+            originalIsDicom: true,
+            originalFileName:
+              materialized.series.find((series) => series.id === seriesId)?.label ||
+              materialized.label ||
+              'DICOM Study',
+            folderSource: 'server',
+          },
+        });
+        return;
+      }
       setActiveFolderStudies((current) => {
         if (current.some((study) => study.id === materialized.id)) return current;
         return [...current, materialized];
@@ -2701,9 +2898,12 @@ export function RenewPage() {
   };
 
   useEffect(() => {
-    if (locationState.folderSource === 'server') {
+    if (locationState.folderSource === 'server' || locationState.folderSource === 'server-image') {
       fetchServerFolderIndex()
-        .then((data) => setServerStudies(data.studies || []))
+        .then((data) => {
+          setServerStudies(data.studies || []);
+          setServerImages(data.images || []);
+        })
         .catch(console.error);
     }
   }, [locationState.folderSource]);
@@ -3306,6 +3506,7 @@ export function RenewPage() {
     if (!rawCanvas) return;
     const canvas = trimCaptureCanvas(rawCanvas);
     const dataUrl = canvas.toDataURL('image/png');
+    setIsCapturePanelCollapsed(false);
     setCapturedOutputs((current) => [
       {
         id: `capture-${Date.now()}`,
@@ -3369,9 +3570,6 @@ export function RenewPage() {
             },
           },
         })
-          .then(() => {
-            setReportPreviewRefreshToken((current) => current + 1);
-          })
           .catch((error) => {
             console.error('Failed to update report tooth visibility', error);
           });
@@ -3952,6 +4150,26 @@ export function RenewPage() {
                         zIndex: 1,
                       }}
                     />
+                    {realHeatmapOverlayUrl ? (
+                      <img
+                        src={realHeatmapOverlayUrl}
+                        alt=""
+                        aria-hidden="true"
+                        draggable={false}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          objectFit: 'contain',
+                          filter: `invert(${inverted ? 1 : 0}) brightness(${panoBrightness}%) contrast(${panoContrast}%)`,
+                          opacity: heatmapOpacity / 100,
+                          userSelect: 'none',
+                          pointerEvents: 'none',
+                          position: 'absolute',
+                          inset: 0,
+                          zIndex: 2,
+                        }}
+                      />
+                    ) : null}
                     {viewMode !== 'original' && overlayCoordinateSize.width > 0 && overlayCoordinateSize.height > 0 && (
                       <svg
                         ref={panoOverlaySvgRef}
@@ -4076,10 +4294,12 @@ export function RenewPage() {
                       top: `${pendingTextAnnotation.anchorTop}px`,
                       transform: 'translateY(-100%)',
                       zIndex: 30,
-                      padding: '8px 10px',
-                      border: `${scalePx(1)} solid #00C0F3`,
-                      background: '#111111',
-                      boxShadow: '0 10px 24px rgba(0, 0, 0, 0.35)',
+                      width: wp(198),
+                      border: `${scalePx(1)} solid #202020`,
+                      borderRadius: 0,
+                      background: '#2A2A2A',
+                      boxShadow: '0 10px 18px rgba(0, 0, 0, 0.28)',
+                      overflow: 'hidden',
                     }}
                     onPointerDown={(event) => {
                       event.stopPropagation();
@@ -4091,6 +4311,63 @@ export function RenewPage() {
                       event.stopPropagation();
                     }}
                   >
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        height: hp(18),
+                        padding: `0 ${wp(6)}`,
+                        background: '#2A2A2A',
+                        borderBottom: `${scalePx(1)} solid #202020`,
+                      }}
+                    >
+                      <div
+                        style={{
+                          color: '#EDEDED',
+                          fontSize: scalePx(8.5),
+                          fontWeight: 700,
+                          letterSpacing: '0.08em',
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        Saturn Note
+                      </div>
+                      <button
+                        type="button"
+                        onPointerDown={dismissPendingTextAnnotation}
+                        onClick={dismissPendingTextAnnotation}
+                        style={{
+                          width: scalePx(13),
+                          height: scalePx(13),
+                          padding: 0,
+                          border: 'none',
+                          background: 'transparent',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <img
+                          src="/imgs/13 13.png"
+                          alt="Close"
+                          draggable={false}
+                          style={{
+                            width: scalePx(13),
+                            height: scalePx(13),
+                            display: 'block',
+                            objectFit: 'contain',
+                            pointerEvents: 'none',
+                          }}
+                        />
+                      </button>
+                    </div>
+                    <div
+                      style={{
+                        padding: `${hp(5)} ${wp(5)} ${hp(5)}`,
+                      }}
+                    >
                     <textarea
                       ref={textAnnotationInputRef}
                       value={pendingTextAnnotation.text}
@@ -4121,15 +4398,17 @@ export function RenewPage() {
                       }}
                       rows={2}
                       style={{
-                        width: wp(180),
-                        minHeight: hp(44),
+                        width: '100%',
+                        minHeight: hp(52),
                         resize: 'none',
-                        border: 'none',
-                        background: 'transparent',
+                        border: `${scalePx(1)} solid #2A2A2A`,
+                        borderRadius: 0,
+                        background: '#6A6A6A',
                         color: 'rgba(57, 255, 20, 0.98)',
-                        padding: 0,
-                        fontSize: scalePx(12),
-                        lineHeight: 1.4,
+                        caretColor: 'rgba(57, 255, 20, 0.98)',
+                        padding: `${hp(5)} ${wp(6)}`,
+                        fontSize: scalePx(11),
+                        lineHeight: 1.25,
                         outline: 'none',
                         boxShadow: 'none',
                         overflow: 'hidden',
@@ -4137,10 +4416,12 @@ export function RenewPage() {
                     />
                     <div
                       style={{
-                        marginTop: hp(8),
+                        marginTop: hp(5),
                         display: 'flex',
                         justifyContent: 'flex-end',
-                        gap: wp(6),
+                        gap: wp(5),
+                        paddingTop: hp(5),
+                        borderTop: `${scalePx(1)} solid #202020`,
                       }}
                     >
                       <button
@@ -4155,14 +4436,16 @@ export function RenewPage() {
                           event.stopPropagation();
                         }}
                         style={{
-                          minWidth: wp(42),
-                          height: hp(24),
-                          border: `${scalePx(1)} solid #00C0F3`,
-                          background: '#1B1B1B',
-                          color: '#00FF66',
-                          fontSize: scalePx(11),
+                          minWidth: wp(46),
+                          height: hp(20),
+                          borderRadius: 0,
+                          border: `${scalePx(1)} solid #202020`,
+                          background: '#333333',
+                          color: '#EAEAEA',
+                          fontSize: scalePx(10),
                           fontWeight: 700,
                           cursor: 'pointer',
+                          boxShadow: 'none',
                         }}
                       >
                         OK
@@ -4179,18 +4462,21 @@ export function RenewPage() {
                           event.stopPropagation();
                         }}
                         style={{
-                          minWidth: wp(58),
-                          height: hp(24),
-                          border: `${scalePx(1)} solid #6A6A6A`,
-                          background: '#1B1B1B',
-                          color: '#D0D0D0',
-                          fontSize: scalePx(11),
+                          minWidth: wp(54),
+                          height: hp(20),
+                          borderRadius: 0,
+                          border: `${scalePx(1)} solid #202020`,
+                          background: '#333333',
+                          color: '#D9D9D9',
+                          fontSize: scalePx(10),
                           fontWeight: 700,
                           cursor: 'pointer',
+                          boxShadow: 'none',
                         }}
                       >
                         Cancel
                       </button>
+                    </div>
                     </div>
                   </div>
                 ) : null}
@@ -4870,11 +5156,9 @@ export function RenewPage() {
           width={wp(140)}
           height={hp(590)}
           captures={capturedOutputs}
-          selectedCaptureIds={selectedReportCaptureIds}
           onToggle={() => {
             setIsCapturePanelCollapsed((current) => !current);
           }}
-          onSelectCapture={toggleReportCaptureSelection}
           onRemove={(id) => {
             setCapturedOutputs((current) => current.filter((item) => item.id !== id));
           }}
@@ -4900,7 +5184,7 @@ export function RenewPage() {
             left={wp(studiesPanelLeft)}
             top={hp(studiesPanelTop)}
             studies={combinedStudies as FolderStudy[]}
-            selectedSeriesId={selectedFolderSeriesId}
+            selectedSeriesId={selectedFolderSeriesId || locationState.folderSelectedSeriesId || null}
             onSelectSeries={(seriesId) => {
               void handleSelectSeries(seriesId);
             }}
@@ -5113,7 +5397,7 @@ export function RenewPage() {
           activeIconSrc={displayReportButtonIcons.active}
           inactiveIconSrc={displayReportButtonIcons.inactive}
           onOpenReport={() => { void handleOpenReportPanel(); }}
-          reportError={reportError}
+          reportError={reportError || (!panoViewerUrl ? 'No panorama source available for viewer.' : null)}
           reportErrorLeft={wp(251)}
           reportErrorTop={hp(74)}
           reportErrorFontSize={scalePx(11)}

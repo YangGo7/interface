@@ -963,6 +963,7 @@ class PanoPipeline:
             processed_results["final_caries_objects"],
             processed_results["periapical_objects"],
             processed_results["pbl_dict"],
+            processed_results.get("nerve_mask"),
         )
         
         # 4. Save Outputs
