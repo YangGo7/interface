@@ -119,7 +119,13 @@ foreach ($dir in $backendDirs) {
 }
 
 foreach ($file in $backendFiles) {
-    Copy-Item -Path (Join-Path $BackendDir $file) -Destination (Join-Path $PackageDir "gpts") -Force
+    $sourceFile = Join-Path $BackendDir $file
+    if (Test-Path $sourceFile) {
+        Copy-Item -Path $sourceFile -Destination (Join-Path $PackageDir "gpts") -Force
+    }
+    else {
+        Write-Warning "Skipping missing backend file: $sourceFile"
+    }
 }
 
 foreach ($dir in @("data", "reports", "temp")) {
