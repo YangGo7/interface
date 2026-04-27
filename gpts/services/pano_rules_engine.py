@@ -159,6 +159,7 @@ class RulesEngine:
         
         # E. Spatial Consistency Check (Swap/Ambiguous check)
         final_slots = self._enforce_spatial_order(assigned_slots, is_upper)
+        final_slots = self._enforce_quadrant_fences(final_slots, metrics, is_upper)
         
         return final_slots
 
@@ -393,6 +394,7 @@ class RulesEngine:
         dx = metrics['dx']
         w_base = metrics['w_base']
         anchored_object_ids = set()
+        side_invalid_anchor_ids = set()
         
         # 1. Assign Anchors (Absolute Trust -> Conditional Trust)
         x_mid = metrics.get('x_mid', self.W/2)
@@ -406,27 +408,9 @@ class RulesEngine:
             if is_high_conf_anchor:
                 lbl = str(obj['label_hint'])
                 if lbl in slots:
-                    # Validate Side (Cross-Arch Check)
-                    # Q1 (1x), Q4 (4x) should be Image Left (cx < x_mid)
-                    # Q2 (2x), Q3 (3x) should be Image Right (cx > x_mid)
-                    # Use a lenient buffer (e.g. 50px or 10% of W) to allow central incisors near midline.
-                    
                     try:
-                        q = int(lbl) // 10
-                        is_left_side_label = (q in [1, 4]) # Image Left
-                        is_right_side_label = (q in [2, 3]) # Image Right
-                        
-                        cx = obj['cx']
-                        buffer = self.W * 0.1 # 10% buffer
-                        
-                        valid_side = True
-                        if is_left_side_label and cx > (x_mid + buffer):
-                            valid_side = False
-                        elif is_right_side_label and cx < (x_mid - buffer):
-                            valid_side = False
-                            
-                        if not valid_side:
-                            # Skip this anchor assignment (treat as unassigned later)
+                        if not self._is_fdi_side_valid(int(lbl), float(obj['cx']), x_mid, dx):
+                            side_invalid_anchor_ids.add(obj['id'])
                             continue
                     except:
                         pass
@@ -446,7 +430,8 @@ class RulesEngine:
             o for o in objects
             if o['id'] not in anchored_object_ids
             and (
-                o['type'] != 'natural'
+                o['id'] in side_invalid_anchor_ids
+                or o['type'] != 'natural'
                 or not o.get('label_hint')
                 or float(o.get('conf', 0.0) or 0.0) < self.anchor_confidence_threshold
                 or str(o.get('label_hint')) not in slots
@@ -546,6 +531,8 @@ class RulesEngine:
 
     def _prioritize_natural_labels(self, slots: Dict[str, Dict], objects: List[Dict[str, Any]], is_upper: bool) -> Dict[str, Dict]:
         natural_reclaim_threshold = 0.5
+        slot_mid = self._estimate_midline_from_slots(slots)
+        slot_dx = self._estimate_dx_from_slots(slots)
 
         def primary_candidate(slot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             candidates = slot.get('candidates') or []
@@ -570,6 +557,12 @@ class RulesEngine:
             and obj.get('label_hint')
             and float(obj.get('conf', 0.0) or 0.0) >= natural_reclaim_threshold
             and str(obj.get('label_hint')) in slots
+            and self._is_fdi_side_valid(
+                int(obj.get('label_hint')),
+                float(obj.get('cx', 0.0) or 0.0),
+                slot_mid,
+                slot_dx,
+            )
         ]
         natural_candidates.sort(key=lambda obj: float(obj.get('conf', 0.0) or 0.0), reverse=True)
 
@@ -624,6 +617,133 @@ class RulesEngine:
 
             print(
                 f"[RULE DEBUG] displaced implant reassigned -> slot {best_slot_id}: obj_id={implant_obj['id']}",
+                flush=True,
+            )
+
+        return slots
+
+    def _estimate_midline_from_slots(self, slots: Dict[str, Dict]) -> float:
+        estimates = []
+        dx = self._estimate_dx_from_slots(slots)
+        for slot_id, slot in slots.items():
+            try:
+                estimates.append(float(slot['ideal_x']) - self._get_ideal_offset(int(slot_id)) * dx)
+            except Exception:
+                continue
+        return float(np.median(estimates)) if estimates else self.W / 2.0
+
+    def _estimate_dx_from_slots(self, slots: Dict[str, Dict]) -> float:
+        xs = []
+        for slot_id, slot in slots.items():
+            try:
+                order = self._fdi_to_linear_order(int(slot_id), int(slot_id) < 30)
+                xs.append((order, float(slot['ideal_x'])))
+            except Exception:
+                continue
+        xs.sort(key=lambda item: item[0])
+        deltas = [
+            abs(xs[i + 1][1] - xs[i][1]) / max(xs[i + 1][0] - xs[i][0], 1)
+            for i in range(len(xs) - 1)
+            if xs[i + 1][0] != xs[i][0]
+        ]
+        valid = [d for d in deltas if d > 0]
+        return float(np.median(valid)) if valid else self.W / 14.0
+
+    def _quadrant_side_buffer(self, fdi: int, dx: Optional[float]) -> float:
+        n = fdi % 10
+        step = float(dx) if dx and dx > 0 else self.W / 14.0
+        if n == 1:
+            return max(step * 0.75, self.W * 0.025)
+        if n == 2:
+            return max(step * 0.35, self.W * 0.015)
+        return max(step * 0.15, self.W * 0.01)
+
+    def _is_fdi_side_valid(self, fdi: int, cx: float, x_mid: float, dx: Optional[float] = None) -> bool:
+        q = fdi // 10
+        if q not in [1, 2, 3, 4]:
+            return True
+
+        buffer = self._quadrant_side_buffer(fdi, dx)
+        if q in [1, 4]:
+            return cx <= x_mid + buffer
+        return cx >= x_mid - buffer
+
+    def _enforce_quadrant_fences(self, slots: Dict[str, Dict], metrics: Dict[str, Any], is_upper: bool) -> Dict[str, Dict]:
+        """Prevent an assigned object from crossing into another FDI quadrant side."""
+        x_mid = float(metrics.get('x_mid', self.W / 2.0))
+        dx = float(metrics.get('dx', self.W / 14.0) or self.W / 14.0)
+        w_base = float(metrics.get('w_base', dx * 0.8) or dx * 0.8)
+
+        def primary_candidate(slot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            candidates = slot.get('candidates') or []
+            return candidates[0] if candidates else None
+
+        def clear_slot(slot_id: str) -> None:
+            slots[slot_id]['status'] = 'unassigned'
+            slots[slot_id]['object_id'] = None
+            slots[slot_id]['candidates'] = []
+            slots[slot_id]['hard_anchor'] = False
+
+        invalid_assignments: List[Tuple[str, Dict[str, Any]]] = []
+        for slot_id, slot in slots.items():
+            if slot.get('object_id') is None:
+                continue
+            candidate = primary_candidate(slot)
+            if not candidate:
+                continue
+            try:
+                if not self._is_fdi_side_valid(int(slot_id), float(candidate.get('cx', 0.0) or 0.0), x_mid, dx):
+                    invalid_assignments.append((slot_id, candidate))
+            except Exception:
+                continue
+
+        if not invalid_assignments:
+            return slots
+
+        for slot_id, _ in invalid_assignments:
+            clear_slot(slot_id)
+
+        for old_slot_id, obj in invalid_assignments:
+            free_slots = []
+            for slot_id, slot in slots.items():
+                if slot.get('object_id') is not None:
+                    continue
+                try:
+                    if not self._is_fdi_side_valid(int(slot_id), float(obj.get('cx', 0.0) or 0.0), x_mid, dx):
+                        continue
+                    dist = abs(float(obj.get('cx', 0.0) or 0.0) - float(slot['ideal_x']))
+                    free_slots.append((dist, slot_id))
+                except Exception:
+                    continue
+
+            if not free_slots:
+                print(
+                    f"[RULE DEBUG] quadrant fence dropped obj_id={obj.get('id')} from slot {old_slot_id}: no valid slot",
+                    flush=True,
+                )
+                continue
+
+            free_slots.sort(key=lambda item: item[0])
+            best_dist, best_slot_id = free_slots[0]
+            threshold = max(dx * 1.25, w_base * 1.5)
+            if str(obj.get('type')) == 'implant':
+                threshold = max(dx * self.k_implant, threshold)
+            if best_dist > threshold:
+                print(
+                    f"[RULE DEBUG] quadrant fence dropped obj_id={obj.get('id')} from slot {old_slot_id}: "
+                    f"nearest={best_slot_id} dist={best_dist:.1f} threshold={threshold:.1f}",
+                    flush=True,
+                )
+                continue
+
+            slots[best_slot_id]['status'] = 'confirmed'
+            slots[best_slot_id]['object_id'] = obj['id']
+            slots[best_slot_id]['candidates'] = [obj]
+            slots[best_slot_id]['hard_anchor'] = False
+
+            print(
+                f"[RULE DEBUG] quadrant fence reassign {old_slot_id} -> {best_slot_id}: "
+                f"obj_id={obj.get('id')} label_hint={obj.get('label_hint')} cx={float(obj.get('cx', 0.0) or 0.0):.1f}",
                 flush=True,
             )
 
