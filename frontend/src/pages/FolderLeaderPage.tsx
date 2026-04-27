@@ -129,17 +129,20 @@ export default function FolderLeaderPage() {
   };
 
   const openImage = (image: ServerFolderImage) => {
+    const isDicomImage = Boolean(image.isDicom || /\.(dcm|dicom)$/i.test(image.name));
+    const imageUrl = resolveServerAssetUrl(image.downloadUrl);
+    const previewUrl = image.previewUrl ? resolveServerAssetUrl(image.previewUrl) : imageUrl;
     navigate('/chart-legacy', {
       state: {
-        previewUrl: image.downloadUrl,
-        imageUrl: image.downloadUrl,
+        previewUrl,
+        imageUrl,
         originalFileName: image.name,
-        originalIsDicom: false,
+        originalIsDicom: isDicomImage,
         folderSource: 'server-image',
         result: {
-          image_url: image.downloadUrl,
-          overlay_url: image.downloadUrl,
-          preview_url: image.downloadUrl,
+          image_url: imageUrl,
+          overlay_url: previewUrl,
+          preview_url: previewUrl,
           det_counts: {},
           is_volume: false,
         },

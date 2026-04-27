@@ -1,0 +1,65 @@
+{
+  "image": "C:\\interface\\case\\000094.jpg",
+  "weights": "C:\\interface\\gpts\\weights\\caries_det.pt",
+  "preset": "caries",
+  "device": "cpu",
+  "imgsz": 1024,
+  "conf": 0.05,
+  "alpha": 0.45,
+  "target_layer_index": 21,
+  "target_layer_name": "C2f",
+  "letterbox": {
+    "scale": 0.4140719773554387,
+    "pad_left": 0,
+    "pad_top": 253,
+    "pad_right": 0,
+    "pad_bottom": 253
+  },
+  "cam": {
+    "target_class": 0,
+    "target_detection_index": 8912,
+    "target_score": 0.10509341210126877,
+    "num_classes": 1,
+    "num_candidates": 21504,
+    "target_mode": "iou+score",
+    "cam_mode": "gradcam_abs_fallback",
+    "cam_logit_min": 0.0,
+    "cam_logit_max": 0.0,
+    "cam_nonzero_ratio": 0.0,
+    "cam_p95": 0.0,
+    "cam_p99": 0.0,
+    "matched_raw_box_xyxy": [
+      627.943115234375,
+      543.8726806640625,
+      656.046142578125,
+      568.6973876953125
+    ],
+    "reference_box_xyxy": [
+      627.7537841796875,
+      543.8534545898438,
+      655.9468994140625,
+      568.8302001953125
+    ],
+    "match_iou": 0.9837961792945862,
+    "match_center_distance": 0.00015141686890274286
+  },
+  "best_detection": {
+    "best_detection_index": 0,
+    "best_detection_confidence": 0.21665726602077484,
+    "best_detection_class": 0,
+    "best_detection_box": [
+      1516.0499267578125,
+      702.4224243164062,
+      1584.1373291015625,
+      762.7422485351562
+    ]
+  },
+  "saved_files": [
+    "input_original.png",
+    "detections.png",
+    "cam_gray.png",
+    "cam_overlay.png",
+    "cam_overlay_best_detection.png",
+    "meta.json"
+  ]
+}

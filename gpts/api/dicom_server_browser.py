@@ -1,4 +1,5 @@
 from flask import Blueprint, jsonify, request, current_app
+import json
 import os
 import uuid
 from pathlib import Path
@@ -32,6 +33,137 @@ def _shared_prefix_score(left: str, right: str) -> int:
             break
         score += 1
     return score
+
+
+def _int_meta(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _load_image_sidecar_meta(path: Path) -> dict:
+    if path.suffix.lower() not in IMAGE_EXTENSIONS:
+        return {}
+
+    json_path = path.with_suffix(".json")
+    if not json_path.exists():
+        return {}
+
+    try:
+        with json_path.open("r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print(f"Error parsing sidecar metadata {json_path}: {exc}")
+        return {}
+
+
+def _meta_value(meta: dict, *keys, default=""):
+    for key in keys:
+        value = meta.get(key)
+        if value not in (None, "", []):
+            return value
+    return default
+
+
+def _meta_str(meta: dict, *keys, default="") -> str:
+    value = _meta_value(meta, *keys, default=default)
+    if value in (None, "", []):
+        return ""
+    return str(value)
+
+
+def _meta_number(meta: dict, *keys, default=0):
+    value = _meta_value(meta, *keys, default=default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _meta_number_list(meta: dict, *keys, default=None):
+    value = _meta_value(meta, *keys, default=default or [])
+    if isinstance(value, list):
+        parsed = []
+        for item in value:
+            try:
+                parsed.append(float(item))
+            except (TypeError, ValueError):
+                pass
+        return parsed or (default or [])
+    if isinstance(value, str):
+        parsed = []
+        for item in value.replace(",", "\\").split("\\"):
+            try:
+                parsed.append(float(item.strip()))
+            except (TypeError, ValueError):
+                pass
+        return parsed or (default or [])
+    return default or []
+
+
+def _meta_string_list(meta: dict, *keys):
+    value = _meta_value(meta, *keys, default=[])
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.replace(",", "\\").split("\\") if item.strip()]
+    return []
+
+
+def _build_sidecar_dicom_info(path: Path, meta: dict) -> dict:
+    pixel_spacing = _meta_number_list(meta, "PixelSpacing", "pixelSpacing", default=[1.0, 1.0])
+    row_spacing = pixel_spacing[0] if len(pixel_spacing) > 0 else 1.0
+    column_spacing = pixel_spacing[1] if len(pixel_spacing) > 1 else row_spacing
+    rows = int(_meta_number(meta, "Rows", "rows", default=0) or 0)
+    columns = int(_meta_number(meta, "Columns", "columns", default=0) or 0)
+
+    slice_thickness = _meta_number(meta, "SliceThickness", "sliceThickness", default=1)
+
+    return {
+        "fileName": path.name,
+        "patientName": _meta_str(meta, "PatientName", "patientName"),
+        "patientId": _meta_str(meta, "PatientID", "patientId"),
+        "patientSex": _meta_str(meta, "PatientSex", "patientSex"),
+        "patientBirthDate": _meta_str(meta, "PatientBirthDate", "patientBirthDate"),
+        "studyDate": _meta_str(meta, "StudyDate", "studyDate"),
+        "studyTime": _meta_str(meta, "StudyTime", "studyTime"),
+        "studyDescription": _meta_str(meta, "StudyDescription", "studyDescription"),
+        "studyInstanceUID": _meta_str(meta, "StudyInstanceUID", "studyInstanceUID"),
+        "studyId": _meta_str(meta, "StudyID", "studyId"),
+        "accessionNumber": _meta_str(meta, "AccessionNumber", "accessionNumber"),
+        "seriesDescription": _meta_str(meta, "SeriesDescription", "seriesDescription"),
+        "seriesInstanceUID": _meta_str(meta, "SeriesInstanceUID", "seriesInstanceUID"),
+        "seriesNumber": int(_meta_number(meta, "SeriesNumber", "seriesNumber", default=0) or 0),
+        "instanceNumber": int(_meta_number(meta, "InstanceNumber", "instanceNumber", default=0) or 0),
+        "modality": _meta_str(meta, "Modality", "modality", default="IMG"),
+        "institutionName": _meta_str(meta, "InstitutionName", "institutionName"),
+        "manufacturer": _meta_str(meta, "Manufacturer", "manufacturer"),
+        "bodyPartExamined": _meta_str(meta, "BodyPartExamined", "bodyPartExamined"),
+        "sopClassUID": _meta_str(meta, "SOPClassUID", "sopClassUID"),
+        "transferSyntaxUid": _meta_str(meta, "TransferSyntaxUID", "transferSyntaxUid"),
+        "imageType": _meta_string_list(meta, "ImageType", "imageType"),
+        "rows": rows,
+        "columns": columns,
+        "samplesPerPixel": int(_meta_number(meta, "SamplesPerPixel", "samplesPerPixel", default=1) or 1),
+        "photometricInterpretation": _meta_str(meta, "PhotometricInterpretation", "photometricInterpretation", default="MONOCHROME2"),
+        "bitsAllocated": int(_meta_number(meta, "BitsAllocated", "bitsAllocated", default=8) or 8),
+        "bitsStored": int(_meta_number(meta, "BitsStored", "bitsStored", default=8) or 8),
+        "highBit": int(_meta_number(meta, "HighBit", "highBit", default=7) or 7),
+        "pixelRepresentation": int(_meta_number(meta, "PixelRepresentation", "pixelRepresentation", default=0) or 0),
+        "windowCenter": _meta_number(meta, "WindowCenter", "windowCenter", default=128),
+        "windowWidth": _meta_number(meta, "WindowWidth", "windowWidth", default=256),
+        "numberOfFrames": int(_meta_number(meta, "NumberOfFrames", "numberOfFrames", default=1) or 1),
+        "pixelSpacing": [row_spacing, column_spacing],
+        "rowPixelSpacing": row_spacing,
+        "columnPixelSpacing": column_spacing,
+        "imageOrientationPatient": _meta_number_list(meta, "ImageOrientationPatient", "imageOrientationPatient", default=[1, 0, 0, 0, 1, 0]),
+        "imagePositionPatient": _meta_number_list(meta, "ImagePositionPatient", "imagePositionPatient", default=[0, 0, 0]),
+        "sliceThickness": slice_thickness,
+        "spacingBetweenSlices": _meta_number(meta, "SpacingBetweenSlices", "spacingBetweenSlices", default=slice_thickness),
+        "frameOfReferenceUID": _meta_str(meta, "FrameOfReferenceUID", "frameOfReferenceUID"),
+    }
 
 
 def _set_dicom_root(next_root: str):
@@ -168,7 +300,7 @@ def list_studies():
                     "downloadUrl": f"/api/dicom-server/download?path={dcm_path.relative_to(DICOM_ROOT).as_posix()}"
                 })
                 entry["directories"].add(_parent_directory(dcm_path.relative_to(DICOM_ROOT).as_posix()))
-                
+
             except Exception as e:
                 print(f"Error parsing {dcm_path}: {e}")
                 continue
@@ -226,6 +358,8 @@ def list_studies():
                 continue
             rel_path = img_path.relative_to(DICOM_ROOT).as_posix()
             image_dir = _parent_directory(rel_path)
+            sidecar_meta = _load_image_sidecar_meta(img_path)
+            sidecar_dicom_info = _build_sidecar_dicom_info(img_path, sidecar_meta) if sidecar_meta else None
             best_match = None
             best_score = -1
 
@@ -240,26 +374,40 @@ def list_studies():
                         best_score = score
                         best_match = data
 
+            linked_patient_id = best_match.get("patientId", "") if best_match and best_score > 0 else ""
+            linked_patient_name = best_match.get("patientName", "") if best_match and best_score > 0 else ""
+            linked_patient_age = best_match.get("patientAge", "") if best_match and best_score > 0 else ""
+            linked_patient_sex = best_match.get("patientSex", "") if best_match and best_score > 0 else ""
+            linked_study_date = best_match.get("studyDate", "") if best_match and best_score > 0 else ""
+            linked_modalities = list(best_match.get("modalities", [])) if best_match and best_score > 0 else []
+            linked_description = best_match.get("description", "") if best_match and best_score > 0 else ""
+            sidecar_modality = _meta_str(sidecar_meta, "Modality", "modality")
+            sidecar_description = _meta_str(sidecar_meta, "StudyDescription", "studyDescription", "SeriesDescription", "seriesDescription")
+            sidecar_rows = _int_meta(_meta_value(sidecar_meta, "Rows", "rows", default=0))
+            sidecar_columns = _int_meta(_meta_value(sidecar_meta, "Columns", "columns", default=0))
+
             images.append({
                 "name": img_path.name,
                 "relativePath": rel_path,
                 "downloadUrl": f"/api/dicom-server/file?path={rel_path}",
                 "folderLabel": img_path.parent.name,
-                "width": 0,
-                "height": 0,
+                "width": sidecar_columns,
+                "height": sidecar_rows,
                 "format": img_path.suffix.lstrip(".").upper(),
                 "size": img_path.stat().st_size,
                 "linkedStudyId": best_match["id"] if best_match and best_score > 0 else None,
-                "patientId": best_match.get("patientId", "") if best_match and best_score > 0 else "",
-                "patientName": best_match.get("patientName", "") if best_match and best_score > 0 else "",
-                "patientAge": best_match.get("patientAge", "") if best_match and best_score > 0 else "",
-                "patientSex": best_match.get("patientSex", "") if best_match and best_score > 0 else "",
-                "studyDate": best_match.get("studyDate", "") if best_match and best_score > 0 else "",
-                "modalities": list(best_match.get("modalities", [])) if best_match and best_score > 0 else [],
-                "description": best_match.get("description", "") if best_match and best_score > 0 else "",
+                "patientId": _meta_str(sidecar_meta, "PatientID", "patientId") or linked_patient_id,
+                "patientName": _meta_str(sidecar_meta, "PatientName", "patientName") or linked_patient_name,
+                "patientAge": _meta_str(sidecar_meta, "PatientAge", "patientAge") or linked_patient_age,
+                "patientSex": _meta_str(sidecar_meta, "PatientSex", "patientSex") or linked_patient_sex,
+                "studyDate": _meta_str(sidecar_meta, "StudyDate", "studyDate") or linked_study_date,
+                "modalities": [sidecar_modality] if sidecar_modality else linked_modalities,
+                "description": sidecar_description or linked_description,
+                "hasSidecarJson": bool(sidecar_meta),
+                "dicomInfo": sidecar_dicom_info,
             })
 
-        return jsonify({
+        response = jsonify({
             "success": True,
             "root_path": str(DICOM_ROOT),
             "root_exists": root_exists,
@@ -267,8 +415,12 @@ def list_studies():
             "images": images,
             "rejected_files": rejected_files,
         })
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
-    return jsonify({
+    response = jsonify({
         "success": False,
         "message": "Root directory not found",
         "root_path": str(DICOM_ROOT),
@@ -277,6 +429,10 @@ def list_studies():
         "images": [],
         "rejected_files": [],
     })
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 @dicom_browser_api.route('/preview', methods=['GET'])
 def get_preview():

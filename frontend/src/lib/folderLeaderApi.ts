@@ -1,4 +1,5 @@
 import type { FolderStudy } from '../features/upload/dicomFolderStudies';
+import type { DicomOverlayMetadata } from '../viewer/cornerstone/dicomMetadata';
 
 const resolveDirectApiBase = () => {
   const configured = ((import.meta as any)?.env?.VITE_API_BASE_URL as string | undefined)?.trim();
@@ -66,11 +67,13 @@ export type ServerFolderImage = {
   name: string;
   relativePath: string;
   downloadUrl: string;
+  previewUrl?: string | null;
   folderLabel: string;
   width: number;
   height: number;
   format: string;
   size?: number;
+  isDicom?: boolean;
   linkedStudyId?: string | null;
   patientId?: string;
   patientName?: string;
@@ -79,6 +82,8 @@ export type ServerFolderImage = {
   studyDate?: string;
   modalities?: string[];
   description?: string;
+  hasSidecarJson?: boolean;
+  dicomInfo?: DicomOverlayMetadata | null;
 };
 
 export type ServerFolderRootPathResponse = {
@@ -125,7 +130,9 @@ async function readJsonOrThrow<T>(response: Response): Promise<T> {
 }
 
 export async function fetchServerFolderIndex() {
-  const response = await fetchApi('/api/dicom-server/studies');
+  const response = await fetchApi(`/api/dicom-server/studies?t=${Date.now()}`, {
+    cache: 'no-store',
+  });
   const data = await readJsonOrThrow<ServerFolderIndexResponse>(response);
 
   if (!response.ok || !data.success) {

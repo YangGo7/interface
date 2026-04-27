@@ -980,6 +980,7 @@ export function RenewPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const locationState = (location.state as any) || {};
+  const sidecarDicomInfo = (locationState?.dicomInfo || null) as DicomOverlayMetadata | null;
   const [result, setResult] = useState<any>(locationState?.result || null);
   const [jobId, setJobId] = useState<string | null>(locationState?.jobId || null);
   const [isProcessing, setIsProcessing] = useState(!locationState?.result && !!locationState?.jobId);
@@ -1167,7 +1168,7 @@ export function RenewPage() {
   const studiesPanelWidth = 252;
   const studiesPanelHeight = Math.max(420, panoFrameHeight - 36);
   const hasHeatmapAsset = Boolean(result?.heatmap_overlay_url);
-  const [dicomHudMetadata, setDicomHudMetadata] = useState<DicomOverlayMetadata | null>(null);
+  const [dicomHudMetadata, setDicomHudMetadata] = useState<DicomOverlayMetadata | null>(sidecarDicomInfo);
   const [dicomPreviewDataUrl, setDicomPreviewDataUrl] = useState<string | null>(null);
   const [dicomAutoWindow, setDicomAutoWindow] = useState<{ level: number; width: number } | null>(null);
   const hasStructuredOverlayData = Boolean(
@@ -1187,19 +1188,60 @@ export function RenewPage() {
     if (url.startsWith('blob:') || url.startsWith('data:')) return url;
     return `${url}${url.includes('?') ? '&' : '?'}t=${cacheBuster}`;
   };
-  const originalRasterUrl = getUrlWithCacheBuster(
-    dicomPreviewDataUrl || result?.preview_url || locationState.previewUrl || locationState.imageUrl || null
+
+  const normalizeRuntimeAssetUrl = (url?: string | null) => {
+    const normalized = String(url || '').trim().replace(/\\/g, '/');
+    if (!normalized) return null;
+    if (
+      normalized.startsWith('blob:') ||
+      normalized.startsWith('data:') ||
+      /^https?:\/\//i.test(normalized)
+    ) {
+      return normalized;
+    }
+    if (normalized.startsWith('/')) return normalized;
+    if (normalized.startsWith('temp/') || normalized.startsWith('api/') || normalized.includes('/')) {
+      return `/${normalized}`;
+    }
+    return null;
+  };
+
+  const pickRuntimeAssetUrl = (...candidates: Array<string | null | undefined>) => {
+    for (const candidate of candidates) {
+      const normalized = normalizeRuntimeAssetUrl(candidate);
+      if (normalized) return normalized;
+    }
+    return null;
+  };
+
+  const originalRasterSource = pickRuntimeAssetUrl(
+    dicomPreviewDataUrl,
+    result?.preview_url,
+    locationState.previewUrl,
+    locationState.imageUrl,
+    result?.image_url
   );
-  const originalAnalysisUrl = getUrlWithCacheBuster(result?.image_url || locationState.imageUrl || null);
-  const originalPanoUrl = originalIsDicom
-    ? (originalRasterUrl || originalAnalysisUrl)
-    : (originalAnalysisUrl || originalRasterUrl);
-  const heatmapPanoUrl = getUrlWithCacheBuster(
-    result?.heatmap_overlay_url || result?.overlay_url || result?.image_url || result?.preview_url || locationState.previewUrl || null
+  const originalAnalysisSource = pickRuntimeAssetUrl(
+    result?.image_url,
+    result?.preview_url,
+    locationState.imageUrl,
+    locationState.previewUrl
   );
+  const heatmapPanoSource = pickRuntimeAssetUrl(
+    result?.heatmap_overlay_url,
+    result?.overlay_url,
+    result?.preview_url,
+    locationState.previewUrl,
+    locationState.imageUrl,
+    result?.image_url
+  );
+  const originalRasterUrl = getUrlWithCacheBuster(originalRasterSource);
+  const originalAnalysisUrl = getUrlWithCacheBuster(originalAnalysisSource);
+  const originalPanoUrl = originalRasterUrl || originalAnalysisUrl;
+  const heatmapPanoUrl = getUrlWithCacheBuster(heatmapPanoSource);
   const realHeatmapOverlayUrl =
     viewMode === 'heatmap' && hasHeatmapAsset
-      ? getUrlWithCacheBuster(result?.heatmap_overlay_url || null)
+      ? getUrlWithCacheBuster(pickRuntimeAssetUrl(result?.heatmap_overlay_url))
       : null;
   const panoUsesPreviewRaster = Boolean(
     originalIsDicom &&
@@ -2835,6 +2877,7 @@ export function RenewPage() {
           imageRelativePath: image.relativePath,
           folderSelectedSeriesId: `${SERVER_IMAGE_SERIES_PREFIX}${image.relativePath}`,
           userName: image.patientName || locationState.userName || 'Patient',
+          dicomInfo: image.dicomInfo || null,
           linkedStudyId: image.linkedStudyId || null,
         },
       });
@@ -2934,7 +2977,7 @@ export function RenewPage() {
     let cancelled = false;
 
     if (!originalIsDicom || !dicomHudFile) {
-      setDicomHudMetadata(null);
+      setDicomHudMetadata(sidecarDicomInfo && !originalIsDicom ? sidecarDicomInfo : null);
       setDicomPreviewDataUrl(null);
       setDicomAutoWindow(null);
       return;
@@ -3007,7 +3050,7 @@ export function RenewPage() {
     return () => {
       cancelled = true;
     };
-  }, [dicomHudFile, originalIsDicom]);
+  }, [dicomHudFile, originalIsDicom, sidecarDicomInfo]);
 
   useEffect(() => {
     if (autoAnalyzeTriggeredRef.current) return;
@@ -3885,10 +3928,17 @@ export function RenewPage() {
     setReportStartState('creating');
     setReportError(null);
     try {
+      const sourceUrl = pickRuntimeAssetUrl(
+        result?.image_url,
+        result?.preview_url,
+        locationState.imageUrl,
+        locationState.previewUrl
+      );
+      const overlayUrl = pickRuntimeAssetUrl(result?.overlay_url);
       const response = await createWebReportFromChart({
         result,
-        source_url: result?.image_url,
-        overlay_url: result?.overlay_url,
+        source_url: sourceUrl,
+        overlay_url: overlayUrl,
         language: 'English',
         patient_name: resolveReportPatientName(),
       });

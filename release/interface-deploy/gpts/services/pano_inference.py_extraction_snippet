@@ -1,0 +1,126 @@
+    def _run_inference(self, img: np.ndarray) -> Dict[str, Any]:
+        """
+        Executes all YOLO models and returns raw results.
+        """
+        results = {}
+        
+        # Load models
+        seg_model = self._load_model("pano_seg")
+        caries_model = self._load_model("caries")
+        peri_model = self._load_model("periapical")
+        iac_model = self._load_model("iac")
+        self._load_model("cej")
+        self._load_model("bonelevel")
+
+        # 1. Segmentation
+        seg_cfg = self.model_cfg["pano_seg"]
+        t0 = time.perf_counter()
+        results['seg_res'] = seg_model.predict(
+            source=img,
+            imgsz=seg_cfg.get("default_imgsz", 1024),
+            conf=seg_cfg.get("default_confidence", 0.25),
+            iou=seg_cfg.get("default_iou", 0.7),
+            retina_masks=True,
+            verbose=False,
+        )[0]
+        results['seg_time'] = time.perf_counter() - t0
+        print(f"  [PERF][{self.device.upper()}] pano_seg inference: {results['seg_time']:.3f}s")
+        
+        # 2. Aux Segmentation (Hybrid)
+        results['aux_boxes_data'] = []
+        if "pano_seg_aux" in self.model_cfg:
+            try:
+                aux_model = self._load_model("pano_seg_aux")
+                aux_cfg = self.model_cfg["pano_seg_aux"]
+                t_aux = time.perf_counter()
+                aux_res = aux_model.predict(
+                    source=img,
+                    imgsz=aux_cfg.get("default_imgsz", 1024),
+                    conf=aux_cfg.get("default_confidence", 0.25),
+                    iou=aux_cfg.get("default_iou", 0.7),
+                    verbose=False
+                )[0]
+                
+                if aux_res.boxes is not None:
+                    aux_boxes = aux_res.boxes.xyxy.cpu().numpy()
+                    aux_clss = aux_res.boxes.cls.cpu().numpy()
+                    aux_names = aux_res.names
+                    for i, box in enumerate(aux_boxes):
+                        l = aux_names[int(aux_clss[i])]
+                        results['aux_boxes_data'].append((box, str(l)))
+                
+                print(f"  [PERF][{self.device.upper()}] pano_seg_aux: {time.perf_counter()-t_aux:.3f}s")
+            except Exception as e:
+                print(f"  [WARN] Failed to run pano_seg_aux: {e}")
+
+        # 3. Caries
+        car_cfg = self.model_cfg["caries"]
+        t1 = time.perf_counter()
+        results['car_res'] = caries_model.predict(
+            source=img,
+            imgsz=car_cfg.get("default_imgsz", 640),
+            conf=car_cfg.get("default_confidence", 0.2),
+            iou=car_cfg.get("default_iou", 0.5),
+            verbose=False,
+        )[0]
+        results['car_time'] = time.perf_counter() - t1
+        print(f"  [PERF][{self.device.upper()}] caries inference: {results['car_time']:.3f}s")
+
+        # 4. Periapical
+        per_cfg = self.model_cfg["periapical"]
+        t2 = time.perf_counter()
+        results['per_res'] = peri_model.predict(
+            source=img,
+            imgsz=per_cfg.get("default_imgsz", 640),
+            conf=per_cfg.get("default_confidence", 0.1),
+            iou=per_cfg.get("default_iou", 0.5),
+            verbose=False,
+        )[0]
+        results['per_time'] = time.perf_counter() - t2
+        print(f"  [PERF][{self.device.upper()}] periapical inference: {results['per_time']:.3f}s")
+
+        # 5. IAC (Ensemble)
+        iac_cfg = self.model_cfg["iac"]
+        t_iac = time.perf_counter()
+        
+        # Preprocessing Variants
+        variants = [("original", img)]
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            cl_img = cv2.cvtColor(clahe.apply(gray), cv2.COLOR_GRAY2BGR)
+            variants.append(("clahe", cl_img))
+        except: pass
+        
+        try:
+            gamma = 1.5
+            invGamma = 1.0 / gamma
+            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+            gam_img = cv2.LUT(img, table)
+            variants.append(("gamma", gam_img))
+        except: pass
+        
+        best_iac_res = None
+        best_score = -1.0
+        
+        for name, v_img in variants:
+            res = iac_model.predict(
+                source=v_img,
+                imgsz=iac_cfg.get("default_imgsz", 1024),
+                conf=0.05,
+                iou=iac_cfg.get("default_iou", 0.5),
+                retina_masks=True,
+                verbose=False,
+            )[0]
+            
+            score = float(res.boxes.conf.max()) if res.boxes is not None and len(res.boxes) > 0 else 0
+            # print(f"  [IAC] {name} score: {score:.4f}")
+            if score > best_score:
+                best_score = score
+                best_iac_res = res
+        
+        results['iac_res'] = best_iac_res if best_iac_res else iac_model.predict(img, verbose=False)[0]
+        results['iac_time'] = time.perf_counter() - t_iac
+        print(f"  [PERF][{self.device.upper()}] iac inference (ensemble): {results['iac_time']:.3f}s")
+        
+        return results

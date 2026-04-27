@@ -1,0 +1,34 @@
+{
+  "image": "C:\\interface\\gpts\\test_debug.png",
+  "weights": "C:\\interface\\gpts\\weights\\caries_det.pt",
+  "preset": "caries",
+  "device": "cpu",
+  "imgsz": 1024,
+  "conf": 0.05,
+  "alpha": 0.45,
+  "target_layer_index": 21,
+  "target_layer_name": "C2f",
+  "letterbox": {
+    "scale": 10.24,
+    "pad_left": 0,
+    "pad_top": 0,
+    "pad_right": 0,
+    "pad_bottom": 0
+  },
+  "cam": {
+    "target_class": 0,
+    "target_detection_index": 517,
+    "target_score": 0.00013781276356894523,
+    "num_classes": 1,
+    "num_candidates": 21504
+  },
+  "best_detection": null,
+  "saved_files": [
+    "input_original.png",
+    "detections.png",
+    "cam_gray.png",
+    "cam_overlay.png",
+    "cam_overlay_best_detection.png",
+    "meta.json"
+  ]
+}

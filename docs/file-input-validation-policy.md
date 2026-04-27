@@ -19,7 +19,7 @@ This policy exists to block:
 
 ### Raster uploads
 
-Allowed extensions:
+Allowed upload extensions:
 
 - `.jpg`
 - `.jpeg`
@@ -33,6 +33,11 @@ Allowed only when the payload:
 - Decodes as a real image
 - Looks like a grayscale dental x-ray
 - Matches a panoramic-style layout heuristic
+
+Notes:
+
+- Browser-side folder scans additionally allow `.tif` and `.tiff`
+- Extension alone is never trusted
 
 ### DICOM uploads
 
@@ -64,6 +69,7 @@ Current checks:
 - PNG must start with `89 50 4E 47`
 - BMP must start with `42 4D`
 - WEBP must contain `RIFF....WEBP`
+- TIFF must start with `II*\x00` or `MM\x00*` in browser folder scans
 - DICOM must either contain `DICM` at byte `128` or parse as DICOM header
 - Windows / ELF executable headers are rejected immediately
 
@@ -75,6 +81,17 @@ Every accepted upload must decode successfully as:
 - A readable DICOM object
 
 If decode fails, the file is rejected.
+
+### 2.5 Failed upload cleanup
+
+If a file is written to disk and later fails validation, it is deleted immediately.
+
+This applies to:
+
+- Raw binary upload handling
+- JSON base64 upload handling
+- Multipart form-data upload handling
+- Web report session upload handling
 
 ### 3. Dental x-ray heuristic
 
@@ -98,12 +115,44 @@ During `/api/dicom-server/studies` scan:
 
 Rejected files are returned in `rejected_files` for diagnostics.
 
+### 5. DICOM modality allowlist
+
+The system does not accept arbitrary DICOM objects.
+
+Current allowlist:
+
+- 2D dental-style modalities: `PX`, `DX`, `CR`, `IO`, `MG`, `OT`
+- Volume modalities: `CT`, `CBCT`
+
+Unsupported modalities are rejected before deeper processing.
+
+### 6. Web report upload parity
+
+`/api/web_report/session/<session_id>/upload` uses the same validation path as the main upload workflows.
+
+This means report-session uploads also receive:
+
+- Extension validation
+- Signature validation
+- Decode validation
+- DICOM modality checks
+- Raster heuristic checks
+
+### 7. Request throttling and resource protection
+
+Adjacent protections exist outside the file validator itself:
+
+- Legacy `v2` upload/analyze endpoints apply per-IP rate limiting
+- Async detection managers run behind queue/worker limits
+- Global Flask request size limits apply before routing
+
 ## Current Limitations
 
 - The raster check is heuristic and may still pass some non-panoramic grayscale images
 - We do not yet run a dedicated panorama classifier before every workflow
 - We do not yet surface `rejected_files` in the main UI
 - We do not yet enforce a strict SOP Class allowlist for DICOM objects
+- Rate limiting is currently centered on the legacy `v2` flow, not every API namespace
 
 ## Recommended Next Hardening Steps
 
@@ -111,8 +160,8 @@ Rejected files are returned in `rejected_files` for diagnostics.
 2. Add UI surface for rejected folder files and rejection reason
 3. Add file size / pixel count / frame count hard caps
 4. Add dedicated panorama-vs-non-panorama classifier
-5. Add separate policy by workflow:
-
+5. Expand rate limiting and abuse controls beyond the legacy `v2` flow
+6. Add separate policy by workflow:
 - 2D pano analysis
 - 3D CT / CBCT analysis
 - report-only upload

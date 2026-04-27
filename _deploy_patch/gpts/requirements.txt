@@ -1,0 +1,21 @@
+# Web Framework
+flask==3.0.0
+flask-cors==4.0.0
+
+# Deep Learning & Computer Vision
+# torch / torchvision are finalized by setup_backend.ps1 based on detected CUDA support.
+ultralytics==8.4.6
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python==4.8.1.78
+Pillow==10.1.0
+
+# Data Validation & Serialization
+pydantic==2.5.0
+
+# Utilities
+numpy==1.26.4
+python-dotenv==1.0.0
+
+# COCO Tools for RLE encoding/decoding
+pycocotools==2.0.7

@@ -28,6 +28,11 @@ function getStudyModality(study: ServerFolderStudy) {
   return study.modalities.length > 0 ? study.modalities.join(', ') : 'OT';
 }
 
+function getStudyDisplayModality(study: ServerFolderStudy) {
+  const modality = getStudyModality(study);
+  return modality ? `DICOM / ${modality}` : 'DICOM';
+}
+
 type EnrichedServerImage = ServerFolderImage & {
   linkedStudy: ServerFolderStudy | null;
   patientId: string;
@@ -240,7 +245,7 @@ export default function FolderLeaderVer2Page() {
       if (patientId && !study.patientId.toLowerCase().includes(patientId)) return false;
       if (patientName && !buildPatientLabel(study).toLowerCase().includes(patientName)) return false;
       if (studyDate && !study.studyDate.toLowerCase().includes(studyDate)) return false;
-      if (modality && !getStudyModality(study).toLowerCase().includes(modality)) return false;
+      if (modality && !getStudyDisplayModality(study).toLowerCase().includes(modality)) return false;
       if (sex && !study.patientSex.toLowerCase().includes(sex)) return false;
       if (description) {
         const descriptionHaystack = [study.description, study.label, ...study.series.map((series) => series.description)]
@@ -288,8 +293,8 @@ export default function FolderLeaderVer2Page() {
       const directStudy = studies.find((study) => study.id === image.linkedStudyId) || null;
       const match = directStudy ? { study: directStudy, seriesId: directStudy.series[0]?.id || null } : findBestStudyForImage(image, studies);
       const linkedStudy = match.study;
-      const imagePatientName = buildImagePatientName(image.name);
-      const imagePatientId = buildImagePseudoPatientId(image.relativePath);
+      const imagePatientName = image.patientName || linkedStudy?.patientName || buildImagePatientName(image.name);
+      const imagePatientId = image.patientId || linkedStudy?.patientId || buildImagePseudoPatientId(image.relativePath);
       return {
         ...image,
         linkedStudy,
@@ -348,8 +353,8 @@ export default function FolderLeaderVer2Page() {
       studyDate: study.studyDate || '-',
       description: study.description || study.label || '-',
       imageCount: study.totalFiles,
-      modality: getStudyModality(study),
-      comment: study.series[0]?.orientation || '-',
+      modality: getStudyDisplayModality(study),
+      comment: study.series[0]?.orientation || 'DICOM',
       study,
     }));
 
@@ -361,7 +366,7 @@ export default function FolderLeaderVer2Page() {
       studyDate: image.studyDate || '-',
       description: image.description || image.folderLabel || image.name || '-',
       imageCount: 1,
-      modality: image.modality || image.format || '-',
+      modality: image.isDicom ? 'DICOM' : image.modality || image.format || '-',
       comment: image.folderLabel || image.format || '-',
       image,
     }));
@@ -374,7 +379,9 @@ export default function FolderLeaderVer2Page() {
     () => mergedImages.find((image) => image.relativePath === selectedImageKey) || null,
     [mergedImages, selectedImageKey]
   );
-  const selectedImagePreviewUrl = selectedImage ? resolveServerAssetUrl(selectedImage.downloadUrl) : null;
+  const selectedImagePreviewUrl = selectedImage
+    ? resolveServerAssetUrl(selectedImage.previewUrl || selectedImage.downloadUrl)
+    : null;
   const hasSelection = activeSection === 'images' ? Boolean(selectedImage) : Boolean(selectedStudy || selectedImage);
 
   useEffect(() => {
@@ -452,22 +459,25 @@ export default function FolderLeaderVer2Page() {
         throw new Error(`Failed to load ${image.name}.`);
       }
       const blob = await response.blob();
+      const isDicomImage = Boolean(image.isDicom || /\.(dcm|dicom)$/i.test(image.name));
       const originalFile = new File([blob], image.name, {
-        type: blob.type || `image/${(image.format || 'png').toLowerCase()}`,
+        type: blob.type || (isDicomImage ? 'application/dicom' : `image/${(image.format || 'png').toLowerCase()}`),
         lastModified: Date.now(),
       });
+      const previewUrl = image.previewUrl ? resolveServerAssetUrl(image.previewUrl) : imageUrl;
 
       navigate('/renew', {
         state: {
-          previewUrl: imageUrl,
+          previewUrl,
           imageUrl,
           originalFile,
           originalFileName: image.name,
-          originalIsDicom: false,
+          originalIsDicom: isDicomImage,
           folderSource: 'server-image',
           imageRelativePath: image.relativePath,
           folderSelectedSeriesId: `server-image:${image.relativePath}`,
           userName: image.patientName || buildImagePatientName(image.name) || 'Patient',
+          dicomInfo: image.dicomInfo || null,
           linkedStudyId: image.linkedStudy?.id || null,
           linkedSeriesId: image.linkedSeriesId,
         },
@@ -691,7 +701,7 @@ export default function FolderLeaderVer2Page() {
               </label>
               <label>
                 <span>Modality</span>
-                <input value={modalityQuery} onChange={(event) => setModalityQuery(event.target.value)} placeholder="CT, CBCT" />
+                <input value={modalityQuery} onChange={(event) => setModalityQuery(event.target.value)} placeholder="DICOM, CT, CBCT" />
               </label>
               <label>
                 <span>Sex</span>
@@ -863,7 +873,7 @@ export default function FolderLeaderVer2Page() {
               <div>Date Created</div>
               <div>Description</div>
               <div>#Imgs</div>
-              <div>Modality</div>
+              <div>Type / Modality</div>
               <div>Comment</div>
             </div>
 
@@ -910,8 +920,8 @@ export default function FolderLeaderVer2Page() {
                       <div>{study.studyDate || '-'}</div>
                       <div className="folder-leader-v2-cell-description">{study.description || study.label}</div>
                       <div>{study.totalFiles}</div>
-                      <div>{getStudyModality(study)}</div>
-                      <div>{study.series[0]?.orientation || '-'}</div>
+                      <div>{entry.modality}</div>
+                      <div>{entry.comment}</div>
                     </button>
                   );
                 })
