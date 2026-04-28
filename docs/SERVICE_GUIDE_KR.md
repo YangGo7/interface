@@ -232,7 +232,7 @@ Confidence 기준:
 1. `Renew` 화면에서 Report 기능 진입
 2. 차트 결과 기반으로 `/api/web_report/from-chart` 호출
 3. 세션 생성 및 HTML/PDF 리포트 생성
-4. Report workspace 또는 report panel에서 미리보기 확인
+4. Dratf workspace 또는 Dratf panel에서 미리보기 확인
 
 리포트 포함 내용:
 

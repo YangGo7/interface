@@ -608,7 +608,7 @@ export function RenewReportWorkspacePanel({
                   opacity: sessionId ? (actionState === 'idle' ? 1 : 0.6) : 0.45,
                 }}
               >
-                {actionState === 'regenerating' ? 'Generating...' : 'New Version'}
+                {actionState === 'regenerating' ? 'Generating...' : 'New Draft'}
               </button>
             </div>
           </div>
@@ -782,7 +782,7 @@ export function RenewReportWorkspacePanel({
                   {reportNoteSaveState === 'saving'
                     ? 'Saving note...'
                     : reportNoteSaveState === 'saved'
-                      ? 'Saved to report draft.'
+                      ? 'Saved to report Draft.'
                       : reportNoteSaveState === 'error'
                         ? 'Failed to save note.'
                         : 'Blur the field to sync this note with the report draft.'}
@@ -792,7 +792,7 @@ export function RenewReportWorkspacePanel({
 
             <div style={{ background: cardBg, border: `1px solid ${panelBorder}` }}>
               <div style={{ padding: '12px 14px', borderBottom: `1px solid ${panelBorder}`, color: '#FFFFFF', fontSize: 13, fontWeight: 700 }}>
-                Version
+                Draft
               </div>
               <div style={{ padding: 14, display: 'grid', gap: 12 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
@@ -823,7 +823,7 @@ export function RenewReportWorkspacePanel({
                 </div>
 
                 <label style={{ display: 'grid', gap: 6 }}>
-                  <span style={{ color: '#9E9E9E', fontSize: 11 }}>Version Select</span>
+                  <span style={{ color: '#9E9E9E', fontSize: 11 }}>Draft Select</span>
                   <select
                     value={currentVersion ?? ''}
                     onChange={(event) => setSelectedVersion(Number(event.target.value || 0) || null)}
@@ -840,14 +840,14 @@ export function RenewReportWorkspacePanel({
                   >
                     {(versions.length ? versions : currentVersion ? [{ version: currentVersion, status: session?.report?.status || 'draft' }] : []).map((item) => (
                       <option key={item.version} value={item.version}>
-                        {`Version ${item.version}${item.status ? ` (${item.status})` : ''}`}
+                        {`draft ${item.version}${item.status ? ` (${item.status})` : ''}`}
                       </option>
                     ))}
                   </select>
                 </label>
 
                 <InfoRow label="Generated" value={formatTimestamp(selectedVersionInfo?.created_at || session?.report?.created_at)} />
-                <InfoRow label="Versions" value={String(versions.length || (currentVersion ? 1 : 0))} />
+                <InfoRow label="Draft" value={String(versions.length || (currentVersion ? 1 : 0))} />
                 <InfoRow label="Updated" value={formatTimestamp(session?.updated_at)} />
 
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

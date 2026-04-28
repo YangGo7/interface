@@ -905,7 +905,7 @@ export function WebReportDrawer({
               <div style={{ ...dockCardStyle, display: 'grid', gap: 12 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   <div>
-                    <div style={dockMutedLabelStyle}>Current Version</div>
+                    <div style={dockMutedLabelStyle}>Current draft</div>
                     <div style={{ color: '#E5E5E5', fontSize: 13 }}>{session?.report?.version ?? 1}</div>
                   </div>
                   <div>
@@ -985,7 +985,7 @@ export function WebReportDrawer({
 
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             <div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Current Version</p>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Current draft</p>
               <div className="mt-3 flex items-end gap-3">
                 <span className="text=[2rem] font-semibold tracking-[-0.04em] text-white">{session?.report?.version ?? 1}</span>
                 <span className="mb-1 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200">
@@ -1586,7 +1586,7 @@ export function WebReportDrawer({
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Document Info</p>
               <div className="mt-4 space-y-3 text-[15px] text-slate-200">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-400">Version</span>
+                  <span className="text-slate-400">draft</span>
                   <span>{session?.report?.version ?? 1}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">

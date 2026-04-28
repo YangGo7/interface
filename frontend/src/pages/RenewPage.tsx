@@ -4822,7 +4822,7 @@ export function RenewPage() {
           type="button"
           onClick={() => { void handleStartReport(); }}
           aria-pressed={workspaceSection === 'report' || reportDrawerOpen}
-          aria-label="Open report workspace"
+          aria-label="Open Dratf workspace"
           title="Report"
           style={{ width: wp(RAIL_ICON_WIDTH), height: hp(RAIL_ICON_HEIGHT), left: wp(16), top: hp(122), position: 'absolute', background: '#2D2D2D', padding: 0, cursor: 'pointer' }}
         >
@@ -5540,7 +5540,7 @@ export function RenewPage() {
               type="button"
               onClick={() => { void handleStartReport(); }}
               aria-pressed={isReportActive || reportDrawerOpen}
-              aria-label="Open report workspace"
+              aria-label="Open Dratf workspace"
               style={{
                 width: wp(77),
                 height: hp(77),

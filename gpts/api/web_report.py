@@ -624,7 +624,7 @@ def list_report_versions(session_id: str):
     session = session_service.get_session(session_id)
     if session is None:
         return jsonify({"success": False, "error": "Invalid session"}), 404
-    return jsonify({"success": True, "versions": session_service.list_report_versions(session_id)})
+    return jsonify({"success": True, "Draft": session_service.list_report_versions(session_id)})
 
 
 @web_report_api.route("/session/<session_id>/report/rollback", methods=["POST"])
