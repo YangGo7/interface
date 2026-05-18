@@ -88,12 +88,23 @@ powershell -ExecutionPolicy Bypass -File .\build_release.ps1 -Zip
 - 작은 수정이라도 문서 변경이 불필요하다고 판단한 경우, 최종 답변에 그 이유를 적는다.
 - 날짜가 들어가는 변경 로그는 실제 작업일 기준 `YYYY-MM-DD` 형식을 사용한다.
 
+## Daily 작업 정리
+
+평일 기준 매일 16:50 KST에 당일 수정, 개선, 변경, 개발 내용을 Markdown으로 정리한다.
+
+- 저장 위치는 `weekly dp` 폴더다.
+- 파일명은 `YYYY-MM-DD-daily.md` 형식을 사용한다.
+- 작성 내용에는 변경 요약, 기능 설명, 핵심 로직, 검증 결과, 문서 갱신, 다음 작업을 포함한다.
+- 코드 구조화, 최적화, 클린 코드 작업 전에는 직전 daily 문서와 Git 상태를 확인한다.
+- 해당 날짜에 변경이 없더라도 “변경 없음” 문서를 남겨 작업 기준 시점을 명확히 한다.
+- 평일 16:50에 직접 작성하지 못한 경우, 가장 가까운 작업 종료 시점에 작성하고 실제 작성 시각을 문서에 남긴다.
+
 ## 프론트엔드 기준
 
 - React + TypeScript + Vite 기준으로 작업한다.
 - `lucide-react` 아이콘이 이미 있으므로 버튼/툴바 아이콘은 우선 사용한다.
 - Cornerstone 관련 변경은 `frontend/src/viewer`와 `frontend/src/features/mpr`의 기존 패턴을 따른다.
-- 화면 라우팅은 `frontend/src/App.tsx`와 페이지 컴포넌트를 함께 확인한다.
+- 화면 라우팅은 `frontend/src/main.tsx`와 페이지 컴포넌트를 함께 확인한다.
 - 설정/서버 주소 관련 변경은 `frontend/src/lib/appSettings.ts`와 관련 API 클라이언트를 확인한다.
 - UI 텍스트가 버튼이나 패널 안에서 넘치지 않도록 모바일/데스크톱 폭을 고려한다.
 

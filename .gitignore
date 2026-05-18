@@ -26,6 +26,9 @@ fix_block*.py
 temp_*.py
 temp_*.txt
 
+# local daily work notes
+weekly dp/
+
 # post-processing outputs
 backend/utils/post_processing/
 
