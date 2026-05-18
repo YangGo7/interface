@@ -7,6 +7,26 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/@cornerstonejs/tools')) {
+            return 'cornerstone-tools';
+          }
+          if (id.includes('node_modules/@cornerstonejs/core')) {
+            return 'cornerstone-core';
+          }
+          if (
+            id.includes('node_modules/@cornerstonejs/dicom-image-loader') ||
+            id.includes('node_modules/@cornerstonejs/codec-')
+          ) {
+            return 'cornerstone-dicom';
+          }
+        },
+      },
+    },
+  },
   resolve: {
     alias: {
       '@cornerstonejs/codec-libjpeg-turbo-8bit/decodewasmjs': path.resolve(__dirname, 'node_modules/@cornerstonejs/codec-libjpeg-turbo-8bit/dist/libjpegturbowasm_decode.js'),

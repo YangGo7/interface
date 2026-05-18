@@ -12,7 +12,7 @@
 - 백엔드: `c:\interface\gpts\app.py`
 - 기본 포트: `http://localhost:5000`
 
-루트의 `api_main.py`는 예전 단일 Flask 실험 파일에 가깝고, 현재 웹 UI와 연결되는 메인 서버는 `gpts\app.py`다.
+예전 단일 Flask 실험 진입점은 제거되었고, 현재 웹 UI와 연결되는 메인 서버는 `gpts\app.py`다.
 
 ## 1. 권장 방식: 배포 패키지 만들기
 

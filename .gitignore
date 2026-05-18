@@ -18,6 +18,13 @@ backend/weights/
 # frontend build / local deps
 frontend/node_modules/
 frontend/dist/
+frontend/*.log
+frontend/temp_*.ts
+
+# transient local scripts / snippets
+fix_block*.py
+temp_*.py
+temp_*.txt
 
 # post-processing outputs
 backend/utils/post_processing/
